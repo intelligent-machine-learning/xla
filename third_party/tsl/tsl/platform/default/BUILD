@@ -82,28 +82,17 @@ cc_library(
         "nobuilder",
     ],
     deps = [
-        "//tsl/platform:env",
-        "//tsl/platform:errors",
+        "//tsl/platform:load_library",
         "//tsl/platform:logging",
         "//tsl/platform:path",
-        "//tsl/platform:status",
-        "//tsl/platform:statusor",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/synchronization",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_nccl//:nccl_config",
         "@local_config_rocm//rocm:rocm_headers",
         "@local_config_tensorrt//:tensorrt_headers",
-    ],
-)
-
-cc_library(
-    name = "dynamic_annotations",
-    hdrs = ["dynamic_annotations.h"],
-    tags = [
-        "manual",
-        "no_oss",
-        "nobuilder",
     ],
 )
 
@@ -240,8 +229,7 @@ cc_library(
         "nobuilder",
     ],
     deps = [
-        "//tsl/platform:errors",
-        "//tsl/platform:status",
+        "@com_google_absl//absl/status",
     ],
 )
 
@@ -269,7 +257,6 @@ cc_library(
 filegroup(
     name = "xla_cpu_runtime_srcs",
     srcs = [
-        "dynamic_annotations.h",
         "integral_types.h",
     ] + if_not_windows(["env_time.cc"]),
 )
@@ -312,20 +299,6 @@ cc_library(
         "//tsl/platform:strcat",
     ],
     alwayslink = True,
-)
-
-cc_library(
-    name = "notification",
-    hdrs = ["notification.h"],
-    tags = [
-        "manual",
-        "no_oss",
-        "nobuilder",
-    ],
-    deps = [
-        "//tsl/platform:mutex",
-        "//tsl/platform:types",
-    ],
 )
 
 cc_library(
@@ -386,24 +359,6 @@ cc_library(
     ],
     deps = [
         "//tsl/platform:stringpiece",
-    ],
-)
-
-cc_library(
-    name = "resource_loader",
-    testonly = 1,
-    srcs = ["resource_loader.cc"],
-    hdrs = ["//tsl/platform:resource_loader.h"],
-    tags = [
-        "manual",
-        "no_oss",
-        "nobuilder",
-    ],
-    deps = [
-        "//tsl/platform:logging",
-        "//tsl/platform:path",
-        "//tsl/platform:test",
-        "@bazel_tools//tools/cpp/runfiles",
     ],
 )
 
@@ -589,7 +544,6 @@ filegroup(
     srcs = [
         "casts.h",
         "context.h",
-        "dynamic_annotations.h",
         "env.cc",
         "integral_types.h",
         "load_library.cc",
@@ -616,7 +570,6 @@ filegroup(
         "error_logging.cc",
         "mutex.h",
         "mutex_data.h",
-        "notification.h",
         "unbounded_work_queue.cc",
         "unbounded_work_queue.h",
     ] + if_not_fuchsia([

@@ -20,11 +20,13 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "absl/strings/str_format.h"
 #include "xla/executable_run_options.h"
 #include "xla/ffi/api/c_api.h"
 #include "xla/ffi/call_frame.h"
 #include "xla/ffi/ffi_api.h"
+#include "xla/hlo/ir/hlo_computation.h"
 #include "xla/service/buffer_assignment.h"
 #include "xla/service/custom_call_status.h"
 #include "xla/service/custom_call_status_internal.h"
@@ -59,14 +61,16 @@ CustomCallThunk::CustomCallThunk(ThunkInfo thunk_info,
 CustomCallThunk::CustomCallThunk(ThunkInfo thunk_info, XLA_FFI_Handler* handler,
                                  std::vector<std::optional<Slice>> operands,
                                  std::vector<std::optional<Slice>> results,
-                                 AttributesMap attributes)
+                                 AttributesMap attributes,
+                                 const HloComputation* called_computation)
     : Thunk(Thunk::kCustomCall, thunk_info),
       operands_(std::move(operands)),
       results_(std::move(results)),
       handler_(std::move(handler)),
-      attributes_(std::move(attributes)) {}
+      attributes_(std::move(attributes)),
+      called_computation_(called_computation) {}
 
-Status CustomCallThunk::ExecuteCustomCall(const ExecuteParams& params) {
+absl::Status CustomCallThunk::ExecuteCustomCall(const ExecuteParams& params) {
   // gpu_stream is CUstream or e.g. the equivalent type in ROCm.
   std::vector<void*> buffers;
   buffers.reserve(operands_.size() + results_.size());
@@ -78,7 +82,7 @@ Status CustomCallThunk::ExecuteCustomCall(const ExecuteParams& params) {
       }
 
       if (!slice->slice.allocation())
-        return InternalError("custom call input missing buffer allocation");
+        return Internal("custom call input missing buffer allocation");
 
       buffers.push_back(
           params.buffer_allocations->GetDeviceAddress(slice->slice).opaque());
@@ -92,9 +96,9 @@ Status CustomCallThunk::ExecuteCustomCall(const ExecuteParams& params) {
                &custom_call_status);
   auto message = CustomCallStatusGetMessage(&custom_call_status);
   if (message) {
-    return InternalError("CustomCall failed: %s", *message);
+    return Internal("CustomCall failed: %s", *message);
   } else {
-    return OkStatus();
+    return absl::OkStatus();
   }
 #else   //  GOOGLE_CUDA || TENSORFLOW_USE_ROCM
   return Unavailable(
@@ -103,7 +107,7 @@ Status CustomCallThunk::ExecuteCustomCall(const ExecuteParams& params) {
 #endif  //   GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 }
 
-Status CustomCallThunk::ExecuteFfiHandler(const ExecuteParams& params) {
+absl::Status CustomCallThunk::ExecuteFfiHandler(const ExecuteParams& params) {
   // TODO(ezhulenev): This is not the most optimal approach, as we'll be doing
   // a lot of extra allocation on every call. We have to keep attributes
   // separate from arguments, as they do not change after thunk is constructed.
@@ -113,11 +117,11 @@ Status CustomCallThunk::ExecuteFfiHandler(const ExecuteParams& params) {
     for (const std::optional<Slice>& slice : slices) {
       // TODO(ezhulenev): Add a token argument type to XLA:FFI.
       if (!slice.has_value()) {
-        return InternalError("FFI handlers do not support tokens (yet)!");
+        return Internal("FFI handlers do not support tokens (yet)!");
       }
 
       if (!slice->slice.allocation())
-        return InternalError("custom call input missing buffer allocation");
+        return Internal("custom call input missing buffer allocation");
 
       builder.AddBufferArg(
           params.buffer_allocations->GetDeviceAddress(slice->slice),
@@ -137,11 +141,11 @@ Status CustomCallThunk::ExecuteFfiHandler(const ExecuteParams& params) {
   run_options.set_stream(params.stream);
   ServiceExecutableRunOptions service_run_options(run_options);
 
-  CallOptions options = {&service_run_options};
+  CallOptions options = {&service_run_options, called_computation_};
   return Call(handler_, call_frame, options);
 }
 
-Status CustomCallThunk::ExecuteOnStream(const ExecuteParams& params) {
+absl::Status CustomCallThunk::ExecuteOnStream(const ExecuteParams& params) {
   return handler_ ? ExecuteFfiHandler(params) : ExecuteCustomCall(params);
 }
 

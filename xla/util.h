@@ -21,6 +21,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -52,8 +53,8 @@ limitations under the License.
 #include "tsl/platform/bfloat16.h"
 #include "tsl/platform/casts.h"
 #include "tsl/platform/errors.h"  // IWYU pragma: keep
-#include "tsl/platform/float8.h"
 #include "tsl/platform/logging.h"
+#include "tsl/platform/ml_dtypes.h"
 #include "tsl/platform/threadpool.h"
 
 namespace xla {
@@ -211,64 +212,35 @@ void StridedCopy(D* dest, int64_t dest_stride, const S* src, int64_t src_stride,
 Status AddStatus(Status prior, absl::string_view context);
 Status AppendStatus(Status prior, absl::string_view context);
 
-// Status error shorthands -- StrFormat's the arguments to be used as an error
-// message and returns a status in the canonical error space.
-template <typename... Args>
-Status InvalidArgument(const absl::FormatSpec<Args...>& format,
-                       const Args&... args) {
-  return WithLogBacktrace(
-      tsl::errors::InvalidArgument(absl::StrFormat(format, args...)));
-}
-template <typename... Args>
-Status Unimplemented(const absl::FormatSpec<Args...>& format,
-                     const Args&... args) {
-  return WithLogBacktrace(
-      tsl::errors::Unimplemented(absl::StrFormat(format, args...)));
-}
 template <typename... Args>
 Status InternalError(const absl::FormatSpec<Args...>& format,
                      const Args&... args) {
   return WithLogBacktrace(
       tsl::errors::Internal(absl::StrFormat(format, args...)));
 }
-template <typename... Args>
-Status FailedPrecondition(const absl::FormatSpec<Args...>& format,
-                          const Args&... args) {
-  return WithLogBacktrace(
-      tsl::errors::FailedPrecondition(absl::StrFormat(format, args...)));
-}
-template <typename... Args>
-Status Cancelled(const absl::FormatSpec<Args...>& format, const Args&... args) {
-  return WithLogBacktrace(
-      tsl::errors::Cancelled(absl::StrFormat(format, args...)));
-}
-template <typename... Args>
-Status ResourceExhausted(const absl::FormatSpec<Args...>& format,
-                         const Args&... args) {
-  return WithLogBacktrace(
-      tsl::errors::ResourceExhausted(absl::StrFormat(format, args...)));
-}
-template <typename... Args>
-Status NotFound(const absl::FormatSpec<Args...>& format, const Args&... args) {
-  return WithLogBacktrace(
-      tsl::errors::NotFound(absl::StrFormat(format, args...)));
-}
-template <typename... Args>
-Status Unavailable(const absl::FormatSpec<Args...>& format,
-                   const Args&... args) {
-  return WithLogBacktrace(
-      tsl::errors::Unavailable(absl::StrFormat(format, args...)));
-}
-template <typename... Args>
-Status Unknown(const absl::FormatSpec<Args...>& format, const Args&... args) {
-  return WithLogBacktrace(
-      tsl::errors::Unknown(absl::StrFormat(format, args...)));
-}
-template <typename... Args>
-Status Internal(const absl::FormatSpec<Args...>& format, const Args&... args) {
-  return WithLogBacktrace(
-      tsl::errors::Internal(absl::StrFormat(format, args...)));
-}
+
+// This macro defines the arguments to be used as an error
+// message to be passed to absl::StrFormat, and returns a status in the
+// canonical error space.
+#define DEFINE_XLA_ERROR_WITH_STRFORMAT_WITH_BACKTRACE(error_type)  \
+  template <typename... Args>                                       \
+  Status error_type(const absl::FormatSpec<Args...>& format,        \
+                    const Args&... args) {                          \
+    return WithLogBacktrace(                                        \
+        tsl::errors::error_type(absl::StrFormat(format, args...))); \
+  }
+
+DEFINE_XLA_ERROR_WITH_STRFORMAT_WITH_BACKTRACE(InvalidArgument);
+DEFINE_XLA_ERROR_WITH_STRFORMAT_WITH_BACKTRACE(Unimplemented);
+DEFINE_XLA_ERROR_WITH_STRFORMAT_WITH_BACKTRACE(Internal);
+DEFINE_XLA_ERROR_WITH_STRFORMAT_WITH_BACKTRACE(FailedPrecondition);
+DEFINE_XLA_ERROR_WITH_STRFORMAT_WITH_BACKTRACE(Cancelled);
+DEFINE_XLA_ERROR_WITH_STRFORMAT_WITH_BACKTRACE(ResourceExhausted);
+DEFINE_XLA_ERROR_WITH_STRFORMAT_WITH_BACKTRACE(NotFound);
+DEFINE_XLA_ERROR_WITH_STRFORMAT_WITH_BACKTRACE(Unavailable);
+DEFINE_XLA_ERROR_WITH_STRFORMAT_WITH_BACKTRACE(Unknown);
+
+#undef DEFINE_XLA_ERROR_WITH_STRFORMAT_WITH_BACKTRACE
 
 template <typename... Args>
 Status InvalidArgumentStrCat(Args&&... concat) {
@@ -288,10 +260,29 @@ Status InternalErrorStrCat(Args&&... concat) {
 }
 
 template <typename... Args>
-Status ResourceExhaustedStrCat(Args&&... concat) {
-  return WithLogBacktrace(
-      tsl::errors::ResourceExhausted(std::forward<Args>(concat)...));
-}
+struct ResourceExhaustedStrCat {
+  Status status;
+#if defined(PLATFORM_GOOGLE)
+  // NOLINTNEXTLINE(google-explicit-constructor)
+  ResourceExhaustedStrCat(Args&&... concat, absl::SourceLocation loc =
+                                                absl::SourceLocation::current())
+      : status(WithLogBacktrace(
+            tsl::errors::ResourceExhausted(std::forward<Args>(concat)...)
+                .WithSourceLocation(loc))) {}
+#else
+  ResourceExhaustedStrCat(Args&&... concat)
+      : status(WithLogBacktrace(
+            tsl::errors::ResourceExhausted(std::forward<Args>(concat)...))) {}
+#endif
+
+  // NOLINTNEXTLINE(google-explicit-constructor)
+  operator Status() const { return status; }
+};
+
+// Deduction guide to make variadic arguments play nice with default
+// absl::SourceLocation argument.
+template <typename... Args>
+ResourceExhaustedStrCat(Args&&...) -> ResourceExhaustedStrCat<Args...>;
 
 // Splits the lines of the original, replaces leading whitespace with the prefix
 // given by "indentation", and returns the string joined by newlines again. As a
@@ -728,16 +719,6 @@ Status EraseElementFromVector(std::vector<T>* container, const T& value) {
   container->erase(it);
   return OkStatus();
 }
-
-// Utility function which splits a double-precision float (F64) into a pair of
-// single-precision floating point numbers. The most significant 49 bits (out of
-// the total 53 available) in the mantissa of the F64 is represented as the
-// unevaluated sum of two non-overlapping single-precision F32s; the 'high' part
-// contains 24 bits in its mantissa, and the 'low' part contains 25 bits in its
-// sign bit and its mantissa.
-// Note: The resulting representation can still only represent 8-bit exponent
-// range that is available in F32s (out of a total of 11 exponent bits in F64s).
-std::pair<float, float> SplitF64ToF32(double x);
 
 // Takes a sequence of unpacked int4 values, such that every byte stores one
 // int4 value in the low-order four bits, and packs them so every byte stores

@@ -43,6 +43,7 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_schedule.h"
 #include "xla/hlo/utils/hlo_query.h"
 #include "xla/service/buffer_value.h"
+#include "xla/service/collective_ops_utils.h"
 #include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/service/gpu/cublas_cudnn.h"
 #include "xla/service/gpu/gpu_schedule_postprocessing.h"
@@ -60,17 +61,13 @@ limitations under the License.
 #include "xla/util.h"
 #include "tsl/platform/env.h"
 #include "tsl/platform/errors.h"
+#include "tsl/platform/path.h"
 #include "tsl/platform/protobuf.h"
 
 namespace xla {
 namespace gpu {
 
 namespace {
-
-bool IsSyncCollective(const HloInstruction& instr) {
-  auto backend_config = instr.backend_config<CollectiveBackendConfig>().value();
-  return backend_config.is_sync();
-}
 
 bool IsNopInstruction(const HloInstruction& hlo) {
   HloOpcode op = hlo.opcode();
@@ -83,7 +80,7 @@ bool ShouldScheduleAsEarlyAsPossible(const HloInstruction& instr) {
   switch (instr.opcode()) {
     case HloOpcode::kAllReduceStart:
     case HloOpcode::kCollectivePermuteStart:
-      return !IsSyncCollective(instr);
+      return !IsSyncCollective(&instr);
     case HloOpcode::kCustomCall:
       return static_cast<const HloCustomCallInstruction&>(instr)
                  .custom_call_schedule() ==
@@ -208,7 +205,7 @@ HloInstructionSequence PostprocessorToScheduleSyncCollectives(
   auto is_synchronous_op = [](const HloInstruction* instr) {
     return hlo_query::IsAsyncCollectiveStartOp(instr->opcode(),
                                                /*include_send_recv=*/true) &&
-           IsSyncCollective(*instr);
+           IsSyncCollective(instr);
   };
   for (HloInstruction* instr : input.instructions()) {
     if (is_synchronous_op(instr)) {
@@ -227,7 +224,7 @@ HloInstructionSequence PostprocessorToScheduleSyncCollectives(
   return result;
 }
 
-StatusOr<HloSchedule> ScheduleGpuModuleWithMemoryScheduler(
+absl::StatusOr<HloSchedule> ScheduleGpuModuleWithMemoryScheduler(
     const HloModule* module, int64_t pointer_size) {
   return ScheduleModule(
       module,
@@ -293,14 +290,14 @@ class GpuAsyncTrackerBase : public AsyncTracker {
   bool IsSupportedAsyncDone(const HloInstruction& hlo) const override {
     return hlo_query::IsAsyncCollectiveDoneOp(hlo.opcode(),
                                               /*include_send_recv=*/true) &&
-           !IsSyncCollective(*hlo.operand(0));
+           !IsSyncCollective(hlo.operand(0));
   }
 
   // Returns if this is an Async op start that the scheduler supports.
   bool IsSupportedAsyncStart(const HloInstruction& hlo) const override {
     return hlo_query::IsAsyncCollectiveStartOp(hlo.opcode(),
                                                /*include_send_recv=*/true) &&
-           !IsSyncCollective(hlo);
+           !IsSyncCollective(&hlo);
   }
 };
 
@@ -543,16 +540,27 @@ std::optional<tensorflow::profiler::ProfiledInstructionsProto> ReadPGLEProfile(
                                          const std::string& text_path,
                                          const std::string& binary_path)
       -> std::optional<tensorflow::profiler::ProfiledInstructionsProto> {
-    Status s = tsl::ReadTextProto(env, text_path, &profile);
-    if (s.ok()) {
-      LOG(INFO) << "Using PGLE profile from " << text_path;
-      return GetProfileForFingerprint(profile, fingerprint);
+    if (env->FileExists(text_path).ok()) {
+      absl::Status s = tsl::ReadTextProto(env, text_path, &profile);
+      if (s.ok()) {
+        LOG(INFO) << "Using PGLE profile from " << text_path;
+        return GetProfileForFingerprint(profile, fingerprint);
+      } else {
+        LOG(ERROR) << "Unable to read PGLE text proto from " << text_path
+                   << ": " << s.message();
+      }
+      profile.Clear();
     }
-    profile.Clear();
-    s = tsl::ReadBinaryProto(env, binary_path, &profile);
-    if (s.ok()) {
-      LOG(INFO) << "Using PGLE profile from " << binary_path;
-      return GetProfileForFingerprint(profile, fingerprint);
+    if (env->FileExists(binary_path).ok()) {
+      absl::Status s = tsl::ReadBinaryProto(env, binary_path, &profile);
+      if (s.ok()) {
+        LOG(INFO) << "Using PGLE profile from " << binary_path;
+        return GetProfileForFingerprint(profile, fingerprint);
+      } else {
+        LOG(ERROR) << "Unable to read PGLE binary proto from " << binary_path
+                   << ": " << s.message();
+      }
+      profile.Clear();
     }
     return std::nullopt;
   };
@@ -567,14 +575,22 @@ std::optional<tensorflow::profiler::ProfiledInstructionsProto> ReadPGLEProfile(
   }
 
   // The pgle_profile_file_or_dir is a file. Attempt to read the profile as text
-  // proto or binary proto.
-  return read_text_or_binary_profile(pgle_profile_file_or_dir_path,
-                                     pgle_profile_file_or_dir_path);
+  // proto or binary proto. Attempt to infer the file type based on the
+  // extension.
+  auto extension = tsl::io::Extension(pgle_profile_file_or_dir_path);
+  if (extension == "pbtxt") {
+    return read_text_or_binary_profile(pgle_profile_file_or_dir_path, "");
+  } else if (extension == "pb") {
+    return read_text_or_binary_profile("", pgle_profile_file_or_dir_path);
+  } else {
+    return read_text_or_binary_profile(pgle_profile_file_or_dir_path,
+                                       pgle_profile_file_or_dir_path);
+  }
 }
 
 // Return true if the profile is applicable to the module. That is true if every
 // instruction in the profile is present in the module.
-Status IsProfileApplicable(
+absl::Status IsProfileApplicable(
     const HloModule* module,
     const tensorflow::profiler::ProfiledInstructionsProto& profile) {
   absl::flat_hash_set<absl::string_view> instruction_names;
@@ -601,7 +617,7 @@ Status IsProfileApplicable(
           "cost name %s not in module %s", latency.target(), module->name()));
     }
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 }  // end namespace
@@ -616,11 +632,11 @@ int64_t GetSizeOfShape(const Shape& shape, int pointer_size) {
   return size + metadata_size;
 }
 
-Status ScheduleGpuModule(HloModule* module, int64_t pointer_size,
-                         int64_t memory_limit,
-                         const se::DeviceDescription& gpu_device_info) {
+absl::Status ScheduleGpuModule(HloModule* module, int64_t pointer_size,
+                               int64_t memory_limit,
+                               const se::DeviceDescription& gpu_device_info) {
   if (module->has_schedule()) {
-    return OkStatus();
+    return absl::OkStatus();
   }
   HloPassPipeline prepare_pipeline("p2p-schedule-preparation");
   prepare_pipeline.AddPass<P2PSchedulePreparation>();
@@ -648,7 +664,7 @@ Status ScheduleGpuModule(HloModule* module, int64_t pointer_size,
           .xla_gpu_enable_latency_hiding_scheduler();
 
   if (!enable_latency_hiding_scheduler) {
-    return OkStatus();
+    return absl::OkStatus();
   }
 
   SchedulerConfig config = GetSchedulerConfig(memory_limit);
@@ -666,7 +682,7 @@ Status ScheduleGpuModule(HloModule* module, int64_t pointer_size,
     latency_estimator = std::make_unique<ProfileGuidedLatencyEstimator>(
         config, std::move(gpu_latency_estimator), profile.value());
     LOG(INFO) << "Found profile, using profile guided latency estimator";
-    Status s = IsProfileApplicable(module, profile.value());
+    absl::Status s = IsProfileApplicable(module, profile.value());
     if (!s.ok()) {
       LOG(INFO) << "PGLE profile may not applicable to the module, but will "
                    "still be used : "
@@ -709,7 +725,7 @@ Status ScheduleGpuModule(HloModule* module, int64_t pointer_size,
   postprocessing_pipeline.AddPass<GpuSchedulePostprocessing>();
   TF_RETURN_IF_ERROR(postprocessing_pipeline.Run(module).status());
 
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 HloInstructionSequence PostProcessSchedule(

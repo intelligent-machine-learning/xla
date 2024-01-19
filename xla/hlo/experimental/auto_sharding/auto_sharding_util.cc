@@ -49,9 +49,11 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/ir/hlo_schedule.h"
 #include "xla/hlo/ir/hlo_sharding.h"
+#include "xla/hlo/ir/ptrvec.h"
 #include "xla/hlo/utils/hlo_sharding_util.h"
 #include "xla/service/call_graph.h"
 #include "xla/service/sharding_propagation.h"
+#include "xla/service/while_loop_analysis.h"
 #include "xla/shape.h"
 #include "xla/shape_tree.h"
 #include "xla/shape_util.h"
@@ -68,12 +70,11 @@ inline HloInstruction* PassThroughCustomCallMarkerUser(
     HloInstruction* raw_user, const HloInstruction* inst);
 
 std::optional<HloSharding> GetInputSharding(const HloInstruction* ins,
-                                            const HloInstruction* operand,
                                             int64_t op_index,
                                             const HloSharding& output_sharding,
                                             const CallGraph& call_graph,
                                             int64_t num_devices) {
-  auto ins_clone = ins->Clone();
+  std::unique_ptr<HloInstruction> ins_clone = ins->Clone();
   ins_clone->set_sharding(output_sharding);
 
   std::vector<std::unique_ptr<HloInstruction>> operands;
@@ -95,9 +96,16 @@ std::optional<HloSharding> GetInputSharding(const HloInstruction* ins,
     operands.push_back(std::move(operand_clone));
   }
 
-  auto result = ShardingPropagation::GetShardingFromUser(
-      *ins_clone->operand(op_index), *ins_clone, 10, true, call_graph);
-  return result;
+  std::optional<HloSharding> inferred_sharding =
+      ShardingPropagation::GetShardingFromUser(
+          *ins_clone->operand(op_index), *ins_clone, 10, true, call_graph);
+
+  if (!inferred_sharding.has_value() && IsTopKCustomCall(ins)) {
+    // ShardingPropagation::GetShardingFromUser does not handle TopK custom
+    // calls. Mirroring that function's handling of kSort, we handle TopK below.
+    inferred_sharding = output_sharding;
+  }
+  return inferred_sharding;
 }
 
 // Return whether the instruction is an activation from another pipeline stage.
@@ -1604,11 +1612,9 @@ HloSharding Tile(const Shape& tensor_shape,
              : HloSharding::Tile(std::move(tile_assignment));
 }
 
-AliasMap BuildAliasMap(const HloModule* module) {
+AliasMap BuildAliasMap(const HloModule* module,
+                       const HloInputOutputAliasConfig& alias_config) {
   AliasMap alias_map;
-
-  const HloInputOutputAliasConfig& alias_config =
-      module->input_output_alias_config();
 
   HloComputation* entry = module->entry_computation();
   const auto& parameter_instructions = entry->parameter_instructions();
@@ -1670,13 +1676,11 @@ AliasMap BuildAliasMap(const HloModule* module) {
 }
 
 AliasSet BuildAliasSet(const HloModule* module,
+                       const HloInputOutputAliasConfig& alias_config,
                        const StrategyMap& strategy_map) {
-  // Adjust the edge cost for aliases (donated buffer).
-  // Typically, old weights and new weights are aliases, so we should
+  // We also look at alias_config to adjust the edge cost for aliases (donated
+  // buffer). Typically, old weights and new weights are aliases, so we should
   // let them have the same sharding spec.
-  const HloInputOutputAliasConfig& alias_config =
-      module->input_output_alias_config();
-
   HloComputation* entry = module->entry_computation();
   const auto& parameter_instructions = entry->parameter_instructions();
   const HloInstruction* output_tuple = entry->root_instruction();
@@ -1760,9 +1764,10 @@ AliasSet BuildAliasSet(const HloModule* module,
   return alias_set;
 }
 
-void CheckAliasSetCompatibility(const AliasSet& alias_set,
-                                const StrategyGroups& strategy_groups,
-                                const HloInstructionSequence& sequence) {
+Status CheckAliasSetCompatibility(const AliasSet& alias_set,
+                                  const StrategyGroups& strategy_groups,
+                                  const HloInstructionSequence& sequence,
+                                  bool crash_on_error) {
   const std::vector<HloInstruction*>& instructions = sequence.instructions();
   // Checks the compatibility
   for (const auto& pair : alias_set) {
@@ -1800,17 +1805,23 @@ void CheckAliasSetCompatibility(const AliasSet& alias_set,
           << src_strategy_group->ToString() << "\n"
           << dst_strategy_group->ToString();
     }
-    CHECK(compatible_cnt > 0)
-        << "Alias pair does not have any sharding strategy in common: "
-        << "(" << instructions.at(src_strategy_group->instruction_id)->name()
-        << ", " << instructions.at(dst_strategy_group->instruction_id)->name()
-        << ")"
-        << "\n"
-        << "(" << src_strategy_group->node_idx << ", "
-        << dst_strategy_group->node_idx << ")\n"
-        << src_strategy_group->ToString() << "\n"
-        << dst_strategy_group->ToString();
+    if (compatible_cnt <= 0) {
+      std::string err_msg = absl::StrCat(
+          "Alias pair does not have any sharding strategy in common: (",
+          instructions.at(src_strategy_group->instruction_id)->name(), ", ",
+          instructions.at(dst_strategy_group->instruction_id)->name(), ")\n(",
+          src_strategy_group->node_idx, ", ", dst_strategy_group->node_idx,
+          ")\n", src_strategy_group->ToString(), "\n",
+          dst_strategy_group->ToString());
+      if (crash_on_error) {
+        LOG(FATAL) << err_msg;
+      } else {
+        LOG(WARNING) << err_msg;
+        return absl::InternalError(err_msg);
+      }
+    }
   }
+  return OkStatus();
 }
 
 size_t VectorGreaterThanOneElementCount(absl::Span<const int64_t> span,
@@ -1930,7 +1941,7 @@ double ReshardingCostMixedMeshShape(
   return resharding_costs;
 }
 
-std::pair<Status, std::optional<HloSharding>>
+StatusOr<std::optional<HloSharding>>
 AdjustShardingWithPartialMeshShapePerElement(
     const HloSharding& sharding,
     const absl::flat_hash_set<int64_t>& valid_shards, int64_t total_num_devices,
@@ -1956,7 +1967,7 @@ AdjustShardingWithPartialMeshShapePerElement(
           LOG(FATAL) << err_msg;
         } else {
           LOG(WARNING) << err_msg;
-          return {absl::InternalError(err_msg), std::nullopt};
+          return absl::InternalError(err_msg);
         }
       }
     }
@@ -1969,7 +1980,7 @@ AdjustShardingWithPartialMeshShapePerElement(
       if (valid_shards.find(sharding.tile_assignment().dim(
               sharding.tile_assignment().num_dimensions() - 1)) !=
           valid_shards.end()) {
-        return {OkStatus(), HloSharding::Replicate()};
+        return HloSharding::Replicate();
       }
       // If replicate on other dimensions, remove the
       // replicate_on_last_tile
@@ -2015,10 +2026,9 @@ AdjustShardingWithPartialMeshShapePerElement(
     // Set arbitrary values because it will not be used.
     std::iota(device_ids.begin(), device_ids.end(), 0);
     tile_assignment.SetValues(device_ids);
-    HloSharding new_sharding = HloSharding::Tile(std::move(tile_assignment));
-    return {OkStatus(), new_sharding};
+    return HloSharding::Tile(std::move(tile_assignment));
   }
-  return {OkStatus(), std::nullopt};
+  return std::nullopt;
 }
 
 StatusOr<bool> AdjustShardingsWithPartialMeshShape(
@@ -2042,17 +2052,17 @@ StatusOr<bool> AdjustShardingsWithPartialMeshShape(
       for (size_t i = 0; i < inst->shape().tuple_shapes_size(); i++) {
         auto shape = inst->shape().tuple_shapes(i);
         auto sharding = inst->sharding().tuple_elements()[i];
-        std::pair<Status, std::optional<HloSharding>> new_sharding_result =
+        StatusOr<std::optional<HloSharding>> new_sharding_result =
             AdjustShardingWithPartialMeshShapePerElement(
                 sharding, valid_shards, total_num_devices, crash_on_error);
-        if (new_sharding_result.first.ok()) {
-          if (new_sharding_result.second.has_value()) {
-            output_flattened_shardings.push_back(*new_sharding_result.second);
+        if (new_sharding_result.ok()) {
+          if (new_sharding_result.value().has_value()) {
+            output_flattened_shardings.push_back(*new_sharding_result.value());
           } else {
             output_flattened_shardings.push_back(sharding);
           }
         } else {
-          return new_sharding_result.first;
+          return new_sharding_result.status();
         }
       }
       size_t i = 0;
@@ -2061,17 +2071,17 @@ StatusOr<bool> AdjustShardingsWithPartialMeshShape(
       }
       inst->set_sharding(HloSharding::Tuple(output_tuple_sharding));
     } else {
-      std::pair<Status, std::optional<HloSharding>> sharding_result =
+      StatusOr<std::optional<HloSharding>> sharding_result =
           AdjustShardingWithPartialMeshShapePerElement(
               inst->sharding(), valid_shards, total_num_devices,
               crash_on_error);
-      if (sharding_result.first.ok()) {
-        if (sharding_result.second.has_value()) {
-          inst->set_sharding(*sharding_result.second);
+      if (sharding_result.ok()) {
+        if (sharding_result.value().has_value()) {
+          inst->set_sharding(*sharding_result.value());
           changed = true;
         }
       } else {
-        return sharding_result.first;
+        return sharding_result.status();
       }
     }
   }
@@ -2130,50 +2140,56 @@ bool IsEntryComputationInputOrOutput(const HloModule* module,
 
 void ComputeInstructionExecutionCountsHelper(
     const HloComputation* computation, int64_t computation_execution_count,
-    int64_t loop_iteration_count_estimate,
-    absl::flat_hash_map<const HloInstruction*, int64_t>*
+    int64_t static_loop_iteration_count_estimate,
+    absl::flat_hash_map<const HloInstruction*, int64_t>&
         instruction_execution_counts) {
-  for (auto instruction : computation->instructions()) {
-    (*instruction_execution_counts)[instruction] = computation_execution_count;
+  for (const HloInstruction* instruction : computation->instructions()) {
+    (instruction_execution_counts)[instruction] = computation_execution_count;
     if (instruction->opcode() == HloOpcode::kWhile) {
+      int64_t loop_iteration_count = static_loop_iteration_count_estimate;
+      if (std::optional<int64_t> upper_bound =
+              ComputeWhileLoopTripCountUpperBound(instruction)) {
+        loop_iteration_count = *upper_bound;
+      }
       int64_t while_body_condition_execution_count =
-          computation_execution_count * loop_iteration_count_estimate;
+          computation_execution_count * loop_iteration_count;
       ComputeInstructionExecutionCountsHelper(
           instruction->while_body(),
-          /*computation_execution_count */
+          /* computation_execution_count */
           while_body_condition_execution_count,
-          /*loop_iteration_count_estimate*/ loop_iteration_count_estimate,
-          instruction_execution_counts);
+          /* loop_iteration_count_estimate */
+          static_loop_iteration_count_estimate, instruction_execution_counts);
       ComputeInstructionExecutionCountsHelper(
           instruction->while_condition(),
-          /*computation_execution_count */
+          /* computation_execution_count */
           while_body_condition_execution_count,
-          /*loop_iteration_count_estimate*/ loop_iteration_count_estimate,
-          instruction_execution_counts);
+          /* loop_iteration_count_estimate */
+          static_loop_iteration_count_estimate, instruction_execution_counts);
     } else if (instruction->opcode() == HloOpcode::kConditional) {
       // TODO(pratikf): For now, we do not scale down the execution counts of
       // branch statements, though we should at some point.
-      auto branch_computations = instruction->branch_computations();
+      PtrVec<HloComputation*> branch_computations =
+          instruction->branch_computations();
       for (size_t i = 0; i < branch_computations.size(); ++i) {
         ComputeInstructionExecutionCountsHelper(
             branch_computations[i],
-            /*computation_execution_count */
+            /* computation_execution_count */
             computation_execution_count,
-            /*loop_iteration_count_estimate*/ loop_iteration_count_estimate,
-            instruction_execution_counts);
+            /* loop_iteration_count_estimate */
+            static_loop_iteration_count_estimate, instruction_execution_counts);
       }
     }
   }
 }
 
 absl::flat_hash_map<const HloInstruction*, int64_t>
-ComputeInstructionExecutionCounts(const HloModule* module,
-                                  int64_t loop_iteration_count_estimate) {
+ComputeInstructionExecutionCounts(
+    const HloModule* module, int64_t static_loop_iteration_count_estimate) {
   absl::flat_hash_map<const HloInstruction*, int64_t>
       instruction_execution_counts;
   ComputeInstructionExecutionCountsHelper(module->entry_computation(), 1,
-                                          loop_iteration_count_estimate,
-                                          &instruction_execution_counts);
+                                          static_loop_iteration_count_estimate,
+                                          instruction_execution_counts);
   return instruction_execution_counts;
 }
 
@@ -2233,7 +2249,7 @@ std::vector<std::vector<int64_t>> InferMeshShapesToTry(
       for (const HloSharding& child : sharding.tuple_elements()) {
         process_sharding(child);
       }
-    } else if (!sharding.IsReplicated()) {
+    } else if (!sharding.IsReplicated() && !sharding.IsTileMaximal()) {
       absl::Span<const int64_t> dims = sharding.tile_assignment().dimensions();
       std::vector<int64_t> dims_greater_than_one;
       for (const int64_t dim : dims) {

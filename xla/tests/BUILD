@@ -57,6 +57,7 @@ cc_library(
     srcs = ["xla_internal_test_main.cc"],
     deps = [
         "//xla:debug_options_flags",
+        "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/strings",
         "@tsl//tsl/platform:logging",
         "@tsl//tsl/platform:test",
@@ -220,6 +221,7 @@ cc_library(
         "//xla/service:platform_util",
         "//xla/stream_executor",
         "@com_google_absl//absl/algorithm:container",
+        "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/types:span",
         "@tsl//tsl/lib/core:status_test_util",
         "@tsl//tsl/platform:logging",
@@ -285,8 +287,8 @@ cc_library(
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:span",
         "@tsl//tsl/lib/core:bitmap",
-        "@tsl//tsl/platform:float8",
         "@tsl//tsl/platform:logging",
+        "@tsl//tsl/platform:ml_dtypes",
         "@tsl//tsl/platform:test",
     ],
 )
@@ -336,6 +338,7 @@ cc_library(
         "@tsl//tsl/platform:path",
         "@tsl//tsl/platform:resource_loader",
         "@tsl//tsl/platform:subprocess",
+        "@tsl//tsl/platform:test",
     ],
 )
 
@@ -1070,7 +1073,7 @@ xla_test(
         "//xla/client:xla_builder",
         "//xla/client/lib:constants",
         "@tsl//tsl/lib/core:status_test_util",
-        "@tsl//tsl/platform:float8",
+        "@tsl//tsl/platform:ml_dtypes",
         "@tsl//tsl/platform:test",
     ],
 )
@@ -1874,6 +1877,7 @@ xla_test(
         "//xla/client:local_client",
         "//xla/client:xla_builder",
         "@com_google_absl//absl/types:span",
+        "@eigen_archive//:eigen3",
         "@tsl//tsl/platform:protobuf",
         "@tsl//tsl/platform:test",
     ],
@@ -1989,7 +1993,7 @@ xla_test(
         "//xla/stream_executor",
         "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/base",
-        "@tsl//tsl/platform:float8",
+        "@tsl//tsl/platform:ml_dtypes",
         "@tsl//tsl/platform:test",
     ],
 )
@@ -2147,7 +2151,7 @@ xla_test(
         "//xla/client:local_client",
         "//xla/client:xla_builder",
         "//xla/stream_executor",
-        "@tsl//tsl/platform:float8",
+        "@tsl//tsl/platform:ml_dtypes",
         "@tsl//tsl/platform:test",
     ],
 )
@@ -2349,7 +2353,7 @@ xla_test(
 
 xla_cc_test(
     name = "llvm_compiler_test",
-    srcs = if_gpu_is_configured(["llvm_compiler_test.cc"]),
+    srcs = ["llvm_compiler_test.cc"],
     local_defines = if_cuda_is_configured(["GOOGLE_CUDA=1"]) + if_rocm_is_configured([
         "TENSORFLOW_USE_ROCM",
     ]),
@@ -2794,7 +2798,7 @@ xla_test(
 xla_test(
     name = "cholesky_test",
     srcs = ["cholesky_test.cc"],
-    real_hardware_only = True,
+    shard_count = 10,
     tags = [
         "optonly",
     ],
@@ -2847,6 +2851,7 @@ xla_test(
         "cpu",
     ],
     copts = tsl_copts(),
+    tags = ["no_oss"],
     deps = [
         ":hlo_test_base",
         ":test_macros_header",
@@ -2856,5 +2861,57 @@ xla_test(
         "//xla:test",
         "//xla:test_helpers",
         "@tsl//tsl/platform:platform_port",
+    ],
+)
+
+xla_test(
+    name = "onednn_layer_norm_test",
+    srcs = ["onednn_layer_norm_test.cc"],
+    backends = [
+        "cpu",
+    ],
+    copts = tsl_copts(),
+    deps = [
+        ":hlo_test_base",
+        ":test_macros_header",
+        ":xla_internal_test_main",
+        "//xla:literal",
+        "//xla:shape_util",
+        "//xla:test",
+        "//xla:test_helpers",
+    ],
+)
+
+xla_test(
+    name = "onednn_softmax_test",
+    srcs = ["onednn_softmax_test.cc"],
+    backends = [
+        "cpu",
+    ],
+    copts = tsl_copts(),
+    deps = [
+        ":hlo_test_base",
+        ":test_macros_header",
+        ":xla_internal_test_main",
+        "//xla:literal",
+        "//xla:shape_util",
+        "//xla:test",
+        "//xla:test_helpers",
+    ],
+)
+
+xla_test(
+    name = "numerics_test",
+    srcs = ["numerics_test.cc"],
+    deps = [
+        ":hlo_test_base",
+        ":test_macros_header",
+        ":xla_internal_test_main",
+        "//xla:literal_util",
+        "//xla:statusor",
+        "//xla:test",
+        "//xla:types",
+        "//xla/hlo/ir:hlo",
+        "@tsl//tsl/platform:test",
     ],
 )

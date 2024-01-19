@@ -15,11 +15,13 @@ limitations under the License.
 
 #include "xla/stream_executor/kernel.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <utility>
 
+#include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/strings/strip.h"
 #include "xla/stream_executor/platform.h"
@@ -44,6 +46,10 @@ void KernelMetadata::set_registers_per_thread(int registers_per_thread) {
 void KernelMetadata::set_shared_memory_bytes(int shared_memory_bytes) {
   shared_memory_bytes_ = shared_memory_bytes;
 }
+
+//===----------------------------------------------------------------------===//
+// Kernel
+//===----------------------------------------------------------------------===//
 
 Kernel::Kernel(Kernel &&from)
     : parent_(from.parent_),
@@ -72,6 +78,12 @@ void Kernel::SetPreferredCacheConfig(KernelCacheConfig config) {
 
 KernelCacheConfig Kernel::GetPreferredCacheConfig() const {
   return implementation_->GetPreferredCacheConfig();
+}
+
+absl::StatusOr<int32_t> Kernel::GetMaxOccupiedBlocksPerCore(
+    ThreadDim threads, size_t dynamic_shared_memory_bytes) const {
+  return implementation_->GetMaxOccupiedBlocksPerCore(
+      threads, dynamic_shared_memory_bytes);
 }
 
 void Kernel::set_name(absl::string_view name) {

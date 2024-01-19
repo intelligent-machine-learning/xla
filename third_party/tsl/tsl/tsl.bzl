@@ -37,6 +37,11 @@ load(
     "if_tensorrt",
 )
 
+# buildifier: disable=out-of-order-load
+# Internally this loads a macro, but in OSS this is a function
+def register_extension_info(**kwargs):
+    pass
+
 two_gpu_tags = ["requires-gpu-nvidia:2", "notap", "manual", "no_pip"]
 
 def clean_dep(target):
@@ -186,6 +191,7 @@ def if_nccl(if_true, if_false = []):
     return select({
         clean_dep("//tsl:no_nccl_support"): if_false,
         clean_dep("//tsl:windows"): if_false,
+        clean_dep("//tsl:arm"): if_false,
         "//conditions:default": if_true,
     })
 
@@ -348,6 +354,8 @@ def tsl_gpu_library(deps = None, cuda_deps = None, copts = tsl_copts(), **kwargs
         copts = (copts + if_cuda(["-DGOOGLE_CUDA=1", "-DNV_CUDNN_DISABLE_EXCEPTION"]) + if_rocm(["-DTENSORFLOW_USE_ROCM=1"]) + if_xla_available(["-DTENSORFLOW_USE_XLA=1"]) + if_mkl(["-DINTEL_MKL=1"]) + if_enable_mkl(["-DENABLE_MKL"]) + if_tensorrt(["-DGOOGLE_TENSORRT=1"])),
         **kwargs
     )
+
+register_extension_info(extension = tsl_gpu_library, label_regex_for_dep = "{extension_name}")
 
 # Traverse the dependency graph along the "deps" attribute of the
 # target and return a struct with one field called 'tf_collected_deps'.
@@ -585,8 +593,6 @@ def tsl_pybind_extension_opensource(
     filegroup_name = "%s_filegroup" % name
     pyd_file = "%s%s.pyd" % (prefix, sname)
     exported_symbols = [
-        "init%s" % sname,
-        "init_%s" % sname,
         "PyInit_%s" % sname,
     ] + additional_exported_symbols
 

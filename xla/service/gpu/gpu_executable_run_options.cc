@@ -18,7 +18,8 @@ limitations under the License.
 #include <map>
 #include <optional>
 
-#include "absl/algorithm/container.h"
+#include "absl/status/statusor.h"
+#include "xla/service/gpu/nccl_clique_key.h"
 #include "xla/status_macros.h"
 
 namespace xla {
@@ -35,15 +36,15 @@ GpuExecutableRunOptions::gpu_global_device_ids() const {
   return gpu_global_device_ids_;
 }
 
-GpuExecutableRunOptions& GpuExecutableRunOptions::set_nccl_unique_id_callback(
-    NcclUniqueIdCallback nccl_unique_id_callback) {
-  nccl_unique_id_callback_ = std::move(nccl_unique_id_callback);
+GpuExecutableRunOptions& GpuExecutableRunOptions::set_nccl_clique_id_callback(
+    NcclCliqueIdCallback nccl_clique_id_callback) {
+  nccl_clique_id_callback_ = std::move(nccl_clique_id_callback);
   return *this;
 }
 
-const NcclUniqueIdCallback& GpuExecutableRunOptions::nccl_unique_id_callback()
+const NcclCliqueIdCallback& GpuExecutableRunOptions::nccl_clique_id_callback()
     const {
-  return nccl_unique_id_callback_;
+  return nccl_clique_id_callback_;
 }
 
 NcclExecuteParams::NcclExecuteParams(
@@ -57,13 +58,13 @@ NcclExecuteParams::NcclExecuteParams(
   gpu_global_device_ids = gpu_options && gpu_options->gpu_global_device_ids()
                               ? &*gpu_options->gpu_global_device_ids()
                               : nullptr;
-  nccl_unique_id_callback =
-      gpu_options && gpu_options->nccl_unique_id_callback()
-          ? &gpu_options->nccl_unique_id_callback()
+  nccl_clique_id_callback =
+      gpu_options && gpu_options->nccl_clique_id_callback()
+          ? &gpu_options->nccl_clique_id_callback()
           : nullptr;
 }
 
-StatusOr<GlobalDeviceId> NcclExecuteParams::GetGlobalDeviceId() const {
+absl::StatusOr<GlobalDeviceId> NcclExecuteParams::GetGlobalDeviceId() const {
   int64_t local_device_ordinal = stream_executor->device_ordinal();
   if (gpu_global_device_ids) {
     auto it = gpu_global_device_ids->find(local_device_ordinal);

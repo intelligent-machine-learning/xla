@@ -16,21 +16,30 @@ limitations under the License.
 #include "xla/service/gpu/all_reduce_blueconnect.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <iterator>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "absl/algorithm/container.h"
 #include "absl/container/btree_map.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/utils/hlo_query.h"
+#include "xla/service/computation_placer.h"
 #include "xla/service/hlo_creation_utils.h"
 #include "xla/shape_util.h"
 #include "xla/status_macros.h"
+#include "xla/statusor.h"
+#include "tsl/platform/errors.h"
+#include "tsl/platform/logging.h"
 
 namespace xla {
 namespace {
@@ -56,7 +65,7 @@ struct DecomposedReplicaGroups {
   std::vector<ReplicaGroup> new_all_reduce_groups;
 };
 
-StatusOr<std::optional<DecomposedReplicaGroups>> TryDecomposeReplicaGroup(
+absl::StatusOr<std::optional<DecomposedReplicaGroups>> TryDecomposeReplicaGroup(
     const ReplicaGroup& replica_group,
     const DeviceAssignment& device_assignment, size_t num_devices_per_host) {
   int group_size = replica_group.replica_ids_size();
@@ -107,8 +116,9 @@ StatusOr<std::optional<DecomposedReplicaGroups>> TryDecomposeReplicaGroup(
                                   std::move(new_all_reduce_groups)}};
 }
 
-StatusOr<std::optional<DecomposedReplicaGroups>> TryDecomposeReplicaGroups(
-    const HloAllReduceInstruction& all_reduce, size_t num_devices_per_host) {
+absl::StatusOr<std::optional<DecomposedReplicaGroups>>
+TryDecomposeReplicaGroups(const HloAllReduceInstruction& all_reduce,
+                          size_t num_devices_per_host) {
   const DeviceAssignment& device_assignment =
       all_reduce.GetModule()->config().static_device_assignment();
 
@@ -183,8 +193,8 @@ StatusOr<std::optional<DecomposedReplicaGroups>> TryDecomposeReplicaGroups(
 //
 // When applied repeatedly, this transformation will reproduce the same pattern
 // as described in the BlueConnect paper.
-StatusOr<bool> TryDecomposeAllReduce(HloAllReduceInstruction* all_reduce,
-                                     size_t num_devices_per_host) {
+absl::StatusOr<bool> TryDecomposeAllReduce(HloAllReduceInstruction* all_reduce,
+                                           size_t num_devices_per_host) {
   TF_RET_CHECK(all_reduce);
   TF_RET_CHECK(!all_reduce->has_sharding());
 
@@ -251,9 +261,22 @@ StatusOr<bool> TryDecomposeAllReduce(HloAllReduceInstruction* all_reduce,
     outputs[i] = computation.AddInstruction(HloInstruction::CreateBitcast(
         all_reduce->operand(i)->shape(), outputs[i]));
   }
+  HloInstruction* replacement = MaybeMakeTuple(outputs);
 
-  TF_RETURN_IF_ERROR(
-      computation.ReplaceInstruction(all_reduce, MaybeMakeTuple(outputs)));
+  // Preserve control dependencies. Control predecessors of all-reduce
+  // become control predecessors of the reduce-scatter, and control successors
+  // of all-reduce become control successors of the reduce-scatter
+  for (HloInstruction* control_predecessor :
+       all_reduce->control_predecessors()) {
+    TF_RETURN_IF_ERROR(
+        control_predecessor->AddControlDependencyTo(reduce_scatter));
+  }
+  for (HloInstruction* control_successor : all_reduce->control_successors()) {
+    TF_RETURN_IF_ERROR(replacement->AddControlDependencyTo(control_successor));
+  }
+
+  TF_RETURN_IF_ERROR(all_reduce->DropAllControlDeps());
+  TF_RETURN_IF_ERROR(computation.ReplaceInstruction(all_reduce, replacement));
 
   // Try to apply decomposition recursively.
   TF_RETURN_IF_ERROR(
@@ -265,7 +288,7 @@ StatusOr<bool> TryDecomposeAllReduce(HloAllReduceInstruction* all_reduce,
 
 }  // namespace
 
-StatusOr<bool> AllReduceBlueConnect::Run(
+absl::StatusOr<bool> AllReduceBlueConnect::Run(
     HloModule* module,
     const absl::flat_hash_set<absl::string_view>& execution_threads) {
   VLOG(1) << "Running AllReduceBlueConnect";

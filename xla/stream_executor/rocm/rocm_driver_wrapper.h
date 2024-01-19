@@ -79,6 +79,7 @@ namespace wrap {
   __macro(hipDeviceGetName)                         \
   __macro(hipDeviceGetPCIBusId)                     \
   __macro(hipDeviceGetSharedMemConfig)              \
+  __macro(hipDeviceGetStreamPriorityRange)          \
   __macro(hipDeviceGraphMemTrim)                    \
   __macro(hipDevicePrimaryCtxGetState)              \
   __macro(hipDevicePrimaryCtxSetFlags)              \
@@ -104,17 +105,25 @@ namespace wrap {
   __macro(hipGetErrorString)                        \
   __macro(hipGraphAddKernelNode)                    \
   __macro(hipGraphAddChildGraphNode)                \
+  __macro(hipGraphAddMemAllocNode)                  \
   __macro(hipGraphAddMemcpyNode)                    \
   __macro(hipGraphAddMemcpyNode1D)                  \
-  __macro(hipGraphExecChildGraphNodeSetParams)      \
+  __macro(hipGraphAddMemsetNode)                    \
+  __macro(hipGraphAddMemFreeNode)                   \
   __macro(hipGraphCreate)                           \
   __macro(hipGraphDebugDotPrint)                    \
   __macro(hipGraphDestroy)                          \
+  __macro(hipGraphExecChildGraphNodeSetParams)      \
   __macro(hipGraphExecDestroy)                      \
+  __macro(hipGraphExecKernelNodeSetParams)          \
+  __macro(hipGraphExecMemcpyNodeSetParams)          \
+  __macro(hipGraphExecMemsetNodeSetParams)          \
   __macro(hipGraphExecUpdate)                       \
   __macro(hipGraphInstantiate)                      \
+  __macro(hipGraphMemAllocNodeGetParams)            \
   __macro(hipGraphLaunch)                           \
   __macro(hipGraphNodeGetType)                      \
+  __macro(hipGraphNodeSetEnabled)                   \
   __macro(hipHostFree)                              \
   __macro(hipHostMalloc)                            \
   __macro(hipHostRegister)                          \
@@ -145,10 +154,12 @@ namespace wrap {
   __macro(hipModuleLaunchKernel)                    \
   __macro(hipModuleLoadData)                        \
   __macro(hipModuleUnload)                          \
+  __macro(hipModuleOccupancyMaxActiveBlocksPerMultiprocessor) \
+  __macro(hipModuleOccupancyMaxPotentialBlockSize)  \
   __macro(hipPointerGetAttribute)                   \
   __macro(hipPointerGetAttributes)                  \
+  __macro(hipRuntimeGetVersion)                     \
   __macro(hipSetDevice)                             \
-  __macro(hipDeviceGetStreamPriorityRange)          \
   __macro(hipStreamAddCallback)                     \
   __macro(hipStreamBeginCapture)                    \
   __macro(hipStreamCreateWithFlags)                 \

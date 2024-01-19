@@ -64,6 +64,7 @@ limitations under the License.
 #include "xla/mlir_hlo/lhlo_gpu/IR/lhlo_gpu_ops.h"
 #include "xla/service/backend.h"
 #include "xla/service/buffer_assignment.h"
+#include "xla/service/collective_ops_utils.h"
 #include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/service/gpu/cublas_cudnn.h"
 #include "xla/service/gpu/ir_emission_utils.h"
@@ -113,15 +114,10 @@ tsl::StatusOr<std::unique_ptr<HloModule>> HloModuleFromProto(
   return HloModule::CreateFromProto(module_proto, module_config);
 }
 
-bool IsSyncCollective(const HloInstruction* instr) {
-  auto backend_config =
-      instr->backend_config<xla::gpu::CollectiveBackendConfig>().value();
-  return backend_config.is_sync();
-}
-
 bool NoParallelCustomCallCollective(const HloInstruction* instr) {
-  auto backend_config =
-      instr->backend_config<xla::gpu::CollectiveBackendConfig>().value();
+  auto backend_config = instr->backend_config<xla::gpu::GpuBackendConfig>()
+                            .value()
+                            .collective_backend_config();
   return backend_config.no_parallel_custom_call();
 }
 
@@ -425,16 +421,28 @@ tsl::StatusOr<lmhlo::FusionOp> LhloDialectEmitter::EmitFusionOp(
 
   // The fusion op might not have a backend-config.  But we at least want to set
   // the fusion kind, because LMHLO doesn't have this concept.
-  TF_ASSIGN_OR_RETURN(auto backend_config,
-                      instr->backend_config<xla::gpu::FusionBackendConfig>());
+  TF_ASSIGN_OR_RETURN(auto gpu_config,
+                      instr->backend_config<xla::gpu::GpuBackendConfig>());
+  xla::gpu::FusionBackendConfig& backend_config =
+      *gpu_config.mutable_fusion_backend_config();
   if (backend_config.kind().empty() &&
       instr->opcode() == xla::HloOpcode::kFusion) {
     backend_config.set_kind(std::string(ToString(instr->fusion_kind())));
   }
 
   TF_ASSIGN_OR_RETURN(std::string backend_config_str,
-                      HloInstruction::BackendConfigToRawString(backend_config));
+                      HloInstruction::BackendConfigToRawString(gpu_config));
   fusion.setBackendConfigAttr(builder_.getStringAttr(backend_config_str));
+
+  // For custom fusion backend config we also attach serialized version of the
+  // attached HLO computation.
+  if (backend_config.kind() == "__custom_fusion") {
+    std::string computation_str;
+    fusion_instr->fused_instructions_computation()->ToProto().SerializeToString(
+        &computation_str);
+    fusion->setAttr("__custom_fusion_computation",
+                    builder_.getStringAttr(computation_str));
+  }
 
   // Fold GTE/Tuple pairs.
   //
@@ -801,9 +809,9 @@ AsLhloFusedMhaBackwardDagSignature(xla::gpu::CudnnfMHAKind kind) {
 tsl::StatusOr<Operation*> LhloDialectEmitter::EmitGemm(
     const HloCustomCallInstruction* custom_call) {
   TF_ASSIGN_OR_RETURN(
-      auto const config,
-      custom_call->backend_config<xla::gpu::GemmBackendConfig>());
-
+      auto const gpu_config,
+      custom_call->backend_config<xla::gpu::GpuBackendConfig>());
+  const xla::gpu::GemmBackendConfig& config = gpu_config.gemm_backend_config();
   if (custom_call->operand_count() == 2) {
     TF_RET_CHECK(config.beta() == 0.);
   } else if (custom_call->operand_count() != 3) {
@@ -824,9 +832,9 @@ tsl::StatusOr<Operation*> LhloDialectEmitter::EmitGemm(
 tsl::StatusOr<Operation*> LhloDialectEmitter::EmitCublasLtMatmul(
     const HloCustomCallInstruction* custom_call) {
   TF_ASSIGN_OR_RETURN(
-      auto const config,
-      custom_call->backend_config<xla::gpu::GemmBackendConfig>());
-
+      auto const gpu_config,
+      custom_call->backend_config<xla::gpu::GpuBackendConfig>());
+  const xla::gpu::GemmBackendConfig& config = gpu_config.gemm_backend_config();
   bool has_matrix_bias = config.beta() != 0.;
 
   TF_ASSIGN_OR_RETURN(
@@ -888,9 +896,9 @@ tsl::StatusOr<Operation*> LhloDialectEmitter::EmitCublasLtMatmul(
 tsl::StatusOr<Operation*> LhloDialectEmitter::EmitCublasLtMatmulF8(
     const HloCustomCallInstruction* custom_call) {
   TF_ASSIGN_OR_RETURN(
-      auto const config,
-      custom_call->backend_config<xla::gpu::GemmBackendConfig>());
-
+      auto const gpu_config,
+      custom_call->backend_config<xla::gpu::GpuBackendConfig>());
+  const xla::gpu::GemmBackendConfig& config = gpu_config.gemm_backend_config();
   int ops_num = custom_call->operand_count();
   TF_RET_CHECK(ops_num == 6 || ops_num == 7 || ops_num == 8);
   TF_ASSIGN_OR_RETURN(
@@ -981,9 +989,10 @@ static tsl::StatusOr<mlir::lmhlo_gpu::Activation> GetLHLOActivation(
 tsl::StatusOr<Operation*> LhloDialectEmitter::EmitDnnConvolution(
     const HloCustomCallInstruction* custom_call) {
   TF_ASSIGN_OR_RETURN(
-      auto const backend_config,
-      custom_call->backend_config<xla::gpu::CudnnConvBackendConfig>());
-
+      auto const gpu_backend_config,
+      custom_call->backend_config<xla::gpu::GpuBackendConfig>());
+  const xla::gpu::CudnnConvBackendConfig& backend_config =
+      gpu_backend_config.cudnn_conv_backend_config();
   TF_ASSIGN_OR_RETURN(const xla::gpu::CudnnConvKind kind,
                       xla::gpu::GetCudnnConvKind(custom_call));
 
@@ -1143,7 +1152,8 @@ LhloDialectEmitter::EmitDnnConvolutionReorderVectorized(
     // Output shape defines the filter, it must have NCHW_VECT_C layout.
     Shape shape = custom_call->shape();
     if (shape.IsTuple()) {
-      shape = shape.tuple_shapes(0);
+      // We explicitly create a copy here to avoid self-assignment issues
+      shape = Shape{shape.tuple_shapes(0)};
     }
 
     CHECK_EQ(shape.rank(), 5);
@@ -1173,9 +1183,10 @@ LhloDialectEmitter::EmitDnnConvolutionReorderVectorized(
 tsl::StatusOr<Operation*> LhloDialectEmitter::EmitDnnNorm(
     const HloCustomCallInstruction* custom_call) {
   TF_ASSIGN_OR_RETURN(
-      auto const backend_config,
-      custom_call->backend_config<xla::gpu::CudnnNormBackendConfig>());
-
+      auto const gpu_config,
+      custom_call->backend_config<xla::gpu::GpuBackendConfig>());
+  const xla::gpu::CudnnNormBackendConfig& backend_config =
+      gpu_config.cudnn_norm_backend_config();
   llvm::SmallVector<Value, 7> operands;
   TF_RETURN_IF_ERROR(GetOrCreateView(custom_call->operand(0), &operands));
   TF_RETURN_IF_ERROR(GetOrCreateView(custom_call->operand(1), &operands));
@@ -1225,9 +1236,10 @@ tsl::StatusOr<Operation*> LhloDialectEmitter::EmitDnnNorm(
 tsl::StatusOr<Operation*> LhloDialectEmitter::EmitDnnfMHA(
     const HloCustomCallInstruction* custom_call) {
   TF_ASSIGN_OR_RETURN(
-      auto const config,
-      custom_call->backend_config<xla::gpu::CudnnfMHABackendConfig>());
-
+      auto const gpu_config,
+      custom_call->backend_config<xla::gpu::GpuBackendConfig>());
+  const xla::gpu::CudnnfMHABackendConfig& config =
+      gpu_config.cudnn_fmha_backend_config();
   TF_ASSIGN_OR_RETURN(const xla::gpu::CudnnfMHAKind kind,
                       xla::gpu::GetCudnnfMHAKind(custom_call));
 
@@ -1375,9 +1387,10 @@ tsl::StatusOr<Operation*> LhloDialectEmitter::EmitDnnfMHA(
 tsl::StatusOr<Operation*> LhloDialectEmitter::EmitDnnfMHABackward(
     const HloCustomCallInstruction* custom_call) {
   TF_ASSIGN_OR_RETURN(
-      auto const config,
-      custom_call->backend_config<xla::gpu::CudnnfMHABackendConfig>());
-
+      auto const gpu_config,
+      custom_call->backend_config<xla::gpu::GpuBackendConfig>());
+  const xla::gpu::CudnnfMHABackendConfig& config =
+      gpu_config.cudnn_fmha_backend_config();
   TF_ASSIGN_OR_RETURN(const xla::gpu::CudnnfMHAKind kind,
                       xla::gpu::GetCudnnfMHAKind(custom_call));
 
@@ -1473,6 +1486,19 @@ tsl::StatusOr<Operation*> LhloDialectEmitter::EmitDnnfMHABackward(
       TF_RETURN_IF_ERROR(GetOrCreateView(custom_call, &operands));
       auto fmha_backward = CreateOpWithoutAttrs<lmhlo_gpu::fusedMHABackwardOp>(
           custom_call, operands);
+      return set_common_fmha_backward_attributes(fmha_backward);
+    }
+    case xla::gpu::CudnnfMHAKind::kBackwardSoftmaxDropout: {
+      // push fwd output for bwd here if it is flash attention
+      if (config.is_flash_attention()) {
+        TF_RETURN_IF_ERROR(GetOrCreateView(custom_call->operand(5), &operands));
+      }
+      TF_RETURN_IF_ERROR(GetOrCreateView(custom_call, &operands));
+      auto fmha_backward = CreateOpWithoutAttrs<lmhlo_gpu::fusedMHABackwardOp>(
+          custom_call, operands);
+      fmha_backward.setDropoutRateAttr(
+          builder_.getF64FloatAttr(config.dropout_rate()));
+      fmha_backward.setSeedAttr(builder_.getI64IntegerAttr(config.seed()));
       return set_common_fmha_backward_attributes(fmha_backward);
     }
     case xla::gpu::CudnnfMHAKind::kBackwardScaleBiasSoftmax: {

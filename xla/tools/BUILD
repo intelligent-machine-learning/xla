@@ -81,7 +81,6 @@ xla_cc_binary(
         "//xla:shape_util",
         "//xla:statusor",
         "//xla:types",
-        "//xla:xla_data_proto_cc",
         "//xla/client",
         "//xla/client:client_library",
         "//xla/client:local_client",
@@ -171,7 +170,6 @@ xla_cc_binary(
     deps = [
         "//xla:statusor",
         "//xla:types",
-        "//xla:xla_data_proto_cc",
         "//xla/client",
         "//xla/client:client_library",
         "//xla/client:local_client",
@@ -322,7 +320,9 @@ cc_library(
         "//xla/service:hlo_verifier",
         "//xla/service:rng_bit_generator_expander",
         "//xla/service:rng_expander",
+        "//xla/service:sharding_propagation",
         "//xla/service:triangular_solve_expander",
+        "//xla/service/spmd:stateful_rng_spmd_partitioner",
         "@tsl//tsl/util:command_line_flags",
     ],
 )
@@ -333,6 +333,7 @@ xla_cc_test(
     data = [
         "tests/cholesky.hlo",
         "tests/invalid_concat.hlo",
+        "tests/spmd.hlo",
         ":hlo-expand",
     ],
     tags = [
@@ -592,7 +593,6 @@ xla_cc_test(
         "//xla/service:despecializer",
         "//xla/service:hlo_verifier",
         "//xla/service/spmd:spmd_partitioner",
-        "//xla/tests:client_library_test_base",
         "//xla/tests:hlo_test_base",
         "//xla/tests:xla_internal_test_main",  # fixdeps: keep
         "@com_google_absl//absl/strings",

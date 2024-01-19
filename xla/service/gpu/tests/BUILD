@@ -17,6 +17,7 @@ load("@tsl//tsl:tsl.default.bzl", "filegroup")
 load(
     "@tsl//tsl/platform:build_config_root.bzl",
     "tf_cuda_tests_tags",
+    "tf_gpu_tests_tags",
 )
 load(
     "@tsl//tsl/platform/default:cuda_build_defs.bzl",
@@ -54,17 +55,12 @@ cc_library(
     deps = [
         "//xla:debug_options_flags",
         "//xla:shape_util",
-        "//xla:types",
         "//xla/service:gpu_plugin",
         "//xla/service/gpu:gpu_executable",
-        "//xla/stream_executor",
         "//xla/tests:filecheck",
         "//xla/tests:llvm_irgen_test_base",
         "//xla/tests:verified_hlo_module",
-        "@com_google_absl//absl/memory",
         "@com_google_absl//absl/strings",
-        "@tsl//tsl/platform:logging",
-        "@tsl//tsl/platform:test",
     ],
 )
 
@@ -73,7 +69,6 @@ xla_cc_test(
     srcs = ["element_wise_row_vectorization_test.cc"],
     tags = tf_cuda_tests_tags(),
     deps = [
-        ":gpu_codegen_test",
         "//xla:error_spec",
         "//xla/tests:hlo_test_base",
         "//xla/tests:xla_internal_test_main",
@@ -96,14 +91,12 @@ xla_cc_test(
     srcs = ["gpu_reduce_scatter_creator_test.cc"],
     deps = [
         "//xla:util",
-        "//xla:xla_data_proto_cc",
         "//xla/hlo/ir:hlo",
         "//xla/service:pattern_matcher",
         "//xla/service:pattern_matcher_gmock",
         "//xla/service/gpu:gpu_reduce_scatter_creator",
         "//xla/tests:hlo_test_base",
         "//xla/tests:xla_internal_test_main",
-        "@tsl//tsl/platform:test",
     ],
 )
 
@@ -139,9 +132,11 @@ xla_cc_test(
 
 xla_cc_test(
     name = "gemm_rewrite_test",
-    srcs = if_cuda_is_configured(["gemm_rewrite_test.cc"]) + if_rocm_is_configured(["gemm_rewrite_test.cc"]),
-    local_defines = if_cuda_is_configured(["GOOGLE_CUDA=1"]) + if_rocm_is_configured(["TENSORFLOW_USE_ROCM=1"]),
-    tags = tf_cuda_tests_tags(),
+    srcs = ["gemm_rewrite_test.cc"],
+    local_defines = if_cuda_is_configured(["GOOGLE_CUDA=1"]) + if_rocm_is_configured([
+        "TENSORFLOW_USE_ROCM=1",
+    ]),
+    tags = tf_gpu_tests_tags(),
     deps = [
         ":gpu_codegen_test",
         "//xla:statusor",
@@ -154,7 +149,9 @@ xla_cc_test(
         "//xla/service:pattern_matcher_gmock",
         "//xla/service/gpu:gemm_rewriter",
         "//xla/service/gpu:gpu_executable",
+        "//xla/service/gpu:variant_visitor",
         "//xla/tests:filecheck",
+        "@com_google_absl//absl/functional:any_invocable",
         "@com_google_absl//absl/strings",
         "@com_google_googletest//:gtest",
         "@tsl//tsl/lib/core:status_test_util",
@@ -168,12 +165,11 @@ xla_cc_test(
 
 xla_cc_test(
     name = "gemm_broadcast_folding_rewrite_test",
-    srcs = [
-        "gemm_broadcast_folding_rewrite_test.cc",
-    ],
-    tags = tf_cuda_tests_tags() + [
-        "no_rocm",
-    ],
+    srcs = ["gemm_broadcast_folding_rewrite_test.cc"],
+    local_defines = if_cuda_is_configured(["GOOGLE_CUDA=1"]) + if_rocm_is_configured([
+        "TENSORFLOW_USE_ROCM=1",
+    ]),
+    tags = tf_gpu_tests_tags(),
     deps = [
         ":gpu_codegen_test",
         "//xla:error_spec",
@@ -207,7 +203,6 @@ xla_cc_test(
         "reduction_degenerate_dim_remover_test.cc",
     ],
     deps = [
-        "//xla:debug_options_flags",
         "//xla:statusor",
         "//xla/hlo/ir:hlo",
         "//xla/service:hlo_module_config",
@@ -215,10 +210,7 @@ xla_cc_test(
         "//xla/service/gpu:reduction_degenerate_dim_remover",
         "//xla/tests:filecheck",
         "//xla/tests:hlo_test_base",
-        "//xla/tests:llvm_irgen_test_base",
-        "@com_google_absl//absl/memory",
         "@tsl//tsl/lib/core:status_test_util",
-        "@tsl//tsl/platform:logging",
         "@tsl//tsl/platform:test",
         "@tsl//tsl/platform:test_main",
     ],
@@ -231,19 +223,13 @@ xla_cc_test(
     ],
     tags = tf_cuda_tests_tags(),
     deps = [
-        "//xla:debug_options_flags",
-        "//xla:statusor",
         "//xla/hlo/ir:hlo",
         "//xla/service:gpu_plugin",
-        "//xla/service:hlo_module_config",
         "//xla/service:hlo_parser",
         "//xla/service/gpu:reduction_layout_normalizer",
         "//xla/tests:filecheck",
         "//xla/tests:hlo_test_base",
-        "//xla/tests:llvm_irgen_test_base",
-        "@com_google_absl//absl/memory",
         "@tsl//tsl/lib/core:status_test_util",
-        "@tsl//tsl/platform:logging",
         "@tsl//tsl/platform:test",
         "@tsl//tsl/platform:test_main",
     ],
@@ -255,7 +241,6 @@ xla_cc_test(
         "tree_reduction_rewriter_test.cc",
     ],
     deps = [
-        "//xla:debug_options_flags",
         "//xla:statusor",
         "//xla/hlo/ir:hlo",
         "//xla/service:hlo_module_config",
@@ -263,11 +248,8 @@ xla_cc_test(
         "//xla/service/gpu:tree_reduction_rewriter",
         "//xla/tests:filecheck",
         "//xla/tests:hlo_test_base",
-        "//xla/tests:llvm_irgen_test_base",
-        "@com_google_absl//absl/memory",
         "@com_google_absl//absl/strings",
         "@tsl//tsl/lib/core:status_test_util",
-        "@tsl//tsl/platform:logging",
         "@tsl//tsl/platform:test",
         "@tsl//tsl/platform:test_main",
     ],
@@ -281,19 +263,7 @@ xla_cc_test(
     tags = ["no_rocm"] + tf_cuda_tests_tags(),
     deps = [
         ":gpu_codegen_test",
-        "//xla:debug_options_flags",
-        "//xla:statusor",
-        "//xla/hlo/ir:hlo",
         "//xla/service:gpu_plugin",
-        "//xla/service:hlo_module_config",
-        "//xla/service:hlo_parser",
-        "//xla/service/gpu:gemm_rewriter",
-        "//xla/service/gpu:gpu_executable",
-        "//xla/tests:filecheck",
-        "//xla/tests:hlo_test_base",
-        "//xla/tests:llvm_irgen_test_base",
-        "@com_google_absl//absl/memory",
-        "@tsl//tsl/platform:logging",
         "@tsl//tsl/platform:test",
         "@tsl//tsl/platform:test_main",
     ],
@@ -307,21 +277,16 @@ xla_cc_test(
     tags = tf_cuda_tests_tags(),
     deps = [
         ":gpu_codegen_test",
-        "//xla:debug_options_flags",
         "//xla:statusor",
         "//xla/hlo/ir:hlo",
         "//xla/service:gpu_plugin",
         "//xla/service:hlo_module_config",
         "//xla/service:hlo_parser",
-        "//xla/service/gpu:gemm_rewriter",
         "//xla/service/gpu:gpu_executable",
         "//xla/tests:filecheck",
         "//xla/tests:hlo_test_base",
-        "//xla/tests:llvm_irgen_test_base",
-        "@com_google_absl//absl/memory",
         "@com_google_absl//absl/strings",
         "@tsl//tsl/lib/core:status_test_util",
-        "@tsl//tsl/platform:logging",
         "@tsl//tsl/platform:test",
         "@tsl//tsl/platform:test_main",
     ],
@@ -333,18 +298,12 @@ xla_cc_test(
         "reduction_dimension_grouper_test.cc",
     ],
     deps = [
-        "//xla:debug_options_flags",
-        "//xla:statusor",
         "//xla/hlo/ir:hlo",
-        "//xla/service:hlo_module_config",
         "//xla/service:hlo_parser",
         "//xla/service/gpu:reduction_dimension_grouper",
         "//xla/tests:filecheck",
         "//xla/tests:hlo_test_base",
-        "//xla/tests:llvm_irgen_test_base",
-        "@com_google_absl//absl/memory",
         "@tsl//tsl/lib/core:status_test_util",
-        "@tsl//tsl/platform:logging",
         "@tsl//tsl/platform:test",
         "@tsl//tsl/platform:test_main",
     ],
@@ -358,16 +317,9 @@ xla_cc_test(
     tags = tf_cuda_tests_tags(),
     deps = [
         ":gpu_codegen_test",
-        "//xla/hlo/ir:hlo",
         "//xla/service:gpu_plugin",
-        "//xla/service:hlo_module_config",
         "//xla/service:hlo_parser",
-        "//xla/service/gpu:gpu_executable",
         "//xla/tests:filecheck",
-        "//xla/tests:hlo_test_base",
-        "//xla/tests:llvm_irgen_test_base",
-        "@tsl//tsl/platform:logging",
-        "@tsl//tsl/platform:test",
         "@tsl//tsl/platform:test_main",
     ],
 )
@@ -394,10 +346,7 @@ xla_cc_test(
         ":gpu_codegen_test",
         "//xla:literal",
         "//xla:literal_util",
-        "//xla:util",
-        "//xla:xla_data_proto_cc",
         "//xla/hlo/ir:hlo",
-        "@com_google_absl//absl/memory",
         "@tsl//tsl/platform:test",
         "@tsl//tsl/platform:test_main",
     ],
@@ -449,14 +398,12 @@ xla_cc_test(
         ":gpu_codegen_test",
         "//xla:literal",
         "//xla:shape_util",
-        "//xla:util",
         "//xla:xla_data_proto_cc",
         "//xla:xla_proto_cc",
         "//xla/hlo/ir:hlo",
         "//xla/service:hlo_module_config",
         "//xla/service:hlo_parser",
         "//xla/tests:hlo_test_base",
-        "@com_google_absl//absl/memory",
         "@tsl//tsl/platform:test",
         "@tsl//tsl/platform:test_main",
     ],
@@ -467,11 +414,10 @@ xla_cc_test(
     srcs = ["infeed_test.cc"],
     tags = tf_cuda_tests_tags(),
     deps = [
-        ":gpu_codegen_test",
+        ":gpu_codegen_test",  # build_cleaner: keep
         "//xla:literal",
         "//xla:shape_util",
         "//xla:test_helpers",
-        "//xla:xla_data_proto_cc",
         "//xla/client:global_data",
         "//xla/client:local_client",
         "//xla/client:xla_builder",
@@ -479,7 +425,6 @@ xla_cc_test(
         "//xla/tests:client_library_test_base",
         "//xla/tests:literal_test_util",
         "@tsl//tsl/platform:env",
-        "@tsl//tsl/platform:logging",
         "@tsl//tsl/platform:test_main",
     ],
 )
@@ -497,9 +442,7 @@ xla_test(
     ],
     deps = [
         ":gpu_codegen_test",
-        "//xla/hlo/ir:hlo",
         "//xla/service:hlo_module_config",
-        "//xla/service:hlo_parser",
         "//xla/tests:hlo_test_base",
         "@com_google_absl//absl/strings",
         "@tsl//tsl/platform:test",
@@ -513,11 +456,7 @@ xla_cc_test(
     tags = tf_cuda_tests_tags(),
     deps = [
         ":gpu_codegen_test",
-        "//xla/hlo/ir:hlo",
-        "//xla/service:hlo_module_config",
-        "//xla/service:hlo_parser",
         "//xla/tests:hlo_test_base",
-        "@com_google_absl//absl/strings",
         "@tsl//tsl/platform:test",
         "@tsl//tsl/platform:test_main",
     ],
@@ -529,11 +468,7 @@ xla_cc_test(
     tags = tf_cuda_tests_tags(),
     deps = [
         ":gpu_codegen_test",
-        "//xla/hlo/ir:hlo",
-        "//xla/service:hlo_module_config",
-        "//xla/service:hlo_parser",
         "//xla/tests:hlo_test_base",
-        "@com_google_absl//absl/strings",
         "@tsl//tsl/platform:test",
         "@tsl//tsl/platform:test_main",
     ],
@@ -547,10 +482,8 @@ xla_cc_test(
         ":gpu_codegen_test",
         "//xla:literal",
         "//xla:shape_util",
-        "//xla:util",
         "//xla:xla_data_proto_cc",
         "//xla/hlo/ir:hlo",
-        "@com_google_absl//absl/memory",
         "@tsl//tsl/lib/core:status_test_util",
         "@tsl//tsl/platform:test",
         "@tsl//tsl/platform:test_main",
@@ -565,10 +498,8 @@ xla_cc_test(
         ":gpu_codegen_test",
         "//xla:literal",
         "//xla:shape_util",
-        "//xla:util",
         "//xla:xla_data_proto_cc",
         "//xla/hlo/ir:hlo",
-        "@com_google_absl//absl/memory",
         "@tsl//tsl/platform:test",
         "@tsl//tsl/platform:test_main",
     ],
@@ -599,8 +530,6 @@ xla_cc_test(
         "//xla/service/gpu:instruction_fusion",
         "//xla/service/gpu:multi_output_fusion",
         "//xla/stream_executor:device_description",
-        "//xla/tests:hlo_test_base",
-        "@tsl//tsl/platform:test",
         "@tsl//tsl/platform:test_main",
     ],
 )
@@ -612,7 +541,6 @@ xla_cc_test(
     deps = [
         ":gpu_codegen_test",
         "//xla/service:hlo_module_config",
-        "//xla/service:hlo_parser",
         "//xla/tests:hlo_test_base",
         "@tsl//tsl/platform:test",
         "@tsl//tsl/platform:test_main",
@@ -630,7 +558,6 @@ xla_cc_test(
         "//xla/service:gpu_plugin",
         "//xla/service/llvm_ir:alias_analysis",
         "//xla/tests:filecheck",
-        "//xla/tests:llvm_irgen_test_base",
         "@tsl//tsl/platform:test",
         "@tsl//tsl/platform:test_main",
     ],
@@ -654,7 +581,6 @@ xla_cc_test(
     tags = tf_cuda_tests_tags(),
     deps = [
         ":gpu_codegen_test",
-        "//xla/hlo/ir:hlo",
         "//xla/service:hlo_module_config",
         "//xla/service:hlo_parser",
         "//xla/tests:hlo_test_base",
@@ -748,6 +674,7 @@ xla_cc_binary(
         "//xla/stream_executor/host:host_platform",
         "//xla/tests:test_utils",
         "//xla/tools:hlo_module_loader",
+        "@com_google_absl//absl/status",
         "@llvm-project//llvm:Target",
         "@tsl//tsl/platform:logging",
         "@tsl//tsl/platform:platform_port",
@@ -757,11 +684,11 @@ xla_cc_binary(
         "//xla/service/gpu:nvptx_compiler_impl",
         "//xla/stream_executor/cuda:cublas_plugin",
     ]) + if_rocm_is_configured([
-        "//xla/stream_executor/rocm:rocm_platform_id",
+        "//xla/stream_executor/rocm:rocm_platform_id",  # build_cleaner: keep
         "//xla/stream_executor/rocm:rocblas_plugin",
         "//xla/stream_executor/rocm:rocm_helpers",
         "//xla/service/gpu:amdgpu_compiler_impl",
-        "@tsl//tsl/platform:rocm_rocdl_path",
+        "@tsl//tsl/platform:rocm_rocdl_path",  # build_cleaner: keep
     ]),
 )
 
@@ -814,8 +741,6 @@ xla_cc_test(
     deps = [
         ":gpu_codegen_test",
         "//xla/tests:hlo_test_base",
-        "@tsl//tsl/platform:logging",
-        "@tsl//tsl/platform:test",
         "@tsl//tsl/platform:test_main",
     ],
 )
@@ -827,8 +752,6 @@ xla_cc_test(
     deps = [
         ":gpu_codegen_test",
         "//xla/tests:hlo_test_base",
-        "@tsl//tsl/platform:logging",
-        "@tsl//tsl/platform:test",
         "@tsl//tsl/platform:test_main",
     ],
 )
@@ -877,7 +800,6 @@ xla_test(
         "gpu",
     ],
     deps = [
-        ":gpu_codegen_test",
         "//xla:error_spec",
         "//xla/tests:hlo_test_base",
         "@com_google_googletest//:gtest",
@@ -886,10 +808,15 @@ xla_test(
     ],
 )
 
-xla_cc_test(
+xla_test(
     name = "gpu_fused_mha_test",
     srcs = ["gpu_fused_mha_test.cc"],
-    tags = tf_cuda_tests_tags(),
+    backend_tags = {"gpu": [
+        "requires-gpu-sm80",
+    ]},
+    backends = [
+        "gpu",
+    ],
     deps = [
         ":gpu_codegen_test",
         "//xla:array4d",
@@ -914,10 +841,10 @@ xla_cc_test(
         "//xla/tests:test_macros_header",
         "//xla/tests:test_utils",
         "//xla/tests:xla_internal_test_main",
+        "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
         "@com_google_googletest//:gtest",
-        "@tsl//tsl/platform:logging",
         "@tsl//tsl/platform:test",
     ],
 )
@@ -994,6 +921,19 @@ xla_cc_test(
     deps = [
         ":gpu_codegen_test",
         "@tsl//tsl/platform:test",
+        "@tsl//tsl/platform:test_main",
+    ],
+)
+
+xla_cc_test(
+    name = "simplify_fp_conversions_test",
+    srcs = ["simplify_fp_conversions_test.cc"],
+    tags = tf_cuda_tests_tags(),
+    deps = [
+        "//xla:xla_proto_cc",
+        "//xla/service:gpu_plugin",
+        "//xla/tests:hlo_test_base",
+        "@com_google_googletest//:gtest",
         "@tsl//tsl/platform:test_main",
     ],
 )

@@ -34,7 +34,9 @@ limitations under the License.
 #include "absl/types/span.h"
 #include "xla/array.h"
 #include "xla/hlo/experimental/auto_sharding/auto_sharding_strategy.h"
+#include "xla/hlo/ir/hlo_input_output_alias_config.h"
 #include "xla/hlo/ir/hlo_instruction.h"
+#include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/ir/hlo_schedule.h"
 #include "xla/hlo/ir/hlo_sharding.h"
@@ -357,7 +359,6 @@ inline std::vector<int> Argsort(const std::vector<T>& scores) {
 // Given the sharding for an instruction, invoke the sharding propagation pass
 // to infer appropriate shardings for its operands.
 std::optional<HloSharding> GetInputSharding(const HloInstruction* ins,
-                                            const HloInstruction* operand,
                                             int64_t op_index,
                                             const HloSharding& output_sharding,
                                             const xla::CallGraph& call_graph,
@@ -557,9 +558,11 @@ HloSharding Tile(const Shape& tensor_shape,
                  absl::Span<const int64_t> mesh_dims,
                  const Array<int64_t>& device_mesh);
 
-AliasMap BuildAliasMap(const HloModule* module);
+AliasMap BuildAliasMap(const HloModule* module,
+                       const HloInputOutputAliasConfig& alias_config);
 
 AliasSet BuildAliasSet(const HloModule* module,
+                       const HloInputOutputAliasConfig& alias_config,
                        const StrategyMap& strategy_map);
 
 // Transpose an array of any number of dimensions given any axes order.

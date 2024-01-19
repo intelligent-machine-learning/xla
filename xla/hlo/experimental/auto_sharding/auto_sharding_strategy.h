@@ -160,6 +160,10 @@ struct StrategyGroup {
     absl::StrAppend(&str, indent, "node_idx: ", node_idx, "\n");
     absl::StrAppend(&str, indent, "instruction id: ", instruction_id, "\n");
     absl::StrAppend(&str, indent, "is_tuple: ", is_tuple, "\n");
+    if (tuple_element_idx.has_value()) {
+      absl::StrAppend(&str, indent,
+                      "index in producer inst.: ", *tuple_element_idx, "\n");
+    }
     if (following != nullptr) {
       absl::StrAppend(&str, indent,
                       "following instruction: ", following->instruction_id,
@@ -198,6 +202,8 @@ struct StrategyGroup {
 using LivenessSet = std::vector<std::vector<const HloValue*>>;
 // A liveness set using node indices instead of HLO values.
 using LivenessNodeSet = std::vector<std::vector<NodeIdx>>;
+// A liveness set using edge indices instead of HLO values.
+using LivenessEdgeSet = std::vector<std::vector<EdgeIdx>>;
 // Map an instruction to its strategy group.
 using StrategyMap =
     StableHashMap<const HloInstruction*, std::unique_ptr<StrategyGroup>>;

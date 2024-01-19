@@ -1077,7 +1077,7 @@ Status DynamicDimensionInferenceVisitor::PassThroughDynamicDimension(
         const Shape& subshape = ShapeUtil::GetSubshape(hlo->shape(), index);
         auto* element = dynamic_sizes.mutable_element(index);
         element->resize(subshape.rank(), nullptr);
-        element->at(dimension) = dynamic_size;
+        (*element)[dimension] = dynamic_size;
         return OkStatus();
       }));
   dynamic_sizes.ForEachElement([&](const ShapeIndex& index, const auto& sizes) {
@@ -1415,7 +1415,7 @@ Status DynamicDimensionInferenceVisitor::HandleReshape(
       SetDynamicSizes(hlo, {}, dynamic_sizes);
       return OkStatus();
     }
-    return InternalError(
+    return Internal(
         "Need inferred dimension to be set to "
         "flatten-unflatten pair. %s",
         hlo->ToString());
@@ -1655,7 +1655,7 @@ Status DynamicDimensionInferenceVisitor::HandleReduceWindow(
               auto* leaf_dynamic_sizes =
                   dynamic_sizes.mutable_element(reduce_window_result_index);
               leaf_dynamic_sizes->resize(subshape.rank(), nullptr);
-              leaf_dynamic_sizes->at(dimension) = dynamic_size;
+              (*leaf_dynamic_sizes)[dimension] = dynamic_size;
             });
 
         return OkStatus();
@@ -1844,7 +1844,7 @@ Status DynamicDimensionInferenceVisitor::HandleGather(HloInstruction* hlo) {
               }
               ++operand_dimension;
             }
-            return InternalError("Invalid instruction: %s", hlo->ToString());
+            return Internal("Invalid instruction: %s", hlo->ToString());
           }
           return Unimplemented(
               "Detects a dynamic dimension on the data input of gather, which "

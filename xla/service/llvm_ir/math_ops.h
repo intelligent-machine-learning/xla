@@ -23,8 +23,10 @@ namespace xla {
 namespace llvm_ir {
 
 // Emits an approximation of tanh. The implementation uses the same rational
-// interpolant as implemented in Eigen3.
-llvm::Value* EmitFastTanh(llvm::IRBuilder<>* b, llvm::Value* input);
+// interpolant as implemented in Eigen3. 'with_fma' should be set to true if FMA
+// instructions are available.
+llvm::Value* EmitFastTanh(llvm::IRBuilder<>* b, llvm::Value* input,
+                          bool with_fma = false);
 
 }  // namespace llvm_ir
 }  // namespace xla

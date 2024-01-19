@@ -127,23 +127,20 @@ Step 5: Update AllocationBlocks with the repacking placements
 #include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/functional/any_invocable.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_join.h"
 #include "absl/types/span.h"
 #include "xla/comparison_util.h"
-#include "xla/service/heap_simulator.h"
+#include "xla/service/heap_simulator/allocation_block.h"
+#include "xla/service/heap_simulator/heap_simulator.h"
 #include "xla/service/memory_space_assignment/repacking.h"
 #include "xla/statusor.h"
 #include "tsl/platform/logging.h"
+#include "tsl/platform/status.h"
 
 namespace xla {
 namespace {
-
-using AllocationBlock =
-    memory_space_assignment::MemorySpaceAssignmentRepacker::AllocationBlock;
-using Type = GlobalDecreasingSizeBestFitHeap<AllocationBlock>::Type;
-using SlicedAllocationData = memory_space_assignment::
-    MemorySpaceAssignmentRepacker::SlicedAllocationData;
-using Slice = memory_space_assignment::MemorySpaceAssignmentRepacker::Slice;
 
 bool IsSliced(const AllocationBlock* block) {
   return block->original_slice_data.has_value();
@@ -162,6 +159,14 @@ std::vector<const AllocationBlock*> SortAllocationBlocks(const T& container) {
       });
 
   return result;
+}
+
+const SlicedAllocationData* GetSlicedAllocationDataPointer(
+    const std::optional<SlicedAllocationData>& sliced_allocation_data) {
+  if (!sliced_allocation_data.has_value()) {
+    return nullptr;
+  }
+  return &(*sliced_allocation_data);
 }
 
 // A slice-aware best-fit repacker.
@@ -189,14 +194,17 @@ class BestFitRepacker
     for (AllocationBlock* allocation_block : allocation_blocks_) {
       // Check if any of the colocations are already added to buffer_intervals_.
       bool need_allocation = true;
-      auto aliased_it = absl::c_find_if(
-          allocation_block->colocations, [&](AllocationBlock* search) {
-            return full_buffer_interval_map_.contains(search);
-          });
-      if (aliased_it != allocation_block->colocations.end()) {
-        full_buffer_interval_map_[*aliased_it].colocations.push_back(
-            allocation_block);
-        need_allocation = false;
+      CHECK_NE(allocation_block->next_colocated, nullptr);
+      for (AllocationBlock* colocated = allocation_block->next_colocated;
+           colocated != allocation_block;
+           colocated = colocated->next_colocated) {
+        auto aliased_it = full_buffer_interval_map_.find(colocated);
+        if (aliased_it != full_buffer_interval_map_.end() &&
+            aliased_it->second.need_allocation) {
+          aliased_it->second.colocations.push_back(allocation_block);
+          need_allocation = false;
+          break;
+        }
       }
       full_buffer_interval_map_.insert(
           std::make_pair(allocation_block,
@@ -351,10 +359,10 @@ class BestFitRepacker
         new_offset = (new_offset == -1 ? chunk.offset
                                        : std::min(new_offset, chunk.offset));
         repacked_slice_data->slices_sorted_by_offset.push_back(
-            Slice({chunk.size, chunk.offset, start_time}));
+            AllocatedSlice({chunk.size, chunk.offset, start_time}));
       }
       absl::c_sort(repacked_slice_data->slices_sorted_by_offset,
-                   [](const Slice& lhs, const Slice& rhs) {
+                   [](const AllocatedSlice& lhs, const AllocatedSlice& rhs) {
                      return lhs.offset < rhs.offset;
                    });
     } else {
@@ -408,9 +416,14 @@ class BestFitRepacker
         SlicedBufferInterval& colocation_sliced_buffer_interval =
             sliced_buffer_interval_map_.at(colocation);
         SlicedAllocationFinder sliced_colocation_finder =
-            CreateSlicedAllocationFinder(colocation_sliced_buffer_interval,
-                                         max_colocation_size,
-                                         /*preferred_offset=*/-1);
+            CreateSlicedAllocationFinder(
+                colocation_sliced_buffer_interval, max_colocation_size,
+                /*preferred_offset=*/-1,
+                SliceTimePermutationIterator::Create(
+                    colocation_sliced_buffer_interval.num_slices(),
+                    GetSlicedAllocationDataPointer(
+                        colocation->original_slice_data)),
+                &SlicedAllocationFinder::AllOffsetsAllowed);
         sliced_buffer_map.insert(std::make_pair(
             colocation,
             SlicedColocationData{&colocation_sliced_buffer_interval,
@@ -444,6 +457,10 @@ class BestFitRepacker
     // Find chunks for allocation_block and its colocations.
     SlicedAllocationFinder finder = CreateSlicedAllocationFinder(
         sliced_buffer_interval, max_colocation_size, /*preferred_offset=*/-1,
+        SliceTimePermutationIterator::Create(
+            sliced_buffer_interval.num_slices(),
+            GetSlicedAllocationDataPointer(
+                allocation_block->original_slice_data)),
         is_offset_allowed);
     std::vector<Chunk> chunks = PostProcessFindChunkCandidatesResult(
         sliced_buffer_interval, finder.Find());
@@ -476,7 +493,7 @@ class BestFitRepacker
     LOG(FATAL) << "We should never get here.";
   }
 
-  Result Finish() override {
+  StatusOr<Result> Finish() override {
     std::vector<BufferInterval> sorted_buffer_intervals =
         GetSortedBufferIntervals();
 
@@ -519,7 +536,7 @@ class BestFitRepacker
         for (int i = 0;
              i < block->repacked_slice_data->slices_sorted_by_offset.size();
              ++i) {
-          const Slice& slice =
+          const AllocatedSlice& slice =
               block->repacked_slice_data->slices_sorted_by_offset[i];
           timed_chunks.push_back(
               TimedChunk{absl::StrCat(((int64_t)block), "_slice_", i), block,
@@ -552,7 +569,7 @@ class BestFitRepacker
   }
 
   bool Repack() {
-    Finish();
+    TF_CHECK_OK(Finish().status());
     bool success = result_.heap_size <= max_size_;
     if (!success) {
       VLOG(1) << "Repacking unsuccessful with heap size " << result_.heap_size;

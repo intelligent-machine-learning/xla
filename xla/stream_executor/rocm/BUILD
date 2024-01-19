@@ -5,6 +5,11 @@ load(
     "//xla/stream_executor:build_defs.bzl",
     "stream_executor_friends",
 )
+
+# copybara:comment_begin(oss-only)
+load("//xla/stream_executor/rocm:build_defs.bzl", "rocm_embedded_test_modules")
+
+# copybara:comment_end
 load(
     "@local_config_rocm//rocm:build_defs.bzl",
     "if_rocm_hipblaslt",
@@ -66,6 +71,30 @@ cc_library(
 )
 
 cc_library(
+    name = "rocm_runtime",
+    srcs = if_rocm_is_configured(["rocm_runtime.cc"]),
+    hdrs = if_rocm_is_configured([
+        "rocm_driver_wrapper.h",
+        "rocm_driver.h",
+    ]),
+    deps = if_rocm_is_configured([
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "//xla/stream_executor:stream_executor_headers",
+        "//xla/stream_executor:device_options",
+        "//xla/stream_executor/gpu:gpu_runtime_header",
+        "//xla/stream_executor/gpu:gpu_types_header",
+        "//xla/stream_executor/gpu:gpu_driver_header",
+        "//xla/stream_executor/platform",
+        "//xla/stream_executor/platform:dso_loader",
+        "@local_config_rocm//rocm:rocm_headers",
+        "@tsl//tsl/platform:statusor",
+    ]),
+)
+
+cc_library(
     name = "rocm_activation",
     srcs = [],
     hdrs = if_rocm_is_configured(["rocm_activation.h"]),
@@ -92,14 +121,15 @@ cc_library(
 )
 
 cc_library(
-    name = "rocm_gpu_executor",
-    srcs = if_rocm_is_configured(["rocm_gpu_executor.cc"]),
+    name = "rocm_executor",
+    srcs = if_rocm_is_configured(["rocm_executor.cc"]),
     deps = if_rocm_is_configured([
         ":rocm_diagnostics",
         ":rocm_driver",
         ":rocm_event",
         ":rocm_kernel",
         ":rocm_platform_id",
+        ":rocm_runtime",
         "@com_google_absl//absl/functional:any_invocable",
         "@com_google_absl//absl/strings",
         "//xla/stream_executor",
@@ -141,8 +171,9 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = if_rocm_is_configured([
         ":rocm_driver",
-        ":rocm_gpu_executor",
+        ":rocm_executor",
         ":rocm_platform_id",
+        ":rocm_runtime",
         "@com_google_absl//absl/base",
         "@com_google_absl//absl/memory",
         "//xla/stream_executor",  # buildcleaner: keep
@@ -178,7 +209,7 @@ cc_library(
     hdrs = if_rocm_is_configured(["rocblas_wrapper.h"]),
     deps = if_rocm_is_configured([
         ":rocblas_if_static",
-        ":rocm_gpu_executor",
+        ":rocm_executor",
         ":rocm_platform_id",
         "@local_config_rocm//rocm:rocm_headers",
         "//xla/stream_executor/platform",
@@ -198,7 +229,7 @@ cc_library(
         ":rocblas_if_static",
         ":rocblas_wrapper",
         ":hipblas_lt_header",
-        ":rocm_gpu_executor",
+        ":rocm_executor",
         ":rocm_platform_id",
         "@eigen_archive//:eigen3",
         "//xla/stream_executor",
@@ -285,7 +316,7 @@ cc_library(
         ":miopen_if_static",
         ":rocm_diagnostics",
         ":rocm_driver",
-        ":rocm_gpu_executor",
+        ":rocm_executor",
         ":rocm_platform_id",
         "@eigen_archive//:eigen3",
         "//xla/stream_executor",
@@ -342,7 +373,7 @@ cc_library(
     hdrs = if_rocm_is_configured(["hipsparse_wrapper.h"]),
     deps = if_rocm_is_configured([
         ":hipsparse_if_static",
-        ":rocm_gpu_executor",
+        ":rocm_executor",
         ":rocm_platform_id",
         "@local_config_rocm//rocm:rocm_headers",
         "//xla/stream_executor/platform",
@@ -371,7 +402,7 @@ cc_library(
     srcs = if_rocm_is_configured(["rocsolver_wrapper.h"]),
     hdrs = if_rocm_is_configured(["rocsolver_wrapper.h"]),
     deps = if_rocm_is_configured([
-        ":rocm_gpu_executor",
+        ":rocm_executor",
         ":rocm_platform_id",
         ":rocsolver_if_static",
         "@local_config_rocm//rocm:rocm_headers",
@@ -401,7 +432,7 @@ cc_library(
     srcs = if_rocm_is_configured(["hipsolver_wrapper.h"]),
     hdrs = if_rocm_is_configured(["hipsolver_wrapper.h"]),
     deps = if_rocm_is_configured([
-        ":rocm_gpu_executor",
+        ":rocm_executor",
         ":rocm_platform_id",
         ":hipsolver_if_static",
         "@local_config_rocm//rocm:rocm_headers",
@@ -420,7 +451,7 @@ cc_library(
 )
 
 cc_library(
-    name = "hipblaslt_plugin",
+    name = "amdhipblaslt_plugin",
     srcs = if_rocm_is_configured(["hip_blas_lt.cc"]),
     hdrs = if_rocm_is_configured([
         "hip_blas_lt.h",
@@ -428,7 +459,7 @@ cc_library(
         "hip_blas_utils.h",
     ]),
     deps = if_rocm_is_configured([
-        ":rocm_gpu_executor",
+        ":rocm_executor",
         ":rocm_platform_id",
         ":rocblas_plugin",
         ":hip_blas_utils",
@@ -502,7 +533,7 @@ cc_library(
     srcs = if_rocm_is_configured(["roctracer_wrapper.h"]),
     hdrs = if_rocm_is_configured(["roctracer_wrapper.h"]),
     deps = if_rocm_is_configured([
-        ":rocm_gpu_executor",
+        ":rocm_executor",
         ":rocm_platform_id",
         ":roctracer_if_static",
         "@local_config_rocm//rocm:rocm_headers",
@@ -533,7 +564,7 @@ cc_library(
         ":rocm_driver",
         ":rocm_platform",
         ":rocm_helpers",
-        ":hipblaslt_plugin",
+        ":amdhipblaslt_plugin",
     ]),
     alwayslink = 1,
 )
@@ -558,3 +589,10 @@ cc_library(
         [":all_runtime"],
     ),
 )
+
+# copybara:comment_begin(oss-only)
+rocm_embedded_test_modules(
+    name = "add_i32_kernel",
+    srcs = if_rocm_is_configured(["add_i32_kernel.cu.cc"]),
+)
+# copybara:comment_end

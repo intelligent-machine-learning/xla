@@ -1799,7 +1799,7 @@ StatusOr<bool> RewriteDynamicReshape(
       continue;
     }
     if (input_dims.size() > 1 && output_dims.size() > 1) {
-      return InternalError(
+      return Internal(
           "Should be handled by decomposing reshape into "
           "flatten-unflatten pair. %s",
           reshape->ToString());
@@ -2220,7 +2220,7 @@ StatusOr<bool> DynamicPadder::Run(
   // their called computation to only take static tensors.
   for (auto it = computations.rbegin(); it != computations.rend(); ++it) {
     HloComputation* computation = *it;
-    if (!call_graph->Dominates(module->entry_computation(), computation)) {
+    if (!call_graph->CanReach(module->entry_computation(), computation)) {
       continue;
     }
     // if slice_dynamic_output_ is set and this is entry computation, we need
@@ -2242,7 +2242,7 @@ StatusOr<bool> DynamicPadder::Run(
   }
 
   for (auto* computation : module->computations(execution_threads)) {
-    if (!call_graph->Dominates(module->entry_computation(), computation)) {
+    if (!call_graph->CanReach(module->entry_computation(), computation)) {
       continue;
     }
     for (auto instruction : computation->MakeInstructionPostOrder()) {
@@ -2253,7 +2253,7 @@ StatusOr<bool> DynamicPadder::Run(
   }
 
   for (auto* computation : module->computations(execution_threads)) {
-    if (!call_graph->Dominates(module->entry_computation(), computation)) {
+    if (!call_graph->CanReach(module->entry_computation(), computation)) {
       continue;
     }
     for (auto instruction : computation->MakeInstructionPostOrder()) {

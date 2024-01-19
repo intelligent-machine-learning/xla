@@ -116,9 +116,6 @@ struct AutoShardingOption {
   // is divided by this number.
   int grad_acc_num_micro_batches = 1;
 
-  // If true, load solution vector from PassContext
-  bool load_solution_vector = false;
-
   // If true, N-D sharding (e.g., N maybe be 2 or 3) will be solved in N
   // iterations, where one iteration chooses one tensor dimension to shard. If
   // false, solve N-D sharding directly, i.e., generating all possible sharding
@@ -161,8 +158,7 @@ struct AutoShardingOption {
   // element models the communication performance along each mesh dimension.
   std::vector<double> device_mesh_alpha;
   std::vector<double> device_mesh_beta;
-  // Load the strategy vector instead of solving one.
-  bool load_strategy = false;
+
   // Explore other mesh shapes with the same number of devices as the provided
   // one for a potentially better auto-sharding solution.
   bool try_multiple_mesh_shapes = false;
@@ -172,7 +168,10 @@ struct AutoShardingOption {
   // sharding_propagation.cc.
   int64_t solver_timeout_in_seconds = 3600;
 
-  // Static estimate for iteration count of a while loop, used in the cost model
+  // Static estimate for iteration count of a while loop, used in the cost
+  // model. This estimate is used when we cannot infer an upper bound on the
+  // number of iterations in the loop (as implemented in
+  // third_party/tensorflow/compiler/xla/service/while_loop_analysis.h)
   int64_t loop_iteration_count_estimate = 100;
 
   // Allows the conversion of aliases to followers if their pairwise strategy
@@ -180,7 +179,6 @@ struct AutoShardingOption {
   // smaller Mixed ILP).
   bool allow_alias_to_follower_conversion = true;
 
-  std::vector<int64_t> strategy_vector;
   // If greater than zero, tensors with size smaller than or equal to this limit
   // will always be replicated if they don't have a different user-specified
   // sharding.

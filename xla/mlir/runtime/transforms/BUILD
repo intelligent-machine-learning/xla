@@ -72,7 +72,6 @@ cc_library(
     compatible_with = get_compatible_with_portable(),
     deps = [
         "//xla/mlir/runtime/ir:rt",
-        "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Transforms",
     ],
@@ -85,7 +84,6 @@ xla_cc_test(
     deps = [
         ":calling_convention",
         "//xla/mlir/runtime/ir:rt",
-        "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:MemRefDialect",
         "@llvm-project//mlir:Transforms",
@@ -99,6 +97,12 @@ cc_library(
     srcs = ["compilation_pipeline_cpu.cc"],
     hdrs = ["compilation_pipeline_cpu.h"],
     compatible_with = get_compatible_with_portable(),
+    local_defines = select({
+        "//xla/service/cpu:experimental_mlir_gpu_enabled": [
+            "EXPERIMENTAL_MLIR_GPU=1",
+        ],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
     deps = [
         ":compilation_pipeline_options",
@@ -125,8 +129,6 @@ cc_library(
         "@llvm-project//mlir:ControlFlowDialect",
         "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:FuncExtensions",
-        "@llvm-project//mlir:GPUToGPURuntimeTransforms",
-        "@llvm-project//mlir:GPUTransforms",
         "@llvm-project//mlir:LLVMToLLVMIRTranslation",
         "@llvm-project//mlir:LinalgDialect",
         "@llvm-project//mlir:LinalgTransforms",
@@ -141,7 +143,14 @@ cc_library(
         "@llvm-project//mlir:SparseTensorDialect",
         "@llvm-project//mlir:Transforms",
         "@llvm-project//mlir:X86VectorToLLVMIRTranslation",
-    ],
+        "@tsl//tsl/platform:logging",
+    ] + select({
+        "//xla/service/cpu:experimental_mlir_gpu_enabled": [
+            "@llvm-project//mlir:GPUToGPURuntimeTransforms",
+            "@llvm-project//mlir:GPUTransforms",
+        ],
+        "//conditions:default": [],
+    }),
     alwayslink = 1,  # has pipeline registration
 )
 
@@ -169,12 +178,10 @@ cc_library(
         "@llvm-project//mlir:ControlFlowDialect",
         "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:FuncToLLVM",
-        "@llvm-project//mlir:IR",
         "@llvm-project//mlir:LLVMToLLVMIRTranslation",
         "@llvm-project//mlir:MemRefDialect",
         "@llvm-project//mlir:MemRefToLLVM",
         "@llvm-project//mlir:MemRefTransforms",
-        "@llvm-project//mlir:Pass",
         "@llvm-project//mlir:ReconcileUnrealizedCasts",
         "@llvm-project//mlir:SCFDialect",
         "@llvm-project//mlir:SCFToControlFlow",
@@ -234,6 +241,7 @@ cc_library(
         "//xla/runtime:constraints",
         "//xla/runtime:executable",
         "//xla/runtime:symbolic_shape",
+        "//xla/service/llvm_ir:llvm_util",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@llvm-project//llvm:Analysis",
@@ -275,15 +283,12 @@ cc_library(
         "//xla/mlir/runtime/utils:constraints",
         "//xla/runtime:arguments",
         "//xla/runtime:constraints",
-        "//xla/runtime:errors",
         "//xla/runtime:symbolic_shape",
-        "//xla/runtime:types",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:ArithDialect",
-        "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:FunctionInterfaces",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Support",
@@ -315,7 +320,6 @@ xla_cc_test(
     compatible_with = get_compatible_with_portable(),
     deps = [
         ":type_converter",
-        "//xla/runtime:types",
         "@llvm-project//mlir:IR",
         "@tsl//tsl/platform:test",
         "@tsl//tsl/platform:test_main",

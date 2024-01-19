@@ -25,6 +25,7 @@ limitations under the License.
 #include "xla/literal.h"
 #include "xla/literal_util.h"
 #include "xla/service/global_device_id.h"
+#include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/service/pattern_matcher.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
@@ -369,6 +370,11 @@ StatusOr<std::vector<GlobalDeviceId>> GetParticipatingDevices(
                       device_assignment.LogicalIdForDevice(device_id));
   int current_replica_id = logical_id.replica_id;
   int current_partition_id = logical_id.computation_id;
+  TF_RET_CHECK(0 <= current_replica_id && current_replica_id < replica_count)
+      << current_replica_id << " " << replica_count;
+  TF_RET_CHECK(0 <= current_partition_id &&
+               current_partition_id < partition_count)
+      << current_partition_id << " " << partition_count;
 
   std::vector<GlobalDeviceId> participants;
   switch (group_mode) {
@@ -384,6 +390,8 @@ StatusOr<std::vector<GlobalDeviceId>> GetParticipatingDevices(
       // partition.
       participants.reserve(participating_replicas.size());
       for (int replica_id : participating_replicas) {
+        TF_RET_CHECK(0 <= replica_id && replica_id < replica_count)
+            << replica_id << " " << replica_count;
         participants.emplace_back(
             device_assignment(replica_id, current_partition_id));
       }
@@ -398,6 +406,8 @@ StatusOr<std::vector<GlobalDeviceId>> GetParticipatingDevices(
                                               partition_count, replica_groups));
       participants.reserve(participating_partitions.size());
       for (int partition_id : participating_partitions) {
+        TF_RET_CHECK(0 <= partition_id && partition_id < partition_count)
+            << partition_id << " " << partition_count;
         participants.emplace_back(
             device_assignment(current_replica_id, partition_id));
       }
@@ -412,6 +422,8 @@ StatusOr<std::vector<GlobalDeviceId>> GetParticipatingDevices(
                                               replica_groups));
       participants.reserve(participating_replicas.size() * partition_count);
       for (int replica_id : participating_replicas) {
+        TF_RET_CHECK(0 <= replica_id && replica_id < replica_count)
+            << replica_id << " " << replica_count;
         for (int partition_id = 0; partition_id < partition_count;
              ++partition_id) {
           participants.emplace_back(
@@ -441,6 +453,8 @@ StatusOr<std::vector<GlobalDeviceId>> GetParticipatingDevices(
       for (int flattened_id : participating_flattened_ids) {
         // Map from flattened id back to replica_id, partition_id.
         int replica_id = flattened_id / partition_count;
+        TF_RET_CHECK(0 <= replica_id && replica_id < replica_count)
+            << replica_id << " " << replica_count;
         int partition_id = flattened_id % partition_count;
         participants.emplace_back(device_assignment(replica_id, partition_id));
       }
@@ -570,6 +584,14 @@ bool IsCollective(const HloInstruction* instruction) {
     default:
       return false;
   }
+}
+
+bool IsSyncCollective(const HloInstruction* instr) {
+  auto backend_config = instr->backend_config<xla::gpu::GpuBackendConfig>();
+  if (!backend_config.ok()) {
+    return false;
+  }
+  return backend_config->collective_backend_config().is_sync();
 }
 
 }  // end namespace xla

@@ -15,17 +15,18 @@ limitations under the License.
 
 #include "xla/service/gpu/nccl_recv_thunk.h"
 
+#include <cstdint>
 #include <optional>
 #include <string>
-#include <utility>
 #include <vector>
 
+#include "absl/status/status.h"
+#include "absl/strings/string_view.h"
 #include "xla/mlir_hlo/lhlo/IR/lhlo_ops.h"
 #include "xla/service/collective_ops_utils.h"
-
-#if XLA_ENABLE_XCCL
-#include "xla/stream_executor/gpu/gpu_stream.h"
-#endif
+#include "xla/service/gpu/nccl_api.h"
+#include "xla/stream_executor/stream.h"
+#include "tsl/platform/errors.h"
 
 namespace xla {
 namespace gpu {
@@ -39,7 +40,7 @@ NcclP2PConfig GetNcclP2PConfig(RecvOp op, int64_t replica_count,
   return GetNcclP2PConfigForSendRecv(op, replica_count, partition_count);
 }
 
-Status CheckImplementable(RecvOp op) {
+absl::Status CheckImplementable(RecvOp op) {
   TF_RETURN_IF_ERROR(NcclCollectiveThunk::CheckImplementable());
   return IsValidOperand(op.getOutputs()[0], Thunk::kNcclSend);
 }
@@ -58,9 +59,8 @@ NcclRecvThunk::NcclRecvThunk(ThunkInfo thunk_info, RecvOp op,
   return impl::GetNcclP2PConfig(op, replica_count, partition_count);
 }
 
-/*static*/ Status NcclRecvThunk::CheckImplementable(RecvOp op,
-                                                    int64_t replica_count,
-                                                    int64_t partition_count) {
+/*static*/ absl::Status NcclRecvThunk::CheckImplementable(
+    RecvOp op, int64_t replica_count, int64_t partition_count) {
   return AddOpDescription<NcclRecvThunk>(impl::CheckImplementable(op), op,
                                          replica_count, partition_count);
 }
@@ -69,8 +69,9 @@ NcclRecvThunk::NcclRecvThunk(ThunkInfo thunk_info, RecvOp op,
   return GetGroupModeForSendRecv(op);
 }
 
-Status NcclRecvThunk::RunNcclCollective(const ExecuteParams& params,
-                                        se::Stream& stream, ncclComm_t comm) {
+absl::Status NcclRecvThunk::RunNcclCollective(const ExecuteParams& params,
+                                              se::Stream& stream,
+                                              ncclComm_t comm) {
   TF_ASSIGN_OR_RETURN(
       std::vector<DeviceBufferPair> device_buffers,
       ConvertToDeviceBuffers(params, {buffer_},
@@ -101,10 +102,10 @@ Status NcclRecvThunk::RunNcclCollective(const ExecuteParams& params,
                              device_string, current_id);
 }
 
-Status RunRecv(NcclP2PConfig::SourceTargetMapEntry source_target,
-               DeviceBufferPair& buffer, se::Stream& stream, ncclComm_t comm,
-               absl::string_view device_string, int64_t current_id) {
-#if XLA_ENABLE_XCCL
+absl::Status RunRecv(NcclP2PConfig::SourceTargetMapEntry source_target,
+                     DeviceBufferPair& buffer, se::Stream& stream,
+                     ncclComm_t comm, absl::string_view device_string,
+                     int64_t current_id) {
   // Determine the source IDs for this instance. The source ID is the ID for
   // the peer that will copy its data to this instance. If there is no source,
   // just memzero() the destination buffer.
@@ -118,23 +119,13 @@ Status RunRecv(NcclP2PConfig::SourceTargetMapEntry source_target,
   VLOG(3) << absl::StreamFormat("%s : id = %d, source_id = %d", device_string,
                                 current_id, source_id.value_or(-1));
 
-  TF_ASSIGN_OR_RETURN(auto dtype_and_multiplier,
-                      ToNcclDataTypeAndCountMultiplier(
-                          buffer.element_type, Thunk::kNcclCollectivePermute));
-  ncclDataType_t dtype = dtype_and_multiplier.first;
-  int64_t element_count = buffer.element_count * dtype_and_multiplier.second;
-
-  se::gpu::GpuStreamHandle gpu_stream = se::gpu::AsGpuStreamValue(&stream);
-
   // Receive data from the source peer to the destination buffer.
+  // TODO(wbmc)
   // if (source_id) {
-  VLOG(3) << absl::StreamFormat(
-      "%s : Calling ncclRecv(recvbuff=%p, count=%d, peer=%d comm=%p, "
-      "stream=%p)",
-      device_string, dest_addr.opaque(), element_count, *source_id,
-      static_cast<const void*>(comm), gpu_stream);
-  XLA_CUDA_RETURN_IF_ERROR(ncclRecv(dest_addr.opaque(), element_count, dtype,
-                                    *source_id, comm, gpu_stream));
+  TF_RETURN_IF_ERROR(NcclApi::Recv(
+      dest_addr, buffer.element_type, buffer.element_count, *source_id,
+      reinterpret_cast<NcclApi::NcclCommHandle>(comm), &stream));
+
   // } else {
   //   // If there is no source peer, i.e. no sender to this instance, zero out
   //   // the destination buffer.
@@ -142,12 +133,7 @@ Status RunRecv(NcclP2PConfig::SourceTargetMapEntry source_target,
   //                                 device_string);
   //   stream.ThenMemZero(&dest_addr, dest_addr.size());
   // }
-  return OkStatus();
-#else   // XLA_ENABLE_XCCL
-  return Unimplemented(
-      "NCCL support is not available: this binary was not built with a CUDA "
-      "compiler, which is necessary to build the NCCL source library.");
-#endif  // XLA_ENABLE_XCCL
+  return absl::OkStatus();
 }
 
 }  // namespace gpu

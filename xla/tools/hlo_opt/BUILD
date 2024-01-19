@@ -3,12 +3,15 @@ load(
     "//xla/stream_executor:build_defs.bzl",
     "if_gpu_is_configured",
 )
+load(
+    "@local_config_rocm//rocm:build_defs.bzl",
+    "if_rocm_is_configured",
+)
 load("@tsl//tsl:tsl.default.bzl", "filegroup")
 load(
     "@tsl//tsl/platform:build_config_root.bzl",
     "tf_cuda_tests_tags",
 )
-load("@tsl//tsl/platform:rules_cc.bzl", "cc_library")
 
 # hlo-opt tool.
 load(
@@ -33,16 +36,22 @@ cc_library(
         "//xla:types",
         "//xla/hlo/ir:hlo",
         "//xla/service:compiler",
+        "//xla/service:executable",
+        "//xla/service:hlo_graph_dumper",
+        "//xla/service:platform_util",
+        "//xla/stream_executor",
         "//xla/stream_executor:platform",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/strings",
+        "@tsl//tsl/platform:statusor",
     ],
 )
 
 cc_library(
     name = "gpu_opt",
     testonly = True,
-    srcs = if_cuda_is_configured(["gpu_opt.cc"]),
+    srcs = if_gpu_is_configured(["gpu_opt.cc"]),
     deps = [
         ":opt_lib",
         "//xla:debug_options_flags",
@@ -50,17 +59,35 @@ cc_library(
         "//xla:types",
         "//xla/service:compiler",
         "//xla/service:dump",
+        "//xla/service:executable",
+        "//xla/service:hlo_graph_dumper",
         "//xla/service:platform_util",
         "//xla/service/gpu:executable_proto_cc",
-        "//xla/stream_executor/cuda:cuda_platform_id",
         "//xla/stream_executor/platform",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@tsl//tsl/platform:statusor",
     ] + if_gpu_is_configured([
         "//xla/service:gpu_plugin",
         "//xla/service/gpu:gpu_executable",
     ]) + if_cuda_is_configured([
         "//xla/stream_executor:cuda_platform",
+    ]) + if_rocm_is_configured([
+        "//xla/stream_executor:rocm_platform",
     ]),
+    alwayslink = True,  # Initializer needs to run.
+)
+
+cc_library(
+    name = "cpu_opt",
+    testonly = True,
+    srcs = ["cpu_opt.cc"],
+    deps = [
+        ":opt_lib",
+        "//xla/service:cpu_plugin",
+        "//xla/service:hlo_graph_dumper",
+        "//xla/stream_executor/host:host_platform",
+        "//xla/stream_executor/platform",
+    ],
     alwayslink = True,  # Initializer needs to run.
 )
 
@@ -69,6 +96,7 @@ cc_library(
     testonly = True,
     srcs = ["opt_main.cc"],
     deps = [
+        "cpu_opt",
         ":opt_lib",
         "//xla:debug_options_flags",
         "//xla:status",
@@ -92,15 +120,25 @@ cc_library(
         ":gpu_opt",
     ]) + if_cuda_is_configured([
         "//xla/stream_executor:cuda_platform",
+    ]) + if_rocm_is_configured([
+        "//xla/stream_executor:rocm_platform",
     ]),
 )
 
 glob_lit_tests(
-    name = "gpu_opt_tests",
+    name = "hlo_opt_tests",
     data = [":test_utilities"],
     default_tags = tf_cuda_tests_tags() + [
     ],
     driver = "//xla:run_lit.sh",
+    features = if_cuda_is_configured([
+        "--param=GPU=a100",
+    ]) + if_rocm_is_configured([
+        "--param=GPU=mi200",
+    ]),
+    tags_override = {
+        "gpu_hlo_ptx.hlo": ["no_rocm"],
+    },
     test_file_exts = ["hlo"],
 )
 
@@ -110,8 +148,13 @@ filegroup(
     testonly = True,
     data = [
         "gpu_specs/a100.txtpb",
+        "gpu_specs/mi200.txtpb",
         "//xla/tools:hlo-opt",
         "@llvm-project//llvm:FileCheck",
         "@llvm-project//mlir:run_lit.sh",
     ],
 )
+
+exports_files(glob([
+    "gpu_specs/*.txtpb",
+]))

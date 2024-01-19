@@ -115,14 +115,14 @@ class CpuXlaRuntimeAotCompilationResult : public AotCompilationResult {
   FromString(const std::string& serialized) {
     XlaRuntimeCpuExecutableProto xla_runtime_cpu_executable;
     if (!xla_runtime_cpu_executable.ParseFromString(serialized)) {
-      return InternalError("Failed to parse serialized JitRtExecutableProto.");
+      return Internal("Failed to parse serialized JitRtExecutableProto.");
     }
     return std::make_unique<CpuXlaRuntimeAotCompilationResult>(
         xla_runtime_cpu_executable);
   }
 
   StatusOr<std::unique_ptr<Executable>> LoadExecutable(
-      Compiler* compiler, se::StreamExecutor* executor) override;
+      Compiler* compiler, const se::StreamExecutor* executor) const override;
 
  private:
   XlaRuntimeCpuExecutableProto xla_runtime_cpu_executable_;
@@ -186,7 +186,7 @@ class CpuCompiler : public LLVMCompiler {
       const CompileOptions& options) override;
 
   StatusOr<std::unique_ptr<BufferAssignment>> AssignBuffers(
-      HloModule* module, se::StreamExecutor* stream_exec) override;
+      HloModule* module, const se::StreamExecutor* stream_exec) override;
 
   StatusOr<std::unique_ptr<Executable>> RunBackend(
       std::unique_ptr<HloModule> module, se::StreamExecutor* stream_exec,
@@ -206,9 +206,7 @@ class CpuCompiler : public LLVMCompiler {
   // Returns a (deserialized) AotCompilationResult from a serialized
   // AotCompilationResult.
   StatusOr<std::unique_ptr<AotCompilationResult>> LoadAotCompilationResult(
-      const std::string& serialized_aot_result) override {
-    return CpuXlaRuntimeAotCompilationResult::FromString(serialized_aot_result);
-  }
+      const std::string& serialized_aot_result) override;
 
   StatusOr<std::unique_ptr<CpuExecutable>> CompileXlaRuntimeCpuExecutable(
       std::unique_ptr<HloModule> module);

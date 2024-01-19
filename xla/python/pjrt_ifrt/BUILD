@@ -1,4 +1,5 @@
 load("//xla:xla.bzl", "xla_cc_test")
+load("@tsl//tsl:tsl.default.bzl", "get_compatible_with_portable")
 load("@tsl//tsl/platform:build_config.bzl", "tf_proto_library")
 
 package_group(
@@ -41,8 +42,10 @@ cc_library(
         "xla_compiler.h",
         "xla_sharding.h",
     ],
+    compatible_with = get_compatible_with_portable(),
     deps = [
         ":xla_compiler_proto_cc",
+        "//xla:util",
         "//xla:xla_data_proto_cc",
         "//xla/pjrt:pjrt_executable",
         "//xla/python/ifrt",
@@ -75,6 +78,7 @@ tf_proto_library(
 cc_library(
     name = "xla_program_serdes",
     srcs = ["xla_program_serdes.cc"],
+    compatible_with = get_compatible_with_portable(),
     deps = [
         ":xla_ifrt",
         "//xla/mlir_hlo:mhlo_passes",
@@ -184,6 +188,7 @@ xla_cc_test(
         ":tfrt_cpu_client_test_lib",
         ":xla_ifrt",
         "//xla:xla_data_proto_cc",
+        "//xla/python/ifrt",
         "//xla/python/ifrt:sharding_test_util",
         "//xla/python/ifrt:tuple_impl_test_lib",
         "@com_google_googletest//:gtest_main",
@@ -210,6 +215,7 @@ cc_library(
         "pjrt_host_callback.h",
         "pjrt_tuple.h",
     ],
+    compatible_with = get_compatible_with_portable(),
     deps = [
         ":xla_ifrt",
         "//xla:literal",
@@ -229,11 +235,14 @@ cc_library(
         "//xla/translate/mhlo_to_hlo:type_to_shape",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:inlined_vector",
+        "@com_google_absl//absl/functional:any_invocable",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/memory",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/types:span",
         "@llvm-project//llvm:Support",

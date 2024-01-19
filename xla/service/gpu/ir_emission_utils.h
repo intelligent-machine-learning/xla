@@ -29,6 +29,7 @@ limitations under the License.
 #include "llvm/IR/Value.h"
 #include "mlir/IR/BuiltinAttributes.h"  // from @llvm-project
 #include "xla/hlo/ir/hlo_instruction.h"
+#include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/literal.h"
 #include "xla/mlir_hlo/lhlo/IR/lhlo_ops.h"
 #include "xla/service/buffer_assignment.h"
@@ -71,12 +72,17 @@ inline constexpr absl::string_view kTritonSoftmaxFusionKind =
 inline constexpr absl::string_view kUncompilableFusion =
     "__uncompilable_fusion";
 
+inline constexpr absl::string_view kTopKCustomCallTarget = "__gpu$TopK";
+
 // Returns true if `hlo` will be implemented as a call to a cuSolver routine.
 //
 // This returns true if `hlo` is a CustomCall HLO with a call target equal to
 // one of the kCusolver... constants, but returns *false* for HLOs with
 // say, a kCholesky opcode.
 bool IsCustomCallToCusolver(const HloInstruction& hlo);
+
+// Returns true if `hlo` will be implemented as a call to a TopK routine.
+bool IsCustomCallToTopK(const HloInstruction& hlo);
 
 // Cholesky decomposition. Takes a (batched) matrix as input, and returns a
 // tuple of (result, workspace, info), where result is the result of the
@@ -123,15 +129,18 @@ std::vector<T> ToStdVector(const llvm::SmallVectorImpl<T>& v) {
   return std::vector<T>(v.begin(), v.end());
 }
 
-StatusOr<BufferAllocation::Slice> GetAllocationSlice(
+absl::StatusOr<BufferAllocation::Slice> GetAllocationSlice(
     mlir::Value v, absl::Span<const BufferAllocation* const> allocations,
     std::string* constant_name = nullptr);
-
-bool IsSingleInstructionFusion(mlir::lmhlo::FusionOp fusion);
 
 bool CanEmitFusedDynamicUpdateSliceInPlaceForGpu(
     mlir::lmhlo::FusionOp fusion,
     absl::Span<const BufferAllocation* const> allocations);
+
+absl::StatusOr<bool> CanEmitFusedDynamicUpdateSliceInPlaceForGpu(
+    const HloFusionInstruction* fusion,
+    const BufferAssignment* buffer_assignment,
+    const std::vector<const HloInstruction*>& roots);
 
 // Returns the dynamic-update-slice instructions defining the results of a
 // fusion node. A dynamic slice update is said to be "defining" of a result if
@@ -237,6 +246,9 @@ std::string GetIrNameFromLoc(mlir::Location loc);
 // Whether the module's target is an AMD GPU.
 bool IsAMDGPU(const llvm::Module* module);
 
+// Whether the module's target is a SPIR.
+bool IsSPIR(const llvm::Module* module);
+
 // This class stores either a non-owning reference or owns data that represents
 // a dense array in XLA format. It is used for intermediate storage during IR
 // constant emission.
@@ -266,7 +278,8 @@ class DenseDataIntermediate {
   std::variant<std::vector<uint8_t>, absl::Span<const uint8_t>> data_;
 };
 
-StatusOr<DenseDataIntermediate> LiteralToXlaFormat(const Literal& literal);
+absl::StatusOr<DenseDataIntermediate> LiteralToXlaFormat(
+    const Literal& literal);
 
 }  // namespace gpu
 }  // namespace xla

@@ -514,12 +514,12 @@ ENTRY e {
   EXPECT_EQ(module->entry_computation()->root_instruction()->fusion_kind(),
             HloInstruction::FusionKind::kCustom);
   EXPECT_LE(module->entry_computation()->root_instruction()->operand_count(),
-            TritonFusionAnalysis::kMaxParameterPerDotScope * 2);
+            TritonFusionAnalysis::kMaxParameterPerDotOperand * 2);
 }
 
 TEST_F(GemmRewriterTritonLevel2Test,
        DoNotFuseTooManyParametersWhenAnInstructionWouldAddMultipleParameters) {
-  static_assert(TritonFusionAnalysis::kMaxParameterPerDotScope == 4,
+  static_assert(TritonFusionAnalysis::kMaxParameterPerDotOperand == 4,
                 "We have to update this test.");
   // If we fuse the select, it adds 2 additional parameters at once (not 3,
   // because the select instruction itself is removed from the parameters).
@@ -544,12 +544,39 @@ ENTRY e {
   EXPECT_EQ(module->entry_computation()->root_instruction()->fusion_kind(),
             HloInstruction::FusionKind::kCustom);
   EXPECT_LE(module->entry_computation()->root_instruction()->operand_count(),
-            TritonFusionAnalysis::kMaxParameterPerDotScope + 1);
+            TritonFusionAnalysis::kMaxParameterPerDotOperand + 1);
+}
+
+TEST_F(GemmRewriterTritonLevel2Test, DoNotFuseTooManyParametersForConcat) {
+  static_assert(TritonFusionAnalysis::kMaxParameterPerDotOperand == 4,
+                "We have to update this test.");
+  // The concat shouldn't overgo the allowed parameter limit.
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
+                          ParseAndReturnVerifiedModule(R"(
+ENTRY e {
+  a = f32[3,3]{1,0} parameter(0)
+  b = f32[3,3]{1,0} parameter(1)
+  c = f32[3,3]{1,0} parameter(2)
+  d = f32[3,3]{1,0} parameter(3)
+  e = f32[3,3]{1,0} parameter(4)
+  f = f16[3,3]{1,0} parameter(5)
+  concat = f32[15,3]{1,0} concatenate(a, b, c, d, e), dimensions={0}
+  convert = f32[3,3]{1,0} convert(f)
+  ROOT dot = f32[15,3]{1,0} dot(concat, convert), lhs_contracting_dims={1}, rhs_contracting_dims={1}
+})"));
+
+  EXPECT_TRUE(GemmRewriterTriton(gpu_version_).Run(module.get()).value());
+  EXPECT_EQ(module->entry_computation()->root_instruction()->opcode(),
+            HloOpcode::kFusion);
+  EXPECT_EQ(module->entry_computation()->root_instruction()->fusion_kind(),
+            HloInstruction::FusionKind::kCustom);
+  EXPECT_LE(module->entry_computation()->root_instruction()->operand_count(),
+            TritonFusionAnalysis::kMaxParameterPerDotOperand + 1);
 }
 
 TEST_F(GemmRewriterTritonLevel2Test,
        InstructionsReachableFromMultipleOperandsAreHandledCorrectly) {
-  static_assert(TritonFusionAnalysis::kMaxParameterPerDotScope == 4,
+  static_assert(TritonFusionAnalysis::kMaxParameterPerDotOperand == 4,
                 "We have to update this test.");
   // There was a bug that some dead code was generated into some fusions in a
   // specific edge case. When some instructions were reachable both through the
@@ -610,6 +637,107 @@ CHECK-SAME: __triton_gemm
 })");
 }
 
+// The 2 inputs of the add operation are the same and they are iterated the same
+// way, so the same parameter node is reused for them.
+// The reuse happens per "operand fusion", so the add of the LHS and RHS still
+// use different nodes.
+TEST_F(GemmRewriterTritonLevel2Test,
+       ParamNodesAreReusedIfTheyHaveTheSameIterSpec) {
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
+                          ParseAndReturnVerifiedModule(R"(
+ENTRY e {
+  a = f32[2,4]{1,0} parameter(0)
+  add = f32[2,4]{1,0} add(a, a)
+  ROOT r = f32[2,2]{1,0} dot(add, add),
+           lhs_contracting_dims={1}, rhs_contracting_dims={1}
+})"));
+
+  EXPECT_TRUE(GemmRewriterTriton(gpu_version_).Run(module.get()).value());
+
+  MatchHloModule(*module, R"(
+CHECK-DAG: %[[P0:.*]] = f32[2,4]{1,0} parameter(0)
+CHECK-DAG: %[[ADD0:.*]] = f32[2,4]{1,0} add(f32[2,4]{1,0} %[[P0]], f32[2,4]{1,0} %[[P0]])
+CHECK-DAG: %[[P1:.*]] = f32[2,4]{1,0} parameter(1)
+CHECK-DAG: %[[ADD1:.*]] = f32[2,4]{1,0} add(f32[2,4]{1,0} %[[P1]], f32[2,4]{1,0} %[[P1]])
+CHECK-DAG: ROOT {{.*}} = f32[2,2]{1,0} dot(f32[2,4]{1,0} %[[ADD0]], f32[2,4]{1,0} %[[ADD1]])
+CHECK: ENTRY
+CHECK-DAG: %[[P0:.*]] = f32[2,4]{1,0} parameter(0)
+CHECK-DAG: ROOT {{.*}} = f32[2,2]{1,0}
+CHECK-SAME: fusion(f32[2,4]{1,0} %[[P0]], f32[2,4]{1,0} %[[P0]])
+CHECK-SAME: kind=kCustom
+CHECK-SAME: __triton_gemm
+})");
+}
+
+// NEGATE has the same iteration spec at both usages, so the node is reused
+// (implying that P0 is also reused).
+TEST_F(GemmRewriterTritonLevel2Test,
+       NonParamNodesAreReusedIfTheyHaveTheSameIterSpec) {
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
+                          ParseAndReturnVerifiedModule(R"(
+ENTRY e {
+  a = f32[4,4]{1,0} parameter(0)
+  b = f32[4,4]{1,0} parameter(1)
+  negate = f32[4,4]{1,0} negate(a)
+  sine = f32[4,4]{1,0} sine(negate)
+  add = f32[4,4]{1,0} add(negate, sine)
+  ROOT r = f32[4,4]{1,0} dot(add, b),
+           lhs_contracting_dims={1}, rhs_contracting_dims={1}
+})"));
+
+  EXPECT_TRUE(GemmRewriterTriton(gpu_version_).Run(module.get()).value());
+
+  MatchHloModule(*module, R"(
+CHECK-DAG: %[[P0:.*]] = f32[4,4]{1,0} parameter(0)
+CHECK-DAG: %[[P1:.*]] = f32[4,4]{1,0} parameter(1)
+CHECK-DAG: %[[NEGATE:.*]] = f32[4,4]{1,0} negate(f32[4,4]{1,0} %[[P0]])
+CHECK-DAG: %[[SINE:.*]] = f32[4,4]{1,0} sine(f32[4,4]{1,0} %[[NEGATE]])
+CHECK-DAG: %[[ADD:.*]] = f32[4,4]{1,0} add(f32[4,4]{1,0} %[[NEGATE]], f32[4,4]{1,0} %[[SINE]])
+CHECK-DAG: ROOT {{.*}} = f32[4,4]{1,0} dot(f32[4,4]{1,0} %[[ADD]], f32[4,4]{1,0} %[[P1]])
+CHECK: ENTRY
+CHECK-DAG: %[[P0:.*]] = f32[4,4]{1,0} parameter(0)
+CHECK-DAG: %[[P1:.*]] = f32[4,4]{1,0} parameter(1)
+CHECK-DAG: ROOT {{.*}} = f32[4,4]{1,0}
+CHECK-SAME: fusion(f32[4,4]{1,0} %[[P0]], f32[4,4]{1,0} %[[P1]])
+CHECK-SAME: kind=kCustom
+CHECK-SAME: __triton_gemm
+})");
+}
+
+// The direct read of the input and the transposed read of the input have
+// different iteration specs, so we don't reuse the node.
+TEST_F(GemmRewriterTritonLevel2Test,
+       NodesAreNotReusedIfTheyHaveDifferentIterSpecs) {
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
+                          ParseAndReturnVerifiedModule(R"(
+ENTRY e {
+  a = f32[4,4]{1,0} parameter(0)
+  b = f32[4,4]{1,0} parameter(1)
+  tr_a = f32[4,4]{1,0} transpose(a), dimensions={1,0}
+  add = f32[4,4]{1,0} add(a, tr_a)
+  ROOT r = f32[4,4]{1,0} dot(add, b),
+           lhs_contracting_dims={1}, rhs_contracting_dims={1}
+})"));
+
+  EXPECT_TRUE(GemmRewriterTriton(gpu_version_).Run(module.get()).value());
+
+  MatchHloModule(*module, R"(
+CHECK-DAG: %[[P0:.*]] = f32[4,4]{1,0} parameter(0)
+CHECK-DAG: %[[P1:.*]] = f32[4,4]{1,0} parameter(1)
+CHECK-DAG: %[[P2:.*]] = f32[4,4]{1,0} parameter(2)
+CHECK-DAG: %[[TRANSPOSE:.*]] = f32[4,4]{1,0} transpose(f32[4,4]{1,0} %[[P1]])
+CHECK-DAG: %[[ADD:.*]] = f32[4,4]{1,0} add(f32[4,4]{1,0} %[[P0]], f32[4,4]{1,0} %[[TRANSPOSE]])
+CHECK-DAG: ROOT {{.*}} = f32[4,4]{1,0} dot(f32[4,4]{1,0} %[[ADD]], f32[4,4]{1,0} %[[P2]])
+CHECK: ENTRY
+CHECK-DAG: %[[P0:.*]] = f32[4,4]{1,0} parameter(0)
+CHECK-DAG: %[[P1:.*]] = f32[4,4]{1,0} parameter(1)
+CHECK-DAG: ROOT {{.*}} = f32[4,4]{1,0}
+CHECK-SAME: fusion(f32[4,4]{1,0} %[[P0]], f32[4,4]{1,0} %[[P0]], f32[4,4]{1,0} %[[P1]])
+CHECK-SAME: kind=kCustom
+CHECK-SAME: __triton_gemm
+})");
+}
+
 TEST_F(GemmRewriterTritonLevel2Test,
        OperationsAddingMoreParametersGetMultipleTries) {
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
@@ -660,7 +788,7 @@ ENTRY e {
                   .Run(module.get())
                   .value());
   EXPECT_THAT(module->entry_computation()->root_instruction(),
-              GmockMatch((m::Fusion(m::Parameter(), m::Exp()))));
+              GmockMatch((m::Fusion(m::Exp(), m::Parameter()))));
 }
 
 TEST_F(GemmRewriterTritonLevel2Test, ParameterUsedElementwiseTwiceIsFused) {
@@ -696,7 +824,7 @@ ENTRY e {
 }
 
 TEST_F(GemmRewriterTritonLevel2Test,
-       ParameterUsedNonElementwiseTwiceIsFusedOnlyOnOnePath) {
+       ParameterUsedNonElementwiseTwiceIsFusedOnBothPaths) {
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
                           ParseAndReturnVerifiedModule(R"(
 HloModule t
@@ -716,7 +844,7 @@ ENTRY e {
                   .value());
   EXPECT_THAT(
       module->entry_computation()->root_instruction(),
-      GmockMatch((m::Fusion(m::Parameter(), m::Transpose(), m::Parameter()))));
+      GmockMatch((m::Fusion(m::Parameter(), m::Parameter(), m::Parameter()))));
 }
 
 TEST_F(GemmRewriterTritonLevel2Test,
@@ -827,36 +955,36 @@ e {
                           TritonFusionAnalysis::Execute(*computation));
 
   EXPECT_THAT(*analysis.IterSpec(TritonFusionAnalysis::Scope::RHS,
-                                 computation->parameter_instruction(0), 0),
+                                 computation->parameter_instruction(1), 0),
               ElementsAre(FieldsAre(/*stride=*/1536, /*count=*/153,
                                     /*slice_start=*/0, /*sliced_count=*/153,
                                     /*subfragments=*/ElementsAre(153))));
   EXPECT_THAT(*analysis.IterSpec(TritonFusionAnalysis::Scope::RHS,
-                                 computation->parameter_instruction(0), 1),
+                                 computation->parameter_instruction(1), 1),
               ElementsAre(FieldsAre(/*stride=*/1, /*count=*/1536,
                                     /*slice_start=*/0, /*sliced_count=*/1536,
                                     /*subfragments=*/ElementsAre(1536))));
 
   EXPECT_THAT(*analysis.IterSpec(TritonFusionAnalysis::Scope::RHS,
-                                 computation->parameter_instruction(1), 0),
+                                 computation->parameter_instruction(2), 0),
               ElementsAre(FieldsAre(/*stride=*/128, /*count=*/153,
                                     /*slice_start=*/0, /*sliced_count=*/153,
                                     /*subfragments=*/ElementsAre(153))));
   EXPECT_THAT(*analysis.IterSpec(TritonFusionAnalysis::Scope::RHS,
-                                 computation->parameter_instruction(1), 1),
+                                 computation->parameter_instruction(2), 1),
               ElementsAre(FieldsAre(/*stride=*/1, /*count=*/128,
-                                    /*slice_start=*/0, /*sliced_count=*/128,
+                                    /*slice_start=*/-1536, /*sliced_count=*/128,
                                     /*subfragments=*/ElementsAre(128))));
 
   EXPECT_THAT(*analysis.IterSpec(TritonFusionAnalysis::Scope::RHS,
-                                 computation->parameter_instruction(2), 0),
+                                 computation->parameter_instruction(3), 0),
               ElementsAre(FieldsAre(/*stride=*/256, /*count=*/153,
                                     /*slice_start=*/0, /*sliced_count=*/153,
                                     /*subfragments=*/ElementsAre(153))));
   EXPECT_THAT(*analysis.IterSpec(TritonFusionAnalysis::Scope::RHS,
-                                 computation->parameter_instruction(2), 1),
+                                 computation->parameter_instruction(3), 1),
               ElementsAre(FieldsAre(/*stride=*/1, /*count=*/256,
-                                    /*slice_start=*/0,
+                                    /*slice_start=*/-1536 - 128,
                                     /*sliced_count=*/256,
                                     /*subfragments=*/ElementsAre(256))));
 }
@@ -923,7 +1051,9 @@ e {
 }
 
 TEST_F(GemmRewriterTritonLevel2Test,
-       TwoConcatenationsOfSameParametersAreNotFused) {
+       DifferentConcatenationOfSameParametersIsFusedViaNodeDuplication) {
+  // It means that the same input is passed to the fusion multiple times and
+  // it's read differently for each.
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
                           ParseAndReturnVerifiedModule(R"(
 e {
@@ -944,9 +1074,10 @@ e {
                                      se::CudaComputeCapability::AMPERE, 0})
                   .Run(module.get())
                   .value());
-  EXPECT_THAT(module->entry_computation()->root_instruction(),
-              GmockMatch((m::Fusion(m::Concatenate(), m::Concatenate(),
-                                    m::Parameter()))));
+  EXPECT_THAT(
+      module->entry_computation()->root_instruction(),
+      GmockMatch((m::Fusion(m::Parameter(), m::Parameter(), m::Parameter(),
+                            m::Parameter(), m::Parameter()))));
 }
 
 }  // namespace

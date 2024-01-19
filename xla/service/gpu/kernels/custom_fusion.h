@@ -26,10 +26,10 @@ limitations under the License.
 #include "absl/container/flat_hash_map.h"
 #include "absl/synchronization/mutex.h"
 #include "xla/hlo/ir/hlo_computation.h"
-#include "xla/service/gpu/kernels/custom_fusion.h"
 #include "xla/service/gpu/kernels/custom_kernel.h"
 #include "xla/status.h"
 #include "xla/statusor.h"
+#include "xla/stream_executor/device_description.h"
 #include "tsl/platform/logging.h"
 
 namespace xla::gpu {
@@ -98,8 +98,9 @@ class CustomFusion {
  public:
   virtual ~CustomFusion() = default;
 
-  // Loads kernels implementing `hlo_computation`.
-  virtual StatusOr<std::vector<CustomKernel>> LoadKernels(
+  // Loads kernels implementing `hlo_computation` optimized for a given device.
+  virtual absl::StatusOr<std::vector<CustomKernel>> LoadKernels(
+      const se::DeviceDescription& device,
       const HloComputation* computation) const = 0;
 };
 
@@ -118,7 +119,7 @@ class CustomFusionRegistry {
 
   // Registers custom fusion in the registry. Returns error if fusion with the
   // given name already registered.
-  Status Register(std::string name, std::unique_ptr<CustomFusion> fusion);
+  absl::Status Register(std::string name, std::unique_ptr<CustomFusion> fusion);
 
   // Looks up custom fusion by name. Return nullptr if it's not found.
   CustomFusion* Lookup(std::string_view name) const;
@@ -140,7 +141,7 @@ class CustomFusionRegistry {
 #define XLA_REGISTER_CUSTOM_FUSION__(NAME, FUSION, N)              \
   ABSL_ATTRIBUTE_UNUSED static const bool                          \
       xla_custom_fusion_##N##_registered_ = [] {                   \
-        ::xla::Status status =                                     \
+        absl::Status status =                                      \
             ::xla::gpu::CustomFusionRegistry::Default()->Register( \
                 NAME, std::make_unique<FUSION>());                 \
         if (!status.ok()) LOG(ERROR) << status;                    \
