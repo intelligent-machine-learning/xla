@@ -130,8 +130,10 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
     std::vector<HloInstruction*> new_schedule;
     auto sorted_nodes = solver_->GetSortedNodes();
     for (auto node : sorted_nodes) {
-      new_schedule.push_back(
-          const_cast<xla::HloInstruction*>(node->GetValue()));
+      auto insts = node->GetValues();
+      for (auto inst : insts) {
+        new_schedule.push_back(const_cast<xla::HloInstruction*>(inst));
+      }
     }
     return new_schedule;
   }

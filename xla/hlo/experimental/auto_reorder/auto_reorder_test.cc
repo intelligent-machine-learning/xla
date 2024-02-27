@@ -436,7 +436,7 @@ ENTRY %elementwise {
           insts2cost.push_back(std::make_tuple(ar_done, 1));
 
           insts_list.push_back(ar_done);
-          edge2cost.push_back(std::make_tuple(ar_done, cost_gen()));
+          edge2cost.push_back(std::make_tuple(ar_done, cost_gen()+50));
           not_used_insts.insert(ar_done);
         }
       }
@@ -861,9 +861,7 @@ TEST_F(AutoReorderingTest, ReorderScheduleComputation) {
   std::unique_ptr<LatencyEstimator> latency_estimator;
   int pointer_size_ = 4;
   Backend& test_backend = backend();
-  const se::DeviceDescription& gpu_device_info =
-      test_backend.default_stream_executor()->GetDeviceDescription();
-  // auto gpu_device_info = TestGpuDeviceInfo::RTXA6000DeviceInfo();
+  auto gpu_device_info = TestGpuDeviceInfo::RTXA6000DeviceInfo();
 
   VLOG(2) << "threads_per_block_limit:"
           << gpu_device_info.threads_per_block_limit() << " threads_per_warp"
@@ -914,8 +912,7 @@ TEST_F(AutoReorderingTest, ReorderPass) {
   EXPECT_TRUE(st.ok());
   int pointer_size_ = 4;
   Backend& test_backend = backend();
-  const se::DeviceDescription& gpu_device_info =
-      test_backend.default_stream_executor()->GetDeviceDescription();
+  auto gpu_device_info = TestGpuDeviceInfo::RTXA6000DeviceInfo();
   const int64_t scheduler_mem_limit = xla::gpu::GetSchedulerMemoryLimit(
       hlo_module.get(), gpu_device_info, pointer_size_);
   SchedulerConfig config = GetSchedulerConfig(scheduler_mem_limit);
@@ -954,8 +951,7 @@ TEST_F(AutoReorderingTest, ReorderPassWithDefaultEstimator) {
   EXPECT_TRUE(st.ok());
   int pointer_size_ = 4;
   Backend& test_backend = backend();
-  const se::DeviceDescription& gpu_device_info =
-      test_backend.default_stream_executor()->GetDeviceDescription();
+  auto gpu_device_info = TestGpuDeviceInfo::RTXA6000DeviceInfo();
   const int64_t scheduler_mem_limit = xla::gpu::GetSchedulerMemoryLimit(
       hlo_module.get(), gpu_device_info, pointer_size_);
   SchedulerConfig config = GetSchedulerConfig(scheduler_mem_limit);
@@ -972,8 +968,8 @@ TEST_F(AutoReorderingTest, ReorderPassWithDefaultEstimator) {
   EXPECT_TRUE(status.ok());
 }
 TEST_F(AutoReorderingTest, ReorderPassWithRandom) {
+  // GTEST_SKIP() << "Skipping single test";
   std::srand(kRandomSeed);
-  // communication rate from 0.05 to 0.95,step is 0.05
   auto hlo_module = CreateNewUnverifiedModule();
   auto gpu_latency_estimator = std::make_unique<SavedInstLatencyEstimator>();
   SchedulerConfig sched_config = GetDefaultSchedConfig();
@@ -1027,12 +1023,20 @@ TEST_F(AutoReorderingTest, ReorderPassWithRandom) {
 }
 // skip this test
 TEST_F(AutoReorderingTest, ReorderPassDataAnalyse) {
-  // GTEST_SKIP() << "Skipping single test";
+  GTEST_SKIP() << "Skipping single test";
   std::srand(kRandomSeed);
   auto gen = std::mt19937{kRandomSeed};
-  int repeat_time = 3;
-  uint32_t nnodes = 50;
-  std::vector<float> communication_rates = {0.1,0.15,0.2,0.25,0.3,0.65,0.7,0.75,0.8,0.85};
+  int repeat_time = 1;
+  uint32_t nnodes = 100;
+  std::vector<float> communication_rates;
+  //  = {
+  //   0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9
+  // };
+  for (float current=0.1; current < 0.9; current+=0.05)
+  {
+    communication_rates.push_back(current);
+  }
+  
   // communication rate from 0.05 to 0.95,step is 0.05
   std::ofstream csv_out("/tmp/test_ret.csv");
   csv_out<<"exp_id,nnodes,communication_rate,auto_reorder_cost,post_order_cost,xla_hiding_order_cost,xla_hiding_solve_time,auto_reorder_solve_time"<<std::endl;
@@ -1050,6 +1054,8 @@ TEST_F(AutoReorderingTest, ReorderPassDataAnalyse) {
                               /*communication rate*/ communication_rate,
                               /* gen */gen);
     EXPECT_TRUE(st.ok());
+    // auto latency_estimator = create_latency_estimator();
+
     auto gpu_latency_estimator2 = gpu_latency_estimator->clone();
     auto gpu_latency_estimator3 = gpu_latency_estimator->clone();
     // run AutoReorder for compare

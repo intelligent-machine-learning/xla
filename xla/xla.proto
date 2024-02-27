@@ -564,7 +564,7 @@ message DebugOptions {
   bool xla_gpu_enable_latency_hiding_scheduler = 186;
   bool xla_gpu_enable_highest_priority_async_stream = 216;
   bool xla_gpu_enable_analytical_latency_estimator = 255;
-  bool xla_gpu_enable_linear_program_scheduler = 258;
+  bool xla_gpu_enable_linear_program_scheduler = 266;
 
   bool xla_gpu_lhs_enable_gpu_async_tracker = 204;
   string xla_gpu_pgle_profile_file_or_directory_path = 210;
@@ -675,7 +675,7 @@ message DebugOptions {
   // Threshold to enable windowed einsum (collective matmul) in MB.
   int64 xla_gpu_threshold_for_windowed_einsum_mib = 265;
 
-  // Next id: 266
+  // Next id: 267
 
   // Extra options to pass to the compilation backend (e.g. LLVM); specific
   // interpretation of these values is left to the backend.

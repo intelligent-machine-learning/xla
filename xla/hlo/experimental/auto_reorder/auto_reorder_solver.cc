@@ -5,6 +5,11 @@
 #ifndef LPSchedulerFunc(return_type)
 #define LPSchedulerFunc(return_type) template <typename ContainerType,typename ElementType> return_type LinearProgramScheduler<ContainerType,ElementType>
 #endif
+
+#ifndef LPContainerDAGFunc(return_type)
+#define LPContainerDAGFunc(return_type) template <typename ElementType> return_type LPContainerDAG<ElementType>
+#endif
+
 namespace xla {
 using IntVar = operations_research::sat::IntVar;
 using CpModelBuilder = operations_research::sat::CpModelBuilder;
@@ -100,7 +105,7 @@ LPSchedulerFunc(tsl::Status)::Solve() {
       max_execution_time += cost;
     }
   }
-  SetHorizon(max_execution_time * reorder::kChannelNumber);
+  SetHorizon(reorder::get_horizon(max_execution_time));
 
   for (auto node : nodes_) {
     VLOG(3) << "Add to scheduler" << node->GetName();
@@ -141,7 +146,7 @@ LPSchedulerFunc(tsl::Status)::Solve() {
     parameters.set_log_to_stdout(true);
     parameters.set_log_search_progress(true);
   }
-  parameters.set_num_search_workers(8);
+  parameters.set_num_search_workers(reorder::get_cpu_number());
   const operations_research::sat::CpSolverResponse response =
       operations_research::sat::SolveWithParameters(cp_model_.Build(),
                                                     parameters);
@@ -294,6 +299,75 @@ LPSchedulerFunc(std::vector<ContainerType*>)::GetSortedNodes() {
       [this](ContainerType* a, ContainerType* b) { return a->GetStart() < b->GetStart(); });
   return sorted_nodes;
 }
+
+LPContainerDAGFunc(bool)::IsIn(LPContainer<ElementType>* a) {
+  return operands_.find(a) != operands_.end();
+};
+LPContainerDAGFunc(void)::AddToDAG(LPContainer<ElementType>* child){
+  inner_elements.push_back(child);
+  if(IsIn(child)){
+    operands_.erase(child);
+  }
+  for(auto dep_pair: child->GetDeps()){
+    auto dep = std::get<0>(dep_pair);
+    auto cost = std::get<1>(dep_pair);//if cost  need store ?
+    operands_.insert(dep);
+  }
+}
+LPContainerDAGFunc(Status)::MergeFrom(LPContainerDAG<ElementType>* other){
+  /*
+   step 1: this inner_elements must have dep to other's inner_elements. so that link to other's inner_elements change to inner edges
+  */
+
+   // maintain this LPContainerDAG inner_elements's deps,so that can create inner edge after merge
+    // {dep: [<element1, cost>,<element2, cost>]}
+    std::unordered_map<
+    int, 
+    std::vector<std::tuple<LPContainer<ElementType>*, CostType>>
+    > dep_operands2element;
+    
+    for(LPContainer<ElementType>* element: GetInnerElements()){
+      // from operate to element, there are outer edge,maybe convert to inner edge 
+      for(auto dep_pair: element->GetDeps()){
+        auto dep = std::get<0>(dep_pair);
+        auto cost = std::get<1>(dep_pair);
+        if(dep_operands2element.find(dep->UUID())==dep_operands2element.end()){
+          dep_operands2element[dep->UUID()] = std::vector<std::tuple<LPContainer<ElementType>*, CostType>>();
+        }
+        dep_operands2element[dep->UUID()].push_back(std::make_tuple(element, cost));
+      }
+    }
+    //other
+    for(auto child:other->GetInnerElements()){
+      // there child must in inner_elements_deps
+      TF_RET_CHECK(dep_operands2element.find(child->UUID())==dep_operands2element.end()
+      )<<"child is not in dep_operands2element";
+      for(auto dep_pair: dep_operands2element[child->UUID()]){
+        auto dep = std::get<0>(dep_pair);
+        auto cost = std::get<1>(dep_pair);
+        if(dep_operands2element.find(dep->UUID())!=dep_operands2element.end()){
+          for(auto element_pair: dep_operands2element[dep->UUID()]){
+            auto element = std::get<0>(element_pair);
+            auto cost = std::get<1>(element_pair);
+            //create edge between element and child
+            DAGEdge edge;
+            edge.from = element;
+            edge.to = child;
+            edge.cost = cost;
+            edges_.push_back(edge);
+          }
+        }
+      }
+      
+      AddToDAG(child);
+
+    };
+}
 template class LPContainer<const HloInstruction*>;
 template class LinearProgramScheduler<LPContainer<const HloInstruction*>, const HloInstruction*>;
+
+
+template class LPContainerDAG<const HloInstruction*>;
+// template class LinearProgramScheduler<LPContainerDAG<const HloInstruction*>, const HloInstruction*>;
+
 }  // namespace xla

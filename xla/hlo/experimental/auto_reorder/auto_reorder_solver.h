@@ -5,7 +5,7 @@
 #include <tuple>
 #include <unordered_map>
 #include <set>
-
+#include <thread>
 #include "absl/container/flat_hash_map.h"
 #include "absl/strings/string_view.h"
 #include "xla/hlo/ir/hlo_module.h"
@@ -17,10 +17,19 @@ namespace xla {
   using CpModelBuilder = operations_research::sat::CpModelBuilder;
   using IntervalVar = operations_research::sat::IntervalVar;
   namespace reorder{
-    const uint32_t ksolveTimeout = 30;  // 30s
+    const uint32_t ksolveTimeout = 60;  // 30s
     
     static const int kChannelNumber = 2;
-    bool solve_debug=false;
+    int get_horizon(int max_time){
+      //scale
+      return max_time*1.2;
+    }
+    bool solve_debug=true;
+    //get cpu number of current machine
+    int get_cpu_number(){
+      // return 8;
+      return std::thread::hardware_concurrency();
+    }
   }
   enum class NodeType { kCompute = 0, kCommunication = 1 };
 
@@ -59,7 +68,7 @@ class LPNode{
 template <typename ElementType>
 class LPContainer{
   public:
-  
+  //create a LPContainer with inner_element, cost and type
   LPContainer(ElementType inner_element, CostType cost, NodeType type)
       : inner_element_(inner_element), cost_(cost), type_(type) {
     uuid_ = reinterpret_cast<uintptr_t>(this);
@@ -71,15 +80,20 @@ class LPContainer{
   CostType GetCost() const { return cost_; }
   void SetStart(CostType start) { startat_ = start; }
   CostType GetStart() { return startat_; }
+  // Get the type of the container: compute or communication
   bool IsComputation() const { return type_ == NodeType::kCompute; }
   bool IsCommunication() const { return type_ == NodeType::kCommunication; }
   NodeType GetType() const { return type_; }
-  bool HasValue() const { return inner_element_ != nullptr; }
-  ElementType GetValue() const { return inner_element_; }
+
+  const bool HasValue() { return inner_element_ != nullptr; }
+  const std::vector<ElementType> GetValues() { return std::vector<ElementType>{inner_element_}; }
+  // Add a dep of this container, cost is the cost of the edge; this Container will be executed after dep
   void AddDep(LPContainer* dep, CostType cost);
+  // Get all deps of the container
   const std::vector<std::tuple<LPContainer*, CostType>> GetDeps() const {
     return deps_;
   }
+  //when a container is frozen, it can not be add deps
   void Freeze() { frozen_ = true; }
 
   private:
@@ -97,32 +111,59 @@ class LPContainer{
 // LPContainerDAG is a graph of container, it can be used to store the DAG of container
 // be used as a atomic unit of LPContainer
 template <typename ElementType>
-class LPContainerDAG{
+class LPContainerDAG: public LPContainer<ElementType>{
   //we can use InstructionDAG to get memory effect order
   public:
     // maintain a DAG of inner elements
     struct DAGEdge{
-      LPContainerDAG* from;
-      LPContainerDAG* to;
+      LPContainer<ElementType>* from;
+      LPContainer<ElementType>* to;
       CostType cost;
     };
-  //create a  LPContainerDAG with 
-    LPContainerDAG(ElementType inner_element, CostType cost, NodeType type): cost_(cost), type_(type){
-      inner_elements.push_back(LPContainer<ElementType>(inner_element, cost, type));
+    //create a  LPContainerDAG with one element
+    LPContainerDAG(ElementType inner_element, CostType cost, NodeType type): LPContainer<ElementType>(inner_element,cost,type){
+      //TODO: there should not create element?
+      auto ele = new LPContainer<ElementType>(inner_element, cost, type);
+      inner_elements.push_back(ele);
     };
-    bool IsIn(LPContainerDAG<ElementType> *a){
-      return users_.find(a) != users_.end();
-    };
+    bool IsIn(LPContainer<ElementType>* a);
     //which container can be put together:1. they have the same type 2. they have dep between them
-    static bool CanFused(LPContainerDAG<ElementType>* a, LPContainerDAG<ElementType>* b){
+    // static bool CanFused(LPContainerDAG<ElementType>* a, LPContainerDAG<ElementType>* b);
 
-    };
-    // AddChild
+    //override LPContainer
+    const std::string GetName(){ 
+      std::string name = "LPContainerDAG{";
+      for(auto ele: inner_elements){
+        name += ele->GetName();
+        name+="\n";
+      }
+      name+="}";
+      return name;
+    }
+    const int UUID() { return inner_elements[0]->UUID(); }
+    const bool HasValue() { return inner_elements.size()>0;}
+    const std::vector<ElementType> GetValues() { 
+        std::vector<ElementType> values;
+        for(auto ele: inner_elements){
+          for(auto inst:ele->GetValues()){
+            values.push_back(inst);
+          }
+        }
+        return values;
+    }
+    // AddChild, child should maintain the deps before
+    void AddToDAG(LPContainer<ElementType>* child);
+    const std::vector<LPContainer<ElementType>*> GetInnerElements() const{
+      return inner_elements;
+    }
+    //merge other LPContainerDAG to this LPContainerDAG,then destroy other LPContainerDAG
+    Status MergeFrom(LPContainerDAG<ElementType>* other);
   private:
     
-    std::set<ElementType> users_;
-    std::set<ElementType> operands_;
-    std::vector<LPContainer<ElementType>> inner_elements;
+    std::set<LPContainer<ElementType>*> operands_;
+    std::vector<LPContainer<ElementType>*> inner_elements;
+    //maintain edges between inner_elements
+    std::vector<DAGEdge> edges_;
     CostType cost_;
   CostType startat_;
   NodeType type_;
