@@ -25,7 +25,12 @@ namespace xla {
       return max_time*1.2;
     }
     bool solve_debug=true;
+     // TODO: no keep order will cause hung on multi processing, we should consider how to resolve it
     //get cpu number of current machine
+    const bool is_keep_communicate_order(){
+      const char* env = std::getenv("XLA_KEEP_COMMUNICATE_ORDER");
+      return std::strcmp(env, "true") == 0;
+    };
     int get_cpu_number(){
       // return 8;
       return std::thread::hardware_concurrency();
@@ -92,6 +97,20 @@ class LPContainer{
   // Get all deps of the container
   const std::vector<std::tuple<LPContainer*, CostType>> GetDeps() const {
     return deps_;
+  }
+  /**
+   * Checks if the given dependency in this container.
+   *
+   * @param dep The dependency to check.
+   * @return True if the dependency in this container, false otherwise.
+   */
+  bool HasDep(LPContainer* dep) {
+    for (auto d : deps_) {
+      if (std::get<0>(d) == dep) {
+        return true;
+      }
+    }
+    return false;
   }
   //when a container is frozen, it can not be add deps
   void Freeze() { frozen_ = true; }
@@ -187,7 +206,7 @@ class LinearProgramScheduler {
     verbose_ = verbose;
   };
   ~LinearProgramScheduler();
-  // add Node to scheduler, so that Solve can use its deps
+  // add Node to scheduler, its deps will execute before it
   Status AddConstraint(ContainerType* node);
   // solve the LP problem
   Status Solve();

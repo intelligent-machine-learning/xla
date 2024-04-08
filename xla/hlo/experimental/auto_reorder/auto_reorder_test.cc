@@ -208,6 +208,26 @@ ENTRY %elementwise {
         module->AddEmbeddedComputation(sum_builder.Build());
     return reduction;
   }
+  std::string GetCommunicationOrderString(HloModule* hlo_module){
+    auto insts = hlo_module->schedule().sequence(hlo_module->entry_computation()).instructions();
+    auto ret = std::string("");
+    for(auto inst:insts){
+      switch (inst->opcode()) {
+      case HloOpcode::kAllToAll:
+      case HloOpcode::kAllGather:
+      case HloOpcode::kAllReduce:
+      case HloOpcode::kCollectivePermute:
+      case HloOpcode::kReduceScatter:
+      case HloOpcode::kSend:
+      case HloOpcode::kRecv:{
+        ret = ret +"\n"+ inst->ToString();
+      }
+      default:
+        continue;
+      }
+    }
+    return ret;
+  }
   StatusOr<LatencyHidingScheduler::SchedulerStatistics> GetModuleCost(
       HloModule* module, SchedulerConfig sched_config,
       const xla::LatencyEstimator* latency_estimator
@@ -240,9 +260,6 @@ ENTRY %elementwise {
     // here latency_estimator make segmant fault?
     auto ret = LatencyHidingScheduler::LatencyHidingStatistics(
         computation, latency_estimator, async_tracker.get(), shape_size_bytes);
-    std::cout << "GetModuleCost statistics"
-              << LatencyHidingScheduler::SchedulerStatisticsString(ret)
-              << std::endl;
     return ret;
   }
   std::vector<ReplicaGroup> CreateReplicaGroups(
@@ -967,6 +984,33 @@ TEST_F(AutoReorderingTest, ReorderPassWithDefaultEstimator) {
   auto status = RunScheduler(hlo_module.get(), sched_config);
   EXPECT_TRUE(status.ok());
 }
+TEST_F(AutoReorderingTest, ReorderPassStableOrder) {
+  // GTEST_SKIP() << "Skipping single test";
+  std::srand(kRandomSeed);
+  auto hlo_module = CreateNewUnverifiedModule();
+  auto gpu_latency_estimator = std::make_unique<SavedInstLatencyEstimator>();
+  SchedulerConfig sched_config = GetDefaultSchedConfig();
+  auto st = MakeRandomComputation(hlo_module.get(), gpu_latency_estimator.get(),
+                                  /*inst num*/ 100,
+                                  /*max deps*/ 5,
+                                  /*communication rate*/ 0.2);
+  auto gpu_latency_estimator2 = gpu_latency_estimator->clone();
+  auto gpu_latency_estimator3 = gpu_latency_estimator->clone();
+
+  auto status = RunScheduler(hlo_module.get(), sched_config,
+                             std::move(gpu_latency_estimator));
+  EXPECT_TRUE(status.ok());
+  auto comm_op_1 = GetCommunicationOrderString(hlo_module.get());
+
+  // get hlo_module instruction order,and compute a hash
+  status = RunScheduler(hlo_module.get(), sched_config,
+                             std::move(gpu_latency_estimator2));
+  auto comm_op_2 = GetCommunicationOrderString(hlo_module.get());
+
+  EXPECT_TRUE(status.ok());
+  EXPECT_EQ(comm_op_1, comm_op_2);
+
+}
 TEST_F(AutoReorderingTest, ReorderPassWithRandom) {
   // GTEST_SKIP() << "Skipping single test";
   std::srand(kRandomSeed);
@@ -1016,9 +1060,10 @@ TEST_F(AutoReorderingTest, ReorderPassWithRandom) {
   statics = GetModuleCost(hlo_module.get(), sched_config,
                           gpu_latency_estimator2.get());
   EXPECT_TRUE(statics.ok());
-  auto xla_hiding_order_cost = statics.value().total_cycles;
+  auto xla_lhs_cost = statics.value().total_cycles;
   EXPECT_LE(auto_reorder_cost, post_order_cost);
-  EXPECT_LE(auto_reorder_cost, xla_hiding_order_cost);
+  EXPECT_LE(auto_reorder_cost, xla_lhs_cost);
+
   
 }
 // skip this test

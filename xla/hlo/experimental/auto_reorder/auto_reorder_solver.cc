@@ -74,17 +74,18 @@ LPSchedulerFunc(void)::AddNodeToTask(ContainerType* node, TaskType task) {
 LPSchedulerFunc(StatusOr<TaskType>)::FindTask(ContainerType* node) {
   auto it = node_to_task_.find(node->UUID());
   if (it != node_to_task_.end()) {
+    VLOG(3)<<"Find task for node:"<<node->GetName()<<" success";
     return std::get<1>(it->second);
   } else {
     TF_RET_CHECK(false)
-        << "Can not find the task for node:";  // << node->GetName();
+        << "Can not find the task for node:"<< node->GetName();
   }
 };
 LPSchedulerFunc(Status)::AddConstraint(ContainerType* node) {
   if (NodeHasAddTasks(node)) {
     return OkStatus();
   }
-  node->Freeze();
+  //XD can't frozen node here, we will add other constraint after that
   return OkStatus();
 };
 LPSchedulerFunc(StatusOr<TaskType>)::AddNodeToTask(ContainerType* node) {
@@ -99,26 +100,31 @@ LPSchedulerFunc(StatusOr<TaskType>)::AddNodeToTask(ContainerType* node) {
 LPSchedulerFunc(tsl::Status)::Solve() {
   uint32_t max_execution_time = 0;
   for (auto node : nodes_) {
+    node->Freeze();
     max_execution_time += node->GetCost();
     for (auto dep_pair : node->GetDeps()) {
       auto cost = std::get<1>(dep_pair);
       max_execution_time += cost;
-    }
+    };
   }
   SetHorizon(reorder::get_horizon(max_execution_time));
-
+  // nodes_ is added by post order,so we should add it before its deps;
   for (auto node : nodes_) {
     VLOG(3) << "Add to scheduler" << node->GetName();
     TF_ASSIGN_OR_RETURN(TaskType node_task, AddNodeToTask(node));
+  }
+  for (auto node : nodes_) {
+    auto node_task = std::get<1>(node_to_task_.at(node->UUID()));
 
     channel_to_intervals_[node->GetType()].push_back(node_task.interval);
     for (auto dep_pair : node->GetDeps()) {
       auto dep_node = std::get<0>(dep_pair);
       auto cost = std::get<1>(dep_pair);
       TaskType dep_task;
-      TF_ASSIGN_OR_RETURN(dep_task, FindTask(dep_node));
       VLOG(3) << node->GetName() << "should start after" << dep_node->GetName()
               << "+" << cost;
+      TF_ASSIGN_OR_RETURN(dep_task, FindTask(dep_node));
+      
 
       cp_model_.AddGreaterOrEqual(node_task.start, dep_task.end + cost);
     }
@@ -142,10 +148,10 @@ LPSchedulerFunc(tsl::Status)::Solve() {
   VLOG(1) << "Solving:" << node_to_task_.size() << " nodes";
   operations_research::sat::SatParameters parameters;
   parameters.set_max_time_in_seconds(reorder::ksolveTimeout);
-  if(reorder::solve_debug){
-    parameters.set_log_to_stdout(true);
-    parameters.set_log_search_progress(true);
-  }
+  // if(reorder::solve_debug){
+  //   parameters.set_log_to_stdout(true);
+  //   parameters.set_log_search_progress(true);
+  // }
   parameters.set_num_search_workers(reorder::get_cpu_number());
   const operations_research::sat::CpSolverResponse response =
       operations_research::sat::SolveWithParameters(cp_model_.Build(),
@@ -156,7 +162,7 @@ LPSchedulerFunc(tsl::Status)::Solve() {
 
   if (response.status() == operations_research::sat::CpSolverStatus::OPTIMAL ||
       response.status() == operations_research::sat::CpSolverStatus::FEASIBLE) {
-    VLOG(2) << "Optimal objective value:" << response.objective_value();
+    VLOG(2) << "Optimal objective value:" << response.objective_value()<<" status:"<<response.status();
     for (auto kv : node_to_task_) {
       auto node_task_tuple = std::get<1>(kv);
       auto node = std::get<0>(node_task_tuple);
@@ -294,7 +300,9 @@ LPSchedulerFunc(std::vector<ContainerType*>)::GetSortedNodes() {
   for (auto node : nodes_) {
     sorted_nodes.push_back(node);
   }
-  std::sort(
+  // we need stable_sort,let same graph on diffence device have same computation
+  std::stable_sort(
+  // std::sort(
       sorted_nodes.begin(), sorted_nodes.end(),
       [this](ContainerType* a, ContainerType* b) { return a->GetStart() < b->GetStart(); });
   return sorted_nodes;

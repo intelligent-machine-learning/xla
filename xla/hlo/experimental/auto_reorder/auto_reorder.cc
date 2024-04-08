@@ -53,8 +53,10 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
   auto solver_ = absl::make_unique<LinearProgramScheduler<
       LPContainer<const HloInstruction*>, const HloInstruction*>
     >();
-
+  std::vector<LPContainer<const HloInstruction*>* > comm_lp_nodes;
+  
   // scan instructions, get every instruction cost and deps
+  // post order,every inst will iter before it's operators
   for (HloInstruction* instr : post_order_instructions) {
     const HloGraphNode& instr_node = schedule_graph.GetNode(instr);
     VLOG(2) << instr->ToShortString() << "flops cost :" << instr_node.GetCost();
@@ -104,7 +106,10 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
       }
 
       TF_CHECK_OK(solver_->AddConstraint(current_inst_lp_node));
-
+      if(reorder::is_keep_communicate_order()){
+        
+        comm_lp_nodes.push_back(current_inst_lp_node);
+      }
     } else {  // compute
       auto current_inst_lp_node =
           solver_->FindLPNodeOrCreate(instr, cost, NodeType::kCompute);
@@ -119,6 +124,28 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
       TF_CHECK_OK(solver_->AddConstraint(current_inst_lp_node));
     }
   }
+  if(reorder::is_keep_communicate_order()){
+    // TODO: no keep order will cause hung on multi processing, we should consider how to resolve it
+    // but now,we add constraint to let communication node keep order
+    std::cout<<"keep_communicate_order=true, add edge to keep order"<<std::endl;
+    //iter comm_lp_nodes,get one node and its next node
+    for (auto i = 0; i < comm_lp_nodes.size(); i++) {
+      auto next_node = comm_lp_nodes.at(i);
+      VLOG(3)<<"current node:"<<next_node->GetName();
+      if (i + 1 < comm_lp_nodes.size()) {
+        auto current_node = comm_lp_nodes.at(i + 1);
+        // if current_node is not next_node operators, add one edge to next_node
+        if(!next_node->HasDep(current_node)){
+          VLOG(3)<<"add edge from "<<current_node->GetName()<<" to "<<next_node->GetName();
+
+          current_node->AddDep(next_node, 1);
+        }
+        
+      }
+    }
+  }
+  
+
   auto status = solver_->Solve();
   if(reorder::solve_debug){
     solver_->RenderGantt(absl::StrCat("gantt_", computation->name()));
