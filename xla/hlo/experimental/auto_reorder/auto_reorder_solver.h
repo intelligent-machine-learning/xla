@@ -29,6 +29,9 @@ namespace xla {
     //get cpu number of current machine
     const bool is_keep_communicate_order(){
       const char* env = std::getenv("XLA_KEEP_COMMUNICATE_ORDER");
+      if (env == nullptr) {
+        return false;
+      }
       return std::strcmp(env, "true") == 0;
     };
     int get_cpu_number(){
