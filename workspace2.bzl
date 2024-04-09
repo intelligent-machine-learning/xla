@@ -9,6 +9,7 @@ load("//third_party:repo.bzl", "tf_http_archive", "tf_mirror_urls")
 
 # Import third party repository rules. See go/tfbr-thirdparty.
 load("//third_party/dlpack:workspace.bzl", dlpack = "repo")
+load("//third_party/flash_attn:workspace.bzl", flash_attn = "repo")
 load("//third_party/gloo:workspace.bzl", gloo = "repo")
 load("//third_party/mpitrampoline:workspace.bzl", mpitrampoline = "repo")
 load("//third_party/nanobind:workspace.bzl", nanobind = "repo")
@@ -51,6 +52,15 @@ def _tf_repositories():
         sha256 = "84cf3fcc47c440a8dde016eb458f8d6b93b3335d9c3a7a16f388333823f1eae0",
         strip_prefix = "cutlass-afa7b7241aabe598b725c65480bd9fa71121732c",
         urls = tf_mirror_urls("https://github.com/chsigg/cutlass/archive/afa7b7241aabe598b725c65480bd9fa71121732c.tar.gz"),
+    )
+
+    # v3.4.1
+    tf_http_archive(
+        name = "cutlass_flash_attn",
+        build_file = "//third_party:cutlass.BUILD",
+        sha256 = "9fa1da6be3d2d9207b801d5768cbced59c202444a8c84b82325b0670f47f9d48",
+        strip_prefix = "cutlass-bbe579a9e3beb6ea6626d9227ec32d0dae119a49",
+        urls = tf_mirror_urls("https://github.com/NVIDIA/cutlass/archive/bbe579a9e3beb6ea6626d9227ec32d0dae119a49.tar.gz"),
     )
 
     tf_http_archive(
@@ -125,6 +135,8 @@ def workspace():
     # don't already exist (at least if the external repository macros were
     # written according to common practice to query native.existing_rule()).
     _tf_repositories()
+
+    flash_attn()
 
 # Alias so it can be loaded without assigning to a different symbol to prevent
 # shadowing previous loads and trigger a buildifier warning.

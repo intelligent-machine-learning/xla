@@ -51,6 +51,8 @@ class GpuLayoutAssignment : public LayoutAssignment {
  private:
   absl::Status AddBackendConstraintsToDnnConvCustomCall(
       HloCustomCallInstruction* instr, LayoutConstraints* constraints);
+  absl::Status AddBackendConstraintsToFlashAttnCustomCall(
+      HloCustomCallInstruction* instr, LayoutConstraints* constraints);
 
   // dim_groups are ordered from major to minor dimensions.
   absl::Status SetOperandMajorToMinorLayout(
