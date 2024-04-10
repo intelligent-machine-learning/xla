@@ -97,6 +97,7 @@ limitations under the License.
 #include "xla/service/gpu/convolution_thunk.h"
 #include "xla/service/gpu/copy_thunk.h"
 #include "xla/service/gpu/for_thunk.h"
+#include "xla/service/gpu/flash_attn_thunk.h"
 #include "xla/service/gpu/fused_mha_thunk.h"
 #include "xla/service/gpu/fusions/fusion_emitter.h"
 #include "xla/service/gpu/fusions/fusions.h"
@@ -109,6 +110,7 @@ limitations under the License.
 #include "xla/service/gpu/gpu_asm_opts_util.h"
 #include "xla/service/gpu/gpu_conv_runner.h"
 #include "xla/service/gpu/gpu_executable.h"
+#include "xla/service/gpu/gpu_flash_attn.h"
 #include "xla/service/gpu/gpu_fused_mha_runner.h"
 #include "xla/service/gpu/gpu_norm_runner.h"
 #include "xla/service/gpu/hlo_fusion_analysis.h"
@@ -1482,6 +1484,222 @@ Status IrEmitterUnnested::EmitFusedMHABackwardThunk(mlir::Operation* op) {
       d_s_slice, softmax_sum_slice, d_Q_accum_slice, mask_slice, d_bias_slice,
       fwd_output_slice, bias_slice));
 
+  return OkStatus();
+}
+
+Status IrEmitterUnnested::EmitFlashAttnFwdThunk(
+    const HloCustomCallInstruction* instr) {
+  int64_t num_operands = instr->operand_count();
+  CHECK(num_operands >= 3);
+
+  const HloInstruction* query = instr->operand(0);
+  const HloInstruction* key = instr->operand(1);
+  const HloInstruction* value = instr->operand(2);
+
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice query_slice,
+                      GetAllocationSliceForHlo(query));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice key_slice,
+                      GetAllocationSliceForHlo(key));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice value_slice,
+                      GetAllocationSliceForHlo(value));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice output_slice,
+                      GetAllocationSliceForHlo(instr, {0}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice softmax_lse_slice,
+                      GetAllocationSliceForHlo(instr, {1}));
+
+  const Shape& output_shape =
+      ShapeUtil::GetTupleElementShape(instr->shape(), 0);
+  const Shape& softmax_lse_shape =
+      ShapeUtil::GetTupleElementShape(instr->shape(), 1);
+
+  BufferAllocation::Slice s_dmask_slice;
+  std::optional<Shape> s_dmask_shape;
+  bool return_softmax = xla::ShapeUtil::TupleElementCount(instr->shape()) == 4;
+  if (return_softmax) {
+    TF_ASSIGN_OR_RETURN(s_dmask_slice, GetAllocationSliceForHlo(instr, {2}));
+    s_dmask_shape = ShapeUtil::GetTupleElementShape(instr->shape(), 2);
+  }
+
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice rng_state_slice,
+                      GetAllocationSliceForHlo(instr, {2 + return_softmax}));
+
+  BufferAllocation::Slice cu_seqlens_query_slice, cu_seqlens_key_slice;
+  std::optional<Shape> cu_seqlens_query_shape, cu_seqlens_key_shape;
+  bool is_varlen =
+      instr->custom_call_target() == kGpuFlashAttnVarLenFwdCallTarget;
+  if (is_varlen) {
+    CHECK(num_operands >= 5);
+    const HloInstruction* cu_seqlens_query = instr->operand(3);
+    const HloInstruction* cu_seqlens_key = instr->operand(4);
+    TF_ASSIGN_OR_RETURN(cu_seqlens_query_slice,
+                        GetAllocationSliceForHlo(cu_seqlens_query));
+    TF_ASSIGN_OR_RETURN(cu_seqlens_key_slice,
+                        GetAllocationSliceForHlo(cu_seqlens_key));
+    cu_seqlens_query_shape = cu_seqlens_query->shape();
+    cu_seqlens_key_shape = cu_seqlens_key->shape();
+  }
+
+  TF_ASSIGN_OR_RETURN(const auto config,
+                      instr->backend_config<FlashAttnBackendConfig>());
+
+  BufferAllocation::Slice alibi_slopes_slice;
+  std::optional<Shape> alibi_slopes_shape;
+  int64_t alibi_slopes_opnd_idx = is_varlen ? 5 : 3;
+  if (config.has_alibi_slopes()) {
+    CHECK(num_operands > alibi_slopes_opnd_idx);
+    const HloInstruction* alibi_slopes = instr->operand(alibi_slopes_opnd_idx);
+    TF_ASSIGN_OR_RETURN(alibi_slopes_slice,
+                        GetAllocationSliceForHlo(alibi_slopes));
+    alibi_slopes_shape = alibi_slopes->shape();
+  }
+
+  BufferAllocation::Slice softmax_lse_accum_slice;
+  BufferAllocation::Slice output_accum_slice;
+  int64_t num_explicit_operands =
+      alibi_slopes_opnd_idx + config.has_alibi_slopes();
+  if (num_operands == num_explicit_operands + 2) {
+    const HloInstruction* softmax_lse_accum =
+        instr->operand(num_explicit_operands);
+    const HloInstruction* output_accum =
+        instr->operand(num_explicit_operands + 1);
+    TF_ASSIGN_OR_RETURN(softmax_lse_accum_slice,
+                        GetAllocationSliceForHlo(softmax_lse_accum));
+    TF_ASSIGN_OR_RETURN(output_accum_slice,
+                        GetAllocationSliceForHlo(output_accum));
+  } else {
+    CHECK(num_operands == num_explicit_operands);
+  }
+
+  std::optional<int> max_seqlen_q, max_seqlen_k;
+  if (is_varlen) {
+    CHECK(config.has_max_seqlen_q() && config.has_max_seqlen_k());
+    max_seqlen_q = config.max_seqlen_q();
+    max_seqlen_k = config.max_seqlen_k();
+  }
+
+  TF_ASSIGN_OR_RETURN(
+      FlashAttnFwdConfig flash_attn_fwd_config,
+      FlashAttnFwdConfig::For(
+          query->shape(), key->shape(), value->shape(), cu_seqlens_query_shape,
+          cu_seqlens_key_shape, output_shape, softmax_lse_shape, s_dmask_shape,
+          alibi_slopes_shape, config.dropout_rate(), config.scale(),
+          config.is_causal(), max_seqlen_q, max_seqlen_k));
+  AddThunkToThunkSequence(std::make_unique<FlashAttnFwdThunk>(
+      Thunk::ThunkInfo::WithProfileAnnotation(instr),
+      std::move(flash_attn_fwd_config), query_slice, key_slice, value_slice,
+      cu_seqlens_query_slice, cu_seqlens_key_slice, output_slice,
+      softmax_lse_slice, s_dmask_slice, rng_state_slice, alibi_slopes_slice,
+      softmax_lse_accum_slice, output_accum_slice));
+  return OkStatus();
+}
+
+Status IrEmitterUnnested::EmitFlashAttnBwdThunk(
+    const HloCustomCallInstruction* instr) {
+  int64_t num_operands = instr->operand_count();
+  CHECK(num_operands >= 7);
+
+  const HloInstruction* grad_output = instr->operand(0);
+  const HloInstruction* query = instr->operand(1);
+  const HloInstruction* key = instr->operand(2);
+  const HloInstruction* value = instr->operand(3);
+  const HloInstruction* output = instr->operand(4);
+  const HloInstruction* softmax_lse = instr->operand(5);
+  const HloInstruction* rng_state = instr->operand(6);
+
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_output_slice,
+                      GetAllocationSliceForHlo(grad_output));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice query_slice,
+                      GetAllocationSliceForHlo(query));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice key_slice,
+                      GetAllocationSliceForHlo(key));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice value_slice,
+                      GetAllocationSliceForHlo(value));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice output_slice,
+                      GetAllocationSliceForHlo(output));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice softmax_lse_slice,
+                      GetAllocationSliceForHlo(softmax_lse));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice rng_state_slice,
+                      GetAllocationSliceForHlo(rng_state));
+
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_query_slice,
+                      GetAllocationSliceForHlo(instr, {0}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_key_slice,
+                      GetAllocationSliceForHlo(instr, {1}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_value_slice,
+                      GetAllocationSliceForHlo(instr, {2}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_softmax_slice,
+                      GetAllocationSliceForHlo(instr, {3}));
+
+  const Shape& grad_query_shape =
+      ShapeUtil::GetTupleElementShape(instr->shape(), 0);
+  const Shape& grad_key_shape =
+      ShapeUtil::GetTupleElementShape(instr->shape(), 1);
+  const Shape& grad_value_shape =
+      ShapeUtil::GetTupleElementShape(instr->shape(), 2);
+  const Shape& grad_softmax_shape =
+      ShapeUtil::GetTupleElementShape(instr->shape(), 3);
+
+  BufferAllocation::Slice cu_seqlens_query_slice, cu_seqlens_key_slice;
+  std::optional<Shape> cu_seqlens_query_shape, cu_seqlens_key_shape;
+  bool is_varlen =
+      instr->custom_call_target() == kGpuFlashAttnVarLenBwdCallTarget;
+  if (is_varlen) {
+    CHECK(num_operands >= 9);
+    const HloInstruction* cu_seqlens_query = instr->operand(7);
+    const HloInstruction* cu_seqlens_key = instr->operand(8);
+    TF_ASSIGN_OR_RETURN(cu_seqlens_query_slice,
+                        GetAllocationSliceForHlo(cu_seqlens_query));
+    TF_ASSIGN_OR_RETURN(cu_seqlens_key_slice,
+                        GetAllocationSliceForHlo(cu_seqlens_key));
+    cu_seqlens_query_shape = cu_seqlens_query->shape();
+    cu_seqlens_key_shape = cu_seqlens_key->shape();
+  }
+
+  TF_ASSIGN_OR_RETURN(const auto config,
+                      instr->backend_config<FlashAttnBackendConfig>());
+
+  BufferAllocation::Slice alibi_slopes_slice;
+  std::optional<Shape> alibi_slopes_shape;
+  int64_t alibi_slopes_opnd_idx = is_varlen ? 9 : 7;
+  if (config.has_alibi_slopes()) {
+    CHECK(num_operands > alibi_slopes_opnd_idx);
+    const HloInstruction* alibi_slopes = instr->operand(alibi_slopes_opnd_idx);
+    TF_ASSIGN_OR_RETURN(alibi_slopes_slice,
+                        GetAllocationSliceForHlo(alibi_slopes));
+    alibi_slopes_shape = alibi_slopes->shape();
+  }
+
+  int64_t num_explicit_operands =
+      alibi_slopes_opnd_idx + config.has_alibi_slopes();
+  CHECK(num_operands == num_explicit_operands + 1);
+  const HloInstruction* grad_query_accum =
+      instr->operand(num_explicit_operands);
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_query_accum_slice,
+                      GetAllocationSliceForHlo(grad_query_accum));
+
+  std::optional<int> max_seqlen_q, max_seqlen_k;
+  if (is_varlen) {
+    CHECK(config.has_max_seqlen_q() && config.has_max_seqlen_k());
+    max_seqlen_q = config.max_seqlen_q();
+    max_seqlen_k = config.max_seqlen_k();
+  }
+
+  TF_ASSIGN_OR_RETURN(
+      FlashAttnBwdConfig flash_attn_bwd_config,
+      FlashAttnBwdConfig::For(
+          grad_output->shape(), query->shape(), key->shape(), value->shape(),
+          cu_seqlens_query_shape, cu_seqlens_key_shape, output->shape(),
+          softmax_lse->shape(), grad_query_shape, grad_key_shape,
+          grad_value_shape, grad_softmax_shape, alibi_slopes_shape,
+          config.dropout_rate(), config.scale(), config.is_causal(),
+          config.deterministic(), max_seqlen_q, max_seqlen_k));
+  AddThunkToThunkSequence(std::make_unique<FlashAttnBwdThunk>(
+      Thunk::ThunkInfo::WithProfileAnnotation(instr),
+      std::move(flash_attn_bwd_config), grad_output_slice, query_slice,
+      key_slice, value_slice, cu_seqlens_query_slice, cu_seqlens_key_slice,
+      output_slice, softmax_lse_slice, rng_state_slice, grad_query_slice,
+      grad_key_slice, grad_value_slice, grad_softmax_slice, alibi_slopes_slice,
+      grad_query_accum_slice));
   return OkStatus();
 }
 #endif  // GOOGLE_CUDA
@@ -3420,12 +3638,24 @@ Status IrEmitterUnnested::EmitOp(
       return EmitSliceToDynamic(op);
     }
     const llvm::StringRef call_target = call.getCallTargetName();
+    absl::string_view call_target_sv(call_target.data(), call_target.size());
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
-    if (absl::string_view(call_target.data(), call_target.size()) ==
-        kTriangularSolveCallTarget) {
+    if (call_target_sv == kTriangularSolveCallTarget) {
       return EmitTriangularSolveCustomCall(op);
     }
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+
+#if GOOGLE_CUDA
+    const HloCustomCallInstruction* custom_call_instr =
+        DynCast<HloCustomCallInstruction>(hlo_for_lmhlo.at(op));
+    if (call_target_sv == kGpuFlashAttnFwdCallTarget ||
+        call_target_sv == kGpuFlashAttnVarLenFwdCallTarget) {
+      return EmitFlashAttnFwdThunk(custom_call_instr);
+    } else if (call_target_sv == kGpuFlashAttnBwdCallTarget ||
+               call_target_sv == kGpuFlashAttnVarLenBwdCallTarget) {
+      return EmitFlashAttnBwdThunk(custom_call_instr);
+    }
+#endif  // GOOGLE_CUDA
 
     return EmitCustomCallThunk(op);
   }

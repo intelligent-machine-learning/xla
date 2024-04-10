@@ -43,6 +43,8 @@ class GpuLayoutAssignment : public LayoutAssignment {
  private:
   Status AddBackendConstraintsToDnnConvCustomCall(
       HloCustomCallInstruction* instr, LayoutConstraints* constraints);
+  Status AddBackendConstraintsToFlashAttnCustomCall(
+      HloCustomCallInstruction* instr, LayoutConstraints* constraints);
 
   // dim_groups are ordered from major to minor dimensions.
   Status SetOperandMajorToMinorLayout(

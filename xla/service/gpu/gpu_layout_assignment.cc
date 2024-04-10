@@ -30,6 +30,7 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/layout_util.h"
 #include "xla/service/gpu/backend_configs.pb.h"
+#include "xla/service/gpu/gpu_flash_attn.h"
 #include "xla/service/gpu/ir_emission_utils.h"
 #include "xla/service/gpu/matmul_utils.h"
 #include "xla/service/gpu/stream_executor_util.h"
@@ -239,6 +240,18 @@ Status GpuLayoutAssignment::AddBackendConstraintsToDnnConvCustomCall(
   return OkStatus();
 }
 
+Status GpuLayoutAssignment::AddBackendConstraintsToFlashAttnCustomCall(
+    HloCustomCallInstruction* instr, LayoutConstraints* constraints) {
+  // Make sure flash attn's operands and output are all contiguous
+  for (int64_t i = 0; i < instr->operand_count(); ++i) {
+    Shape op_shape = instr->operand(i)->shape();
+    LayoutUtil::SetToDefaultLayout(&op_shape);
+    TF_RETURN_IF_ERROR(SetOperandLayout(op_shape, instr, i));
+  }
+  TF_RETURN_IF_ERROR(SetInstructionLayout(instr->shape(), instr));
+  return OkStatus();
+}
+
 namespace {
 
 // Imposes the default layout with first two dimensions swapped on input
@@ -280,6 +293,11 @@ Status GpuLayoutAssignment::AddBackendConstraints(
     HloInstruction* instruction = *iterator;
     if (IsCustomCallToDnnConvolution(*instruction)) {
       TF_RETURN_IF_ERROR(AddBackendConstraintsToDnnConvCustomCall(
+          Cast<HloCustomCallInstruction>(instruction), constraints));
+    }
+
+    if (IsCustomCallToFlashAttn(*instruction)) {
+      TF_RETURN_IF_ERROR(AddBackendConstraintsToFlashAttnCustomCall(
           Cast<HloCustomCallInstruction>(instruction), constraints));
     }
 

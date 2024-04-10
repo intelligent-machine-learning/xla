@@ -197,3 +197,19 @@ message CudnnfMHABackendConfig {
   // Is causal mask
   bool is_causal_mask = 21;
 }
+
+message FlashAttnBackendConfig {
+  float dropout_rate = 2;
+
+  float scale = 3;
+
+  bool is_causal = 4;
+
+  bool deterministic = 5;
+
+  bool has_alibi_slopes = 6;
+
+  optional int32 max_seqlen_q = 7;
+
+  optional int32 max_seqlen_k = 8;
+}

@@ -155,6 +155,8 @@ class IrEmitterUnnested : public IrEmitter {
       const HloFusionInstruction* fusion, mlir::Operation* op);
   Status EmitFusedMHAThunk(mlir::Operation* op);
   Status EmitFusedMHABackwardThunk(mlir::Operation* op);
+  Status EmitFlashAttnFwdThunk(const HloCustomCallInstruction* instr);
+  Status EmitFlashAttnBwdThunk(const HloCustomCallInstruction* instr);
 #endif  // GOOGLE_CUDA
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
   Status EmitCubDeviceRadixSort(mlir::Operation* op);
@@ -424,7 +426,7 @@ class IrEmitterUnnested : public IrEmitter {
   Status AssertNonDeterminismIsOkay(const std::string& op_name);
 
   StatusOr<BufferAllocation::Slice> GetAllocationSliceForHlo(
-      const HloInstruction* instr, const ShapeIndex& index) const;
+      const HloInstruction* instr, const ShapeIndex& index = {}) const;
 
   // The thunk sequence this IrEmitter generates for the input computation.
   ThunkSequence thunk_sequence_;

@@ -1,0 +1,1944 @@
+diff --git a/csrc/flash_attn/flash_api.cpp b/csrc/flash_attn/flash_api.cpp
+index ac753af..ab6ebf1 100644
+--- a/csrc/flash_attn/flash_api.cpp
++++ b/csrc/flash_attn/flash_api.cpp
+@@ -498,13 +498,12 @@ mha_fwd(at::Tensor &q,         // batch_size x seqlen_q x num_heads x head_size
+ 
+ std::vector<at::Tensor>
+ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \sum_{i=0}^{b} s_i
+-               const at::Tensor &k,  // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads_k x head_size if there's a block_table.
+-               const at::Tensor &v,  // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads_k x head_size if there's a block_table.
++               const at::Tensor &k,  // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i
++               const at::Tensor &v,  // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i
+                c10::optional<at::Tensor> &out_, // total_q x num_heads x head_size, total_k := \sum_{i=0}^{b} s_i
+                const at::Tensor &cu_seqlens_q,  // b+1
+                const at::Tensor &cu_seqlens_k,  // b+1
+                c10::optional<at::Tensor> &seqused_k, // b. If given, only this many elements of each batch element's keys are used.
+-               c10::optional<at::Tensor> &block_table_, // batch_size x max_num_blocks_per_seq
+                c10::optional<at::Tensor> &alibi_slopes_, // num_heads or b x num_heads
+                int max_seqlen_q,
+                const int max_seqlen_k,
+@@ -540,15 +539,6 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
+     CHECK_DEVICE(cu_seqlens_q);
+     CHECK_DEVICE(cu_seqlens_k);
+ 
+-    at::Tensor block_table;
+-    const bool paged_KV = block_table_.has_value();
+-    if (paged_KV) {
+-        block_table = block_table_.value();
+-        CHECK_DEVICE(block_table);
+-        TORCH_CHECK(block_table.dtype() == torch::kInt32, "block_table must have dtype torch.int32");
+-        TORCH_CHECK(block_table.stride(-1) == 1, "block_table must have contiguous last dimension");
+-    }
+-
+     TORCH_CHECK(q.stride(-1) == 1, "Input tensor must have contiguous last dimension");
+     TORCH_CHECK(k.stride(-1) == 1, "Input tensor must have contiguous last dimension");
+     TORCH_CHECK(v.stride(-1) == 1, "Input tensor must have contiguous last dimension");
+@@ -560,12 +550,8 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
+     const int batch_size = cu_seqlens_q.numel() - 1;
+     int num_heads = sizes[1];
+     const int head_size_og = sizes[2];
+-    const int num_heads_k = paged_KV ? k.size(2) : k.size(1);
+-
+-    const int max_num_blocks_per_seq = !paged_KV ? 0 : block_table.size(1);
+-    const int num_blocks = !paged_KV ? 0 : k.size(0);
+-    const int page_block_size = !paged_KV ? 1 : k.size(1);
+-    TORCH_CHECK(!paged_KV || page_block_size % 256 == 0, "Paged KV cache block size must be divisible by 256");
++    const int total_k = k.size(0);
++    const int num_heads_k = k.size(1);
+ 
+     if (max_seqlen_q == 1 && !alibi_slopes_.has_value()) { is_causal = false; }  // causal=true is the same as causal=false in this case
+     if (is_causal) { window_size_right = 0; }
+@@ -593,16 +579,8 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
+     if (window_size_right >= max_seqlen_k) { window_size_right = -1; }
+ 
+     CHECK_SHAPE(q, total_q, num_heads, head_size_og);
+-    if (!paged_KV) {
+-        const int total_k = k.size(0);
+-        CHECK_SHAPE(k, total_k, num_heads_k, head_size_og);
+-        CHECK_SHAPE(v, total_k, num_heads_k, head_size_og);
+-    } else {
+-        CHECK_SHAPE(k, num_blocks, page_block_size, num_heads_k, head_size_og);
+-        CHECK_SHAPE(v, num_blocks, page_block_size, num_heads_k, head_size_og);
+-        CHECK_SHAPE(block_table, batch_size, max_num_blocks_per_seq);
+-    }
+-
++    CHECK_SHAPE(k, total_k, num_heads_k, head_size_og);
++    CHECK_SHAPE(v, total_k, num_heads_k, head_size_og);
+     CHECK_SHAPE(cu_seqlens_q, batch_size + 1);
+     CHECK_SHAPE(cu_seqlens_k, batch_size + 1);
+     if (seqused_k.has_value()){
+@@ -684,14 +662,6 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
+                      window_size_left,
+                      window_size_right,
+                      seqlenq_ngroups_swapped);
+-
+-    if (paged_KV) {
+-        params.block_table = block_table.data_ptr<int>();
+-        params.block_table_batch_stride = block_table.stride(0);
+-        params.k_batch_stride = k_padded.stride(0);
+-        params.v_batch_stride = v_padded.stride(0);
+-    }
+-    params.page_block_size = page_block_size;
+     if (seqlenq_ngroups_swapped) {
+         // Only apply split-k for decoding
+         set_params_splitkv(params, batch_size, num_heads,
+@@ -720,7 +690,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
+ 
+     if (max_seqlen_k > 0) {
+         auto stream = at::cuda::getCurrentCUDAStream().stream();
+-        run_mha_fwd(params, stream, paged_KV);
++        run_mha_fwd(params, stream);
+     } else {
+         // If seqlen_k == 0, then we have an empty tensor. We need to set the output to 0.
+         out.zero_();
+diff --git a/csrc/flash_attn/src/alibi.h b/csrc/flash_attn/src/alibi.h
+index 80d297f..dc01d6a 100644
+--- a/csrc/flash_attn/src/alibi.h
++++ b/csrc/flash_attn/src/alibi.h
+@@ -1,11 +1,11 @@
+ #include <cmath>
+ 
+-#include <cute/tensor.hpp>
++#include "cute/tensor.hpp"
+ 
+-#include <cutlass/cutlass.h>
+-#include <cutlass/array.h>
++#include "cutlass/cutlass.h"
++#include "cutlass/array.h"
+ 
+-#include "utils.h"
++#include "flash_utils.h"
+ 
+ namespace flash {
+ 
+diff --git a/csrc/flash_attn/src/dropout.h b/csrc/flash_attn/src/dropout.h
+index 4882f97..0c006c4 100644
+--- a/csrc/flash_attn/src/dropout.h
++++ b/csrc/flash_attn/src/dropout.h
+@@ -5,7 +5,7 @@
+ #pragma once
+ 
+ #include "philox.cuh"
+-#include "utils.h"
++#include "flash_utils.h"
+ 
+ namespace flash {
+ 
+diff --git a/csrc/flash_attn/src/flash.h b/csrc/flash_attn/src/flash.h
+index 88a7195..4817fdd 100644
+--- a/csrc/flash_attn/src/flash.h
++++ b/csrc/flash_attn/src/flash.h
+@@ -5,15 +5,10 @@
+ #pragma once
+ 
+ #include <cuda.h>
++#include <cuda_runtime.h>
+ #include <vector>
+ 
+-#ifdef OLD_GENERATOR_PATH
+-#include <ATen/CUDAGeneratorImpl.h>
+-#else
+-#include <ATen/cuda/CUDAGeneratorImpl.h>
+-#endif
+-
+-#include <ATen/cuda/CUDAGraphsUtils.cuh> // For at::cuda::philox::unpack
++#include "philox.cuh"
+ 
+ constexpr int TOTAL_DIM = 0;
+ constexpr int H_DIM = 1;
+@@ -120,7 +115,7 @@ struct Flash_fwd_params : public Qkv_params {
+     int window_size_left, window_size_right;
+ 
+     // Random state.
+-    at::PhiloxCudaState philox_args;
++    flash::PhiloxCudaState philox_args;
+ 
+     // Pointer to the RNG seed (idx 0) and offset (idx 1).
+     uint64_t * rng_state;
+diff --git a/csrc/flash_attn/src/flash_bwd_hdim128_bf16_sm80.cu b/csrc/flash_attn/src/flash_bwd_hdim128_bf16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_bwd_hdim128_bf16_sm80.cu
+rename to csrc/flash_attn/src/flash_bwd_hdim128_bf16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_bwd_hdim128_fp16_sm80.cu b/csrc/flash_attn/src/flash_bwd_hdim128_fp16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_bwd_hdim128_fp16_sm80.cu
+rename to csrc/flash_attn/src/flash_bwd_hdim128_fp16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_bwd_hdim160_bf16_sm80.cu b/csrc/flash_attn/src/flash_bwd_hdim160_bf16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_bwd_hdim160_bf16_sm80.cu
+rename to csrc/flash_attn/src/flash_bwd_hdim160_bf16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_bwd_hdim160_fp16_sm80.cu b/csrc/flash_attn/src/flash_bwd_hdim160_fp16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_bwd_hdim160_fp16_sm80.cu
+rename to csrc/flash_attn/src/flash_bwd_hdim160_fp16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_bwd_hdim192_bf16_sm80.cu b/csrc/flash_attn/src/flash_bwd_hdim192_bf16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_bwd_hdim192_bf16_sm80.cu
+rename to csrc/flash_attn/src/flash_bwd_hdim192_bf16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_bwd_hdim192_fp16_sm80.cu b/csrc/flash_attn/src/flash_bwd_hdim192_fp16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_bwd_hdim192_fp16_sm80.cu
+rename to csrc/flash_attn/src/flash_bwd_hdim192_fp16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_bwd_hdim224_bf16_sm80.cu b/csrc/flash_attn/src/flash_bwd_hdim224_bf16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_bwd_hdim224_bf16_sm80.cu
+rename to csrc/flash_attn/src/flash_bwd_hdim224_bf16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_bwd_hdim224_fp16_sm80.cu b/csrc/flash_attn/src/flash_bwd_hdim224_fp16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_bwd_hdim224_fp16_sm80.cu
+rename to csrc/flash_attn/src/flash_bwd_hdim224_fp16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_bwd_hdim256_bf16_sm80.cu b/csrc/flash_attn/src/flash_bwd_hdim256_bf16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_bwd_hdim256_bf16_sm80.cu
+rename to csrc/flash_attn/src/flash_bwd_hdim256_bf16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_bwd_hdim256_fp16_sm80.cu b/csrc/flash_attn/src/flash_bwd_hdim256_fp16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_bwd_hdim256_fp16_sm80.cu
+rename to csrc/flash_attn/src/flash_bwd_hdim256_fp16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_bwd_hdim32_bf16_sm80.cu b/csrc/flash_attn/src/flash_bwd_hdim32_bf16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_bwd_hdim32_bf16_sm80.cu
+rename to csrc/flash_attn/src/flash_bwd_hdim32_bf16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_bwd_hdim32_fp16_sm80.cu b/csrc/flash_attn/src/flash_bwd_hdim32_fp16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_bwd_hdim32_fp16_sm80.cu
+rename to csrc/flash_attn/src/flash_bwd_hdim32_fp16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_bwd_hdim64_bf16_sm80.cu b/csrc/flash_attn/src/flash_bwd_hdim64_bf16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_bwd_hdim64_bf16_sm80.cu
+rename to csrc/flash_attn/src/flash_bwd_hdim64_bf16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_bwd_hdim64_fp16_sm80.cu b/csrc/flash_attn/src/flash_bwd_hdim64_fp16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_bwd_hdim64_fp16_sm80.cu
+rename to csrc/flash_attn/src/flash_bwd_hdim64_fp16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_bwd_hdim96_bf16_sm80.cu b/csrc/flash_attn/src/flash_bwd_hdim96_bf16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_bwd_hdim96_bf16_sm80.cu
+rename to csrc/flash_attn/src/flash_bwd_hdim96_bf16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_bwd_hdim96_fp16_sm80.cu b/csrc/flash_attn/src/flash_bwd_hdim96_fp16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_bwd_hdim96_fp16_sm80.cu
+rename to csrc/flash_attn/src/flash_bwd_hdim96_fp16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_bwd_kernel.h b/csrc/flash_attn/src/flash_bwd_kernel.h
+index 6f89c21..c23211e 100644
+--- a/csrc/flash_attn/src/flash_bwd_kernel.h
++++ b/csrc/flash_attn/src/flash_bwd_kernel.h
+@@ -4,15 +4,15 @@
+ 
+ #pragma once
+ 
+-#include <cute/algorithm/copy.hpp>
++#include "cute/algorithm/copy.hpp"
+ 
+-#include <cutlass/cutlass.h>
+-#include <cutlass/array.h>
+-#include <cutlass/numeric_types.h>
++#include "cutlass/cutlass.h"
++#include "cutlass/array.h"
++#include "cutlass/numeric_types.h"
+ 
+ #include "block_info.h"
+ #include "kernel_traits.h"
+-#include "utils.h"
++#include "flash_utils.h"
+ #include "softmax.h"
+ #include "mask.h"
+ #include "dropout.h"
+diff --git a/csrc/flash_attn/src/flash_bwd_launch_template.h b/csrc/flash_attn/src/flash_bwd_launch_template.h
+index fd81c88..5896245 100644
+--- a/csrc/flash_attn/src/flash_bwd_launch_template.h
++++ b/csrc/flash_attn/src/flash_bwd_launch_template.h
+@@ -4,8 +4,6 @@
+ 
+ #pragma once
+ 
+-#include <ATen/cuda/CUDAContext.h>
+-
+ #include "static_switch.h"
+ #include "flash.h"
+ #include "flash_bwd_preprocess_kernel.h"
+@@ -72,7 +70,7 @@ void run_flash_bwd_seqk_parallel(Flash_bwd_params &params, cudaStream_t stream)
+     const int num_n_block = (params.seqlen_k + Kernel_traits::kBlockN - 1) / Kernel_traits::kBlockN;
+     int gridDimx = num_n_block;
+     if (params.deterministic) {
+-        auto dprops = at::cuda::getCurrentDeviceProperties();
++        auto dprops = flash::cuda::getCurrentDeviceProperties();
+         gridDimx = (dprops->multiProcessorCount + params.b * params.h - 1) / (params.b * params.h);
+     }
+     dim3 grid_n(gridDimx, params.b, params.h);
+@@ -82,7 +80,7 @@ void run_flash_bwd_seqk_parallel(Flash_bwd_params &params, cudaStream_t stream)
+     } else {
+         flash_bwd_dot_do_o_kernel<false, Kernel_traits><<<grid_m, Kernel_traits::kNThreads, 0, stream>>>(params);
+     }
+-    C10_CUDA_KERNEL_LAUNCH_CHECK();
++    FLASH_CUDA_KERNEL_LAUNCH_CHECK();
+ 
+     // We want to specialize to is_even_MN and not just is_even_M, since in the case where N is not
+     // a multiple of kBlockN, we'll need to apply mask in the loop.
+@@ -101,11 +99,11 @@ void run_flash_bwd_seqk_parallel(Flash_bwd_params &params, cudaStream_t stream)
+                         auto kernel = &flash_bwd_dq_dk_dv_loop_seqk_parallel_kernel<Kernel_traits, Is_dropout, Is_causal, Is_local && !Is_causal, Has_alibi, IsEvenMNConst && IsEvenKConst && !Is_local && Kernel_traits::kHeadDim <= 128, IsEvenKConst>;
+                         // auto kernel = &flash_bwd_dq_dk_dv_loop_seqk_parallel_kernel<Kernel_traits, false, Is_causal, false, false, true, true>;
+                         if (smem_size_dq_dk_dv >= 48 * 1024)  {
+-                            C10_CUDA_CHECK(cudaFuncSetAttribute(
++                            FLASH_CUDA_CHECK(cudaFuncSetAttribute(
+                                 kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size_dq_dk_dv));
+                         }
+                         kernel<<<grid_n, Kernel_traits::kNThreads, smem_size_dq_dk_dv, stream>>>(params);
+-                        C10_CUDA_KERNEL_LAUNCH_CHECK();
++                        FLASH_CUDA_KERNEL_LAUNCH_CHECK();
+                     });
+                 });
+             });
+@@ -114,11 +112,11 @@ void run_flash_bwd_seqk_parallel(Flash_bwd_params &params, cudaStream_t stream)
+ 
+     auto kernel_dq = &flash_bwd_convert_dq_kernel<Kernel_traits>;
+     if (Kernel_traits::kSmemdQSize >= 48 * 1024)  {
+-        C10_CUDA_CHECK(cudaFuncSetAttribute(
++        FLASH_CUDA_CHECK(cudaFuncSetAttribute(
+             kernel_dq, cudaFuncAttributeMaxDynamicSharedMemorySize, Kernel_traits::kSmemdQSize));
+     }
+     kernel_dq<<<grid_m, Kernel_traits::kNThreads, Kernel_traits::kSmemdQSize, stream>>>(params, !params.deterministic ? 1 : gridDimx);
+-    C10_CUDA_KERNEL_LAUNCH_CHECK();
++    FLASH_CUDA_KERNEL_LAUNCH_CHECK();
+ }
+ 
+ template<typename Kernel_traits, bool Is_dropout>
+@@ -137,7 +135,7 @@ void run_mha_bwd_hdim32(Flash_bwd_params &params, cudaStream_t stream) {
+     cudaError status_ = cudaDeviceGetAttribute(
+         &max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+     if (status_ != cudaSuccess) {
+-      C10_CUDA_CHECK(status_);
++      FLASH_CUDA_CHECK(status_);
+     }
+     DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
+         if (max_smem_per_block >= 2 * ((3 * 128 + 2 * 128) * Headdim + 2 * 128 * 128)) { // 104 KB
+@@ -161,7 +159,7 @@ void run_mha_bwd_hdim64(Flash_bwd_params &params, cudaStream_t stream) {
+     cudaError status_ = cudaDeviceGetAttribute(
+         &max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+     if (status_ != cudaSuccess) {
+-      C10_CUDA_CHECK(status_);
++      FLASH_CUDA_CHECK(status_);
+     }
+     // printf("max_smem_per_block = %d\n", max_smem_per_block);
+     DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
+@@ -206,7 +204,7 @@ void run_mha_bwd_hdim96(Flash_bwd_params &params, cudaStream_t stream) {
+     cudaError status_ = cudaDeviceGetAttribute(
+         &max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+     if (status_ != cudaSuccess) {
+-      C10_CUDA_CHECK(status_);
++      FLASH_CUDA_CHECK(status_);
+     }
+     // printf("max_smem_per_block = %d\n", max_smem_per_block);
+     DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
+@@ -232,7 +230,7 @@ void run_mha_bwd_hdim128(Flash_bwd_params &params, cudaStream_t stream) {
+     cudaError status_ = cudaDeviceGetAttribute(
+         &max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+     if (status_ != cudaSuccess) {
+-      C10_CUDA_CHECK(status_);
++      FLASH_CUDA_CHECK(status_);
+     }
+     // printf("max_smem_per_block = %d\n", max_smem_per_block);
+     DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
+@@ -266,7 +264,7 @@ void run_mha_bwd_hdim160(Flash_bwd_params &params, cudaStream_t stream) {
+     cudaError status_ = cudaDeviceGetAttribute(
+         &max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+     if (status_ != cudaSuccess) {
+-      C10_CUDA_CHECK(status_);
++      FLASH_CUDA_CHECK(status_);
+     }
+     DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
+         if (max_smem_per_block >= 116 * 1024) {
+@@ -286,7 +284,7 @@ void run_mha_bwd_hdim192(Flash_bwd_params &params, cudaStream_t stream) {
+     cudaError status_ = cudaDeviceGetAttribute(
+         &max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+     if (status_ != cudaSuccess) {
+-      C10_CUDA_CHECK(status_);
++      FLASH_CUDA_CHECK(status_);
+     }
+     DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
+         if (max_smem_per_block >= 136 * 1024) {
+@@ -314,7 +312,7 @@ void run_mha_bwd_hdim256(Flash_bwd_params &params, cudaStream_t stream) {
+     cudaError status_ = cudaDeviceGetAttribute(
+         &max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+     if (status_ != cudaSuccess) {
+-      C10_CUDA_CHECK(status_);
++      FLASH_CUDA_CHECK(status_);
+     }
+     DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
+         if (max_smem_per_block >= 176 * 1024) {  // H100
+diff --git a/csrc/flash_attn/src/flash_bwd_preprocess_kernel.h b/csrc/flash_attn/src/flash_bwd_preprocess_kernel.h
+index 6582d81..3f6e7fb 100644
+--- a/csrc/flash_attn/src/flash_bwd_preprocess_kernel.h
++++ b/csrc/flash_attn/src/flash_bwd_preprocess_kernel.h
+@@ -4,15 +4,15 @@
+ 
+ #pragma once
+ 
+-#include <cute/algorithm/copy.hpp>
++#include "cute/algorithm/copy.hpp"
+ 
+-#include <cutlass/cutlass.h>
+-#include <cutlass/array.h>
+-#include <cutlass/numeric_types.h>
++#include "cutlass/cutlass.h"
++#include "cutlass/array.h"
++#include "cutlass/numeric_types.h"
+ 
+ #include "block_info.h"
+ #include "kernel_traits.h"
+-#include "utils.h"
++#include "flash_utils.h"
+ 
+ namespace flash {
+ 
+diff --git a/csrc/flash_attn/src/flash_fwd_hdim128_bf16_sm80.cu b/csrc/flash_attn/src/flash_fwd_hdim128_bf16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_hdim128_bf16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_hdim128_bf16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_hdim128_fp16_sm80.cu b/csrc/flash_attn/src/flash_fwd_hdim128_fp16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_hdim128_fp16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_hdim128_fp16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_hdim160_bf16_sm80.cu b/csrc/flash_attn/src/flash_fwd_hdim160_bf16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_hdim160_bf16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_hdim160_bf16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_hdim160_fp16_sm80.cu b/csrc/flash_attn/src/flash_fwd_hdim160_fp16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_hdim160_fp16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_hdim160_fp16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_hdim192_bf16_sm80.cu b/csrc/flash_attn/src/flash_fwd_hdim192_bf16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_hdim192_bf16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_hdim192_bf16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_hdim192_fp16_sm80.cu b/csrc/flash_attn/src/flash_fwd_hdim192_fp16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_hdim192_fp16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_hdim192_fp16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_hdim224_bf16_sm80.cu b/csrc/flash_attn/src/flash_fwd_hdim224_bf16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_hdim224_bf16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_hdim224_bf16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_hdim224_fp16_sm80.cu b/csrc/flash_attn/src/flash_fwd_hdim224_fp16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_hdim224_fp16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_hdim224_fp16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_hdim256_bf16_sm80.cu b/csrc/flash_attn/src/flash_fwd_hdim256_bf16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_hdim256_bf16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_hdim256_bf16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_hdim256_fp16_sm80.cu b/csrc/flash_attn/src/flash_fwd_hdim256_fp16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_hdim256_fp16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_hdim256_fp16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_hdim32_bf16_sm80.cu b/csrc/flash_attn/src/flash_fwd_hdim32_bf16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_hdim32_bf16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_hdim32_bf16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_hdim32_fp16_sm80.cu b/csrc/flash_attn/src/flash_fwd_hdim32_fp16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_hdim32_fp16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_hdim32_fp16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_hdim64_bf16_sm80.cu b/csrc/flash_attn/src/flash_fwd_hdim64_bf16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_hdim64_bf16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_hdim64_bf16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_hdim64_fp16_sm80.cu b/csrc/flash_attn/src/flash_fwd_hdim64_fp16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_hdim64_fp16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_hdim64_fp16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_hdim96_bf16_sm80.cu b/csrc/flash_attn/src/flash_fwd_hdim96_bf16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_hdim96_bf16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_hdim96_bf16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_hdim96_fp16_sm80.cu b/csrc/flash_attn/src/flash_fwd_hdim96_fp16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_hdim96_fp16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_hdim96_fp16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_kernel.h b/csrc/flash_attn/src/flash_fwd_kernel.h
+index 104e164..d03b2e1 100644
+--- a/csrc/flash_attn/src/flash_fwd_kernel.h
++++ b/csrc/flash_attn/src/flash_fwd_kernel.h
+@@ -4,15 +4,15 @@
+ 
+ #pragma once
+ 
+-#include <cute/algorithm/copy.hpp>
++#include "cute/algorithm/copy.hpp"
+ 
+-#include <cutlass/cutlass.h>
+-#include <cutlass/array.h>
+-#include <cutlass/numeric_types.h>
++#include "cutlass/cutlass.h"
++#include "cutlass/array.h"
++#include "cutlass/numeric_types.h"
+ 
+ #include "block_info.h"
+ #include "kernel_traits.h"
+-#include "utils.h"
++#include "flash_utils.h"
+ #include "softmax.h"
+ #include "mask.h"
+ #include "dropout.h"
+@@ -42,7 +42,7 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
+     constexpr int kHeadDim = Kernel_traits::kHeadDim;
+     constexpr int kNWarps = Kernel_traits::kNWarps;
+ 
+-    auto seed_offset = at::cuda::philox::unpack(params.philox_args);
++    auto seed_offset = flash::cuda::philox::unpack(params.philox_args);
+     flash::Dropout dropout(std::get<0>(seed_offset), std::get<1>(seed_offset), params.p_dropout_in_uint8_t,
+                            bidb, bidh, tidx, params.h);
+ 
+diff --git a/csrc/flash_attn/src/flash_fwd_launch_template.h b/csrc/flash_attn/src/flash_fwd_launch_template.h
+index fa6a6f6..c6a6fc4 100644
+--- a/csrc/flash_attn/src/flash_fwd_launch_template.h
++++ b/csrc/flash_attn/src/flash_fwd_launch_template.h
+@@ -4,8 +4,6 @@
+ 
+ #pragma once
+ 
+-#include <ATen/cuda/CUDAContext.h>
+-
+ #include "static_switch.h"
+ #include "flash.h"
+ #include "flash_fwd_kernel.h"
+@@ -77,7 +75,7 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
+                         // printf("IsEvenMNConst = %d, IsEvenKConst = %d, Is_local = %d, Is_causal = %d, ReturnSoftmaxConst = %d, Is_dropout = %d\n", int(IsEvenMNConst), int(IsEvenKConst), int(Is_local), int(Is_causal), int(ReturnSoftmaxConst), int(Is_dropout));
+                         // auto kernel = &flash_fwd_kernel<Kernel_traits, false, Is_causal, false, true, true, false>;
+                         if (smem_size >= 48 * 1024) {
+-                            C10_CUDA_CHECK(cudaFuncSetAttribute(
++                            FLASH_CUDA_CHECK(cudaFuncSetAttribute(
+                                 kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+                         }
+                         // int ctas_per_sm;
+@@ -85,7 +83,7 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
+                         //     &ctas_per_sm, kernel, Kernel_traits::kNThreads, smem_size);
+                         // printf("smem_size = %d, CTAs per SM = %d\n", int(smem_size), ctas_per_sm);
+                         kernel<<<grid, Kernel_traits::kNThreads, smem_size, stream>>>(params);
+-                        C10_CUDA_KERNEL_LAUNCH_CHECK();
++                        FLASH_CUDA_KERNEL_LAUNCH_CHECK();
+                     });
+                 });
+             });
+@@ -116,11 +114,11 @@ void run_flash_splitkv_fwd(Flash_fwd_params &params, cudaStream_t stream) {
+                                 // auto kernel = &flash_fwd_splitkv_kernel<Kernel_traits, Is_causal, false, true, Split, Append_KV>;
+                                 // auto kernel = &flash_fwd_splitkv_kernel<Kernel_traits, Is_causal, false, IsEvenKConst>;
+                                 if (smem_size >= 48 * 1024) {
+-                                    C10_CUDA_CHECK(cudaFuncSetAttribute(
++                                    FLASH_CUDA_CHECK(cudaFuncSetAttribute(
+                                         kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+                                 }
+                                 kernel<<<grid, Kernel_traits::kNThreads, smem_size, stream>>>(params);
+-                                C10_CUDA_KERNEL_LAUNCH_CHECK();
++                                FLASH_CUDA_KERNEL_LAUNCH_CHECK();
+                             });
+                         });
+                     });
+@@ -150,7 +148,7 @@ void run_flash_splitkv_fwd(Flash_fwd_params &params, cudaStream_t stream) {
+             } else if (params.num_splits <= 128) {
+                 flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 7, IsEvenKConst><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
+             }
+-            C10_CUDA_KERNEL_LAUNCH_CHECK();
++            FLASH_CUDA_KERNEL_LAUNCH_CHECK();
+         });
+     }
+ }
+@@ -200,7 +198,7 @@ void run_mha_fwd_hdim64(Flash_fwd_params &params, cudaStream_t stream) {
+ template<typename T>
+ void run_mha_fwd_hdim96(Flash_fwd_params &params, cudaStream_t stream) {
+     constexpr static int Headdim = 96;
+-    auto dprops = at::cuda::getCurrentDeviceProperties();
++    auto dprops = flash::cuda::getCurrentDeviceProperties();
+     bool is_sm8x = dprops->major == 8 && dprops->minor > 0;
+     DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
+         BOOL_SWITCH(params.is_causal, Is_causal, [&] {
+@@ -226,7 +224,7 @@ void run_mha_fwd_hdim96(Flash_fwd_params &params, cudaStream_t stream) {
+ template<typename T>
+ void run_mha_fwd_hdim128(Flash_fwd_params &params, cudaStream_t stream) {
+     constexpr static int Headdim = 128;
+-    auto dprops = at::cuda::getCurrentDeviceProperties();
++    auto dprops = flash::cuda::getCurrentDeviceProperties();
+     bool is_sm8x = dprops->major == 8 && dprops->minor > 0;
+     DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
+         BOOL_SWITCH(params.is_causal, Is_causal, [&] {
+@@ -263,7 +261,7 @@ void run_mha_fwd_hdim128(Flash_fwd_params &params, cudaStream_t stream) {
+ template<typename T>
+ void run_mha_fwd_hdim160(Flash_fwd_params &params, cudaStream_t stream) {
+     constexpr static int Headdim = 160;
+-    auto dprops = at::cuda::getCurrentDeviceProperties();
++    auto dprops = flash::cuda::getCurrentDeviceProperties();
+     bool is_sm8x = dprops->major == 8 && dprops->minor > 0;
+     DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
+         BOOL_SWITCH(params.is_causal, Is_causal, [&] {
+@@ -318,7 +316,7 @@ void run_mha_fwd_hdim224(Flash_fwd_params &params, cudaStream_t stream) {
+     cudaError status_ = cudaDeviceGetAttribute(
+         &max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+     if (status_ != cudaSuccess) {
+-      C10_CUDA_CHECK(status_);
++      FLASH_CUDA_CHECK(status_);
+     }
+     // printf("max_smem_per_block = %d\n", max_smem_per_block);
+     DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
+@@ -349,7 +347,7 @@ void run_mha_fwd_hdim256(Flash_fwd_params &params, cudaStream_t stream) {
+     status_ = cudaDeviceGetAttribute(
+         &max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+     if (status_ != cudaSuccess) {
+-      C10_CUDA_CHECK(status_);
++      FLASH_CUDA_CHECK(status_);
+     }
+     // printf("max_smem_per_sm = %d, max_smem_per_block = %d\n", max_smem_per_sm, max_smem_per_block);
+     DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
+diff --git a/csrc/flash_attn/src/flash_fwd_split_hdim128_bf16_sm80.cu b/csrc/flash_attn/src/flash_fwd_split_hdim128_bf16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_split_hdim128_bf16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_split_hdim128_bf16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_split_hdim128_fp16_sm80.cu b/csrc/flash_attn/src/flash_fwd_split_hdim128_fp16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_split_hdim128_fp16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_split_hdim128_fp16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_split_hdim160_bf16_sm80.cu b/csrc/flash_attn/src/flash_fwd_split_hdim160_bf16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_split_hdim160_bf16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_split_hdim160_bf16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_split_hdim160_fp16_sm80.cu b/csrc/flash_attn/src/flash_fwd_split_hdim160_fp16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_split_hdim160_fp16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_split_hdim160_fp16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_split_hdim192_bf16_sm80.cu b/csrc/flash_attn/src/flash_fwd_split_hdim192_bf16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_split_hdim192_bf16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_split_hdim192_bf16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_split_hdim192_fp16_sm80.cu b/csrc/flash_attn/src/flash_fwd_split_hdim192_fp16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_split_hdim192_fp16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_split_hdim192_fp16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_split_hdim224_bf16_sm80.cu b/csrc/flash_attn/src/flash_fwd_split_hdim224_bf16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_split_hdim224_bf16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_split_hdim224_bf16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_split_hdim224_fp16_sm80.cu b/csrc/flash_attn/src/flash_fwd_split_hdim224_fp16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_split_hdim224_fp16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_split_hdim224_fp16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_split_hdim256_bf16_sm80.cu b/csrc/flash_attn/src/flash_fwd_split_hdim256_bf16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_split_hdim256_bf16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_split_hdim256_bf16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_split_hdim256_fp16_sm80.cu b/csrc/flash_attn/src/flash_fwd_split_hdim256_fp16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_split_hdim256_fp16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_split_hdim256_fp16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_split_hdim32_bf16_sm80.cu b/csrc/flash_attn/src/flash_fwd_split_hdim32_bf16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_split_hdim32_bf16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_split_hdim32_bf16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_split_hdim32_fp16_sm80.cu b/csrc/flash_attn/src/flash_fwd_split_hdim32_fp16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_split_hdim32_fp16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_split_hdim32_fp16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_split_hdim64_bf16_sm80.cu b/csrc/flash_attn/src/flash_fwd_split_hdim64_bf16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_split_hdim64_bf16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_split_hdim64_bf16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_split_hdim64_fp16_sm80.cu b/csrc/flash_attn/src/flash_fwd_split_hdim64_fp16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_split_hdim64_fp16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_split_hdim64_fp16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_split_hdim96_bf16_sm80.cu b/csrc/flash_attn/src/flash_fwd_split_hdim96_bf16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_split_hdim96_bf16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_split_hdim96_bf16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_fwd_split_hdim96_fp16_sm80.cu b/csrc/flash_attn/src/flash_fwd_split_hdim96_fp16_sm80.cu.cc
+similarity index 100%
+rename from csrc/flash_attn/src/flash_fwd_split_hdim96_fp16_sm80.cu
+rename to csrc/flash_attn/src/flash_fwd_split_hdim96_fp16_sm80.cu.cc
+diff --git a/csrc/flash_attn/src/flash_utils.h b/csrc/flash_attn/src/flash_utils.h
+new file mode 100644
+index 0000000..d897282
+--- /dev/null
++++ b/csrc/flash_attn/src/flash_utils.h
+@@ -0,0 +1,399 @@
++// Copyright (C) 2024 Ant Group Co., Ltd. All Rights Reserved.
++// SPDX-License-Identifier: Apache-2.0
++
++#pragma once
++
++#include <assert.h>
++#include <stdint.h>
++#include <stdlib.h>
++
++#include <cuda_fp16.h>
++
++#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
++#include <cuda_bf16.h>
++#endif
++
++#include "cute/algorithm/copy.hpp"
++#include "cute/algorithm/gemm.hpp"
++
++#include "cutlass/array.h"
++#include "cutlass/cutlass.h"
++#include "cutlass/numeric_conversion.h"
++#include "cutlass/numeric_types.h"
++
++#include "utils.h"
++
++////////////////////////////////////////////////////////////////////////////////////////////////////
++
++namespace flash {
++
++////////////////////////////////////////////////////////////////////////////////////////////////////
++
++using namespace cute;
++
++////////////////////////////////////////////////////////////////////////////////////////////////////
++
++template<typename T>
++__forceinline__ __device__ uint32_t relu2(const uint32_t x);
++
++template<>
++__forceinline__ __device__ uint32_t relu2<cutlass::half_t>(const uint32_t x) {
++    uint32_t res;
++    const uint32_t zero = 0u;
++#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
++    asm volatile("max.f16x2 %0, %1, %2;\n" : "=r"(res) : "r"(x), "r"(zero));
++#else
++    asm volatile( \
++        "{\n" \
++        "\t .reg .f16x2 sela;\n" \
++        "\t set.gtu.u32.f16x2 sela, %1, %2;\n" \
++        "\t and.b32 %0, sela, %1;\n" 
++        "}\n" : "=r"(res) : "r"(x), "r"(zero));
++#endif
++    return res;
++}
++
++#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
++template<>
++__forceinline__ __device__ uint32_t relu2<cutlass::bfloat16_t>(const uint32_t x) {
++    uint32_t res;
++    const uint32_t zero = 0u;
++    asm volatile("max.bf16x2 %0, %1, %2;\n" : "=r"(res) : "r"(x), "r"(zero));
++    return res;
++}
++#endif
++
++////////////////////////////////////////////////////////////////////////////////////////////////////
++
++#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
++
++template<typename T>
++__forceinline__ __device__ uint32_t convert_relu2(const float2 x);
++
++template<>
++__forceinline__ __device__ uint32_t convert_relu2<cutlass::half_t>(const float2 x) {
++    uint32_t res;
++    const uint32_t a = reinterpret_cast<const uint32_t&>(x.x);
++    const uint32_t b = reinterpret_cast<const uint32_t&>(x.y);
++    asm volatile("cvt.rn.relu.f16x2.f32 %0, %1, %2;\n" : "=r"(res) : "r"(b), "r"(a));
++    return res;
++}
++
++template<>
++__forceinline__ __device__ uint32_t convert_relu2<cutlass::bfloat16_t>(const float2 x) {
++    uint32_t res;
++    const uint32_t a = reinterpret_cast<const uint32_t&>(x.x);
++    const uint32_t b = reinterpret_cast<const uint32_t&>(x.y);
++    asm volatile("cvt.rn.relu.bf16x2.f32 %0, %1, %2;\n" : "=r"(res) : "r"(b), "r"(a));
++    return res;
++}
++
++#endif
++
++////////////////////////////////////////////////////////////////////////////////////////////////////
++
++template<typename T>
++struct MaxOp {
++__device__ __forceinline__ T operator()(T const & x, T const & y) { return x > y ? x : y; }
++};
++
++template <>
++struct MaxOp<float> {
++// This is slightly faster
++__device__ __forceinline__ float operator()(float const &x, float const &y) { return max(x, y); }
++};
++
++////////////////////////////////////////////////////////////////////////////////////////////////////
++
++template<typename T>
++struct SumOp {
++__device__ __forceinline__ T operator()(T const & x, T const & y) { return x + y; }
++};
++
++////////////////////////////////////////////////////////////////////////////////////////////////////
++
++template<int THREADS>
++struct Allreduce {
++    static_assert(THREADS == 32 || THREADS == 16 || THREADS == 8 || THREADS == 4);
++    template<typename T, typename Operator>
++    static __device__ __forceinline__ T run(T x, Operator &op) {
++        constexpr int OFFSET = THREADS / 2;
++        x = op(x, __shfl_xor_sync(uint32_t(-1), x, OFFSET));
++        return Allreduce<OFFSET>::run(x, op);
++    }
++};
++
++////////////////////////////////////////////////////////////////////////////////////////////////////
++
++template<>
++struct Allreduce<2> {
++template<typename T, typename Operator> 
++static __device__ __forceinline__ T run(T x, Operator &op) {
++    x = op(x, __shfl_xor_sync(uint32_t(-1), x, 1));
++    return x;
++}
++};
++
++////////////////////////////////////////////////////////////////////////////////////////////////////
++
++template<bool A_in_regs=false, bool B_in_regs=false, typename Tensor0, typename Tensor1,
++         typename Tensor2, typename Tensor3, typename Tensor4,
++         typename TiledMma, typename TiledCopyA, typename TiledCopyB,
++         typename ThrCopyA, typename ThrCopyB>
++__forceinline__ __device__ void gemm(Tensor0 &acc, Tensor1 &tCrA, Tensor2 &tCrB, Tensor3 const& tCsA,
++                            Tensor4 const& tCsB, TiledMma tiled_mma,
++                            TiledCopyA smem_tiled_copy_A, TiledCopyB smem_tiled_copy_B,
++                            ThrCopyA smem_thr_copy_A, ThrCopyB smem_thr_copy_B) {
++    CUTE_STATIC_ASSERT_V(size<1>(tCrA) == size<1>(acc));                     // MMA_M
++    CUTE_STATIC_ASSERT_V(size<1>(tCrB) == size<2>(acc));                     // MMA_N
++    CUTE_STATIC_ASSERT_V(size<2>(tCrA) == size<2>(tCrB));                     // MMA_K
++    Tensor tCrA_copy_view = smem_thr_copy_A.retile_D(tCrA);
++    CUTE_STATIC_ASSERT_V(size<1>(tCsA) == size<1>(tCrA_copy_view));            // M
++    Tensor tCrB_copy_view = smem_thr_copy_B.retile_D(tCrB);
++    CUTE_STATIC_ASSERT_V(size<1>(tCsB) == size<1>(tCrB_copy_view));            // N
++    if (!A_in_regs) { cute::copy(smem_tiled_copy_A, tCsA(_, _, _0{}), tCrA_copy_view(_, _, _0{})); }
++    if (!B_in_regs) { cute::copy(smem_tiled_copy_B, tCsB(_, _, _0{}), tCrB_copy_view(_, _, _0{})); }
++    #pragma unroll
++    for (int i = 0; i < size<2>(tCrA); ++i) {
++        if (i < size<2>(tCrA) - 1) {
++            if (!A_in_regs) { cute::copy(smem_tiled_copy_A, tCsA(_, _, i + 1), tCrA_copy_view(_, _, i + 1)); }
++            if (!B_in_regs) { cute::copy(smem_tiled_copy_B, tCsB(_, _, i + 1), tCrB_copy_view(_, _, i + 1)); }
++        }
++        cute::gemm(tiled_mma, tCrA(_, _, i), tCrB(_, _, i), acc);
++    }
++}
++
++////////////////////////////////////////////////////////////////////////////////////////////////////
++
++template<typename Tensor0, typename Tensor1, typename Tensor2, typename Tensor3,
++         typename TiledMma, typename TiledCopy, typename ThrCopy>
++__forceinline__ __device__ void gemm_rs(Tensor0 &acc, Tensor1 &tCrA, Tensor2 &tCrB, Tensor3 const& tCsB,
++                               TiledMma tiled_mma, TiledCopy smem_tiled_copy_B,
++                               ThrCopy smem_thr_copy_B) {
++    CUTE_STATIC_ASSERT_V(size<1>(tCrA) == size<1>(acc));                     // MMA_M
++    CUTE_STATIC_ASSERT_V(size<1>(tCrB) == size<2>(acc));                     // MMA_N
++    CUTE_STATIC_ASSERT_V(size<2>(tCrA) == size<2>(tCrB));                     // MMA_K
++    Tensor tCrB_copy_view = smem_thr_copy_B.retile_D(tCrB);
++    CUTE_STATIC_ASSERT_V(size<1>(tCsB) == size<1>(tCrB_copy_view));            // N
++    cute::copy(smem_tiled_copy_B, tCsB(_, _, _0{}), tCrB_copy_view(_, _, _0{}));
++    #pragma unroll
++    for (int i = 0; i < size<2>(tCrA); ++i) {
++        if (i < size<2>(tCrA) - 1) {
++            cute::copy(smem_tiled_copy_B, tCsB(_, _, i + 1), tCrB_copy_view(_, _, i + 1));
++        }
++        cute::gemm(tiled_mma, tCrA(_, _, i), tCrB(_, _, i), acc);
++    }
++}
++
++////////////////////////////////////////////////////////////////////////////////////////////////////
++
++// Convert acc_layout from (MMA=4, MMA_M, MMA_N) to (nrow=(2, MMA_M), ncol=(2, MMA_N))
++template<typename Layout>
++__forceinline__ __device__ auto convert_layout_acc_rowcol(Layout acc_layout) {
++    static_assert(decltype(size<0>(acc_layout))::value == 4);
++    static_assert(decltype(rank(acc_layout))::value == 3);
++    auto l = logical_divide(acc_layout, Shape<_2>{});  // ((2, 2), MMA_M, MMA_N)
++    return make_layout(make_layout(get<0, 1>(l), get<1>(l)), make_layout(get<0, 0>(l), get<2>(l)));
++};
++
++////////////////////////////////////////////////////////////////////////////////////////////////////
++
++// Convert acc_layout from (MMA=4, MMA_M, MMA_N) to ((4, 2), MMA_M, MMA_N / 2)
++// if using m16n8k16, or to (4, MMA_M, MMA_N) if using m16n8k8.
++template<typename MMA_traits, typename Layout>
++__forceinline__ __device__ auto convert_layout_acc_Aregs(Layout acc_layout) {
++    using X = Underscore;
++    static_assert(decltype(size<0>(acc_layout))::value == 4);
++    static_assert(decltype(rank(acc_layout))::value == 3);
++    constexpr int mma_shape_K = get<2>(typename MMA_traits::Shape_MNK{});
++    static_assert(mma_shape_K == 8 || mma_shape_K == 16);
++    if constexpr (mma_shape_K == 8) {
++        return acc_layout;
++    } else {
++        auto l = logical_divide(acc_layout, Shape<X, X, _2>{});  // (4, MMA_M, (2, MMA_N / 2)))
++        return make_layout(make_layout(get<0>(l), get<2, 0>(l)), get<1>(l), get<2, 1>(l));
++    }
++};
++
++////////////////////////////////////////////////////////////////////////////////////////////////////
++
++// Convert acc_layout from (MMA=4, MMA_M, MMA_N) to ((4, 2), MMA_M, MMA_N / 2)
++template<typename Layout>
++__forceinline__ __device__ auto convert_layout_acc_dropout(Layout acc_layout) {
++    using X = Underscore;
++    static_assert(decltype(size<0>(acc_layout))::value == 4);
++    static_assert(decltype(rank(acc_layout))::value == 3);
++    auto l = logical_divide(acc_layout, Shape<X, X, _2>{});  // (4, MMA_M, (2, MMA_N / 2)))
++    return make_layout(make_layout(get<0>(l), get<2, 0>(l)), get<1>(l), get<2, 1>(l));
++};
++
++////////////////////////////////////////////////////////////////////////////////////////////////////
++
++template <typename To_type, typename Engine, typename Layout>
++__forceinline__ __device__ auto convert_type(Tensor<Engine, Layout> const &tensor) {
++    using From_type = typename Engine::value_type;
++    constexpr int numel = decltype(size(tensor))::value;
++    cutlass::NumericArrayConverter<To_type, From_type, numel> convert_op;
++    // HACK: this requires tensor to be "contiguous"
++    auto frag = convert_op(*reinterpret_cast<const cutlass::Array<From_type, numel> *>(tensor.data()));
++    return make_tensor(make_rmem_ptr<To_type>(&frag), tensor.layout());
++}
++
++////////////////////////////////////////////////////////////////////////////////////////////////////
++
++template <typename Engine, typename Layout>
++__forceinline__ __device__ void relu_(Tensor<Engine, Layout> &tensor) {
++    constexpr int numel = decltype(size(tensor))::value;
++    static_assert(numel % 2 == 0);
++    using value_t = typename Engine::value_type;
++    // HACK: this requires tensor to be "contiguous"
++    Tensor tensor_uint32 = recast<uint32_t>(tensor);
++    #pragma unroll
++    for (int i = 0; i < size(tensor_uint32); ++i) {
++        tensor_uint32(i) = relu2<value_t>(tensor_uint32(i));
++    }
++}
++
++////////////////////////////////////////////////////////////////////////////////////////////////////
++
++// On SM80 and above, we can fuse fp32 -> fp16/bf16 conversion and relu into 1 instruction
++template <typename To_type, typename Engine, typename Layout>
++__forceinline__ __device__ auto convert_type_relu(Tensor<Engine, Layout> const &tensor) {
++    using From_type = typename Engine::value_type;
++    static_assert(std::is_same_v<To_type, cutlass::half_t> || std::is_same_v<To_type, cutlass::bfloat16_t>);
++    static_assert(std::is_same_v<float, From_type>);
++    constexpr int numel = decltype(size(tensor))::value;
++    static_assert(numel % 2 == 0);
++#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
++    // HACK: this requires tensor to be "contiguous"
++    Tensor tensor_float2 = recast<float2>(tensor);
++    Tensor out_uint32 = make_tensor<uint32_t>(tensor_float2.layout());
++    #pragma unroll
++    for (int i = 0; i < size(out_uint32); ++i) {
++        out_uint32(i) = convert_relu2<To_type>(tensor_float2(i));
++    }
++    Tensor out = make_tensor(make_rmem_ptr<To_type>(out_uint32.data()), tensor.layout());
++#else
++    Tensor out = flash::convert_type<To_type>(tensor);
++    flash::relu_(out);
++#endif
++    return out;
++}
++
++////////////////////////////////////////////////////////////////////////////////////////////////////
++
++// Blocks until all but N previous cp.async.commit_group operations have committed.
++// This differs from cute::cp_async_wait in that when N = 0 we don't call cp.async.wait_all
++// (which is equivalent to commit_group then wait_group 0).
++// Instead we just call cp.async.wait_group 0, which is slightly faster.
++// https://github.com/NVIDIA/cutlass/blob/master/include/cute/arch/copy_sm80.hpp#L113
++template <int N>
++CUTE_HOST_DEVICE
++void cp_async_wait() {
++#if defined(CUTE_ARCH_CP_ASYNC_SM80_ENABLED)
++    asm volatile("cp.async.wait_group %0;\n" :: "n"(N));
++#endif
++}
++
++////////////////////////////////////////////////////////////////////////////////////////////////////
++
++template <bool Is_even_MN=true, bool Is_even_K=true, bool Clear_OOB_MN=false, bool Clear_OOB_K=true,
++          typename TiledCopy, typename Engine0, typename Layout0, typename Engine1, typename Layout1,
++          typename Engine2, typename Layout2, typename Engine3, typename Layout3>
++__forceinline__ __device__ void copy(TiledCopy tiled_copy, Tensor<Engine0, Layout0> const &S,
++                            Tensor<Engine1, Layout1> &D, Tensor<Engine2, Layout2> const &identity_MN,
++                            Tensor<Engine3, Layout3> const &predicate_K, const int max_MN=0) {
++    CUTE_STATIC_ASSERT_V(rank(S) == Int<3>{});
++    CUTE_STATIC_ASSERT_V(rank(D) == Int<3>{});
++    CUTE_STATIC_ASSERT_V(size<0>(S) == size<0>(D));                     // MMA
++    CUTE_STATIC_ASSERT_V(size<1>(S) == size<1>(D));                     // MMA_M
++    CUTE_STATIC_ASSERT_V(size<2>(S) == size<2>(D));                     // MMA_K
++    // There's no case where !Clear_OOB_K && Clear_OOB_MN
++    static_assert(!(Clear_OOB_MN && !Clear_OOB_K));
++    #pragma unroll
++    for (int m = 0; m < size<1>(S); ++m) {
++        if (Is_even_MN || get<0>(identity_MN(0, m, 0)) < max_MN) {
++            #pragma unroll
++            for (int k = 0; k < size<2>(S); ++k) {
++                if (Is_even_K || predicate_K(k)) {
++                    cute::copy(tiled_copy, S(_, m, k), D(_, m, k));
++                } else if (Clear_OOB_K) {
++                    cute::clear(D(_, m, k));
++                }
++            }
++        } else if (Clear_OOB_MN) {
++            cute::clear(D(_, m, _));
++        }
++    }
++    // TD [2023-04-13]: Strange that the code below can cause race condition.
++    // I think it's because the copies are under an if statement.
++    // if (Is_even_K) {
++    //     #pragma unroll
++    //     for (int m = 0; m < size<1>(S); ++m) {
++    //         if (Is_even_MN || get<0>(identity_MN(0, m, 0)) < max_MN) {
++    //             copy(tiled_copy, S(_, m, _), D(_, m, _));
++    //         } else if (Clear_OOB_MN) {
++    //             clear(D(_, m, _));
++    //         }
++    //     }
++    // } else {  // It's slightly faster in this case if iterate over K first
++    //     #pragma unroll
++    //     for (int k = 0; k < size<2>(S); ++k) {
++    //         if (predicate_K(k)) {
++    //             #pragma unroll
++    //             for (int m = 0; m < size<1>(S); ++m) {
++    //                 if (Is_even_MN || get<0>(identity_MN(0, m, 0)) < max_MN) {
++    //                     copy(tiled_copy, S(_, m, k), D(_, m, k));
++    //                 } else if (Clear_OOB_MN) {
++    //                     clear(D(_, m, k));
++    //                 }
++    //             }
++    //         } else if (Clear_OOB_K) {  // There's no case where !Clear_OOB_K && Clear_OOB_MN
++    //             if (Clear_OOB_MN || Is_even_MN) {
++    //                 clear(D(_, _, k));
++    //             } else {
++    //                 #pragma unroll
++    //                 for (int m = 0; m < size<1>(S); ++m) {
++    //                     if (!(Is_even_MN || get<0>(identity_MN(0, m, 0)) < max_MN)) {
++    //                         clear(D(_, m, k));
++    //                     }
++    //                 }
++    //             }
++    //         }
++    //     }
++    // }
++}
++
++////////////////////////////////////////////////////////////////////////////////////////////////////
++
++template <bool Is_even_K=true,
++          typename Engine0, typename Layout0, typename Engine1, typename Layout1,
++          typename Engine2, typename Layout2, typename Engine3, typename Layout3>
++__forceinline__ __device__ void copy_w_min_idx(Tensor<Engine0, Layout0> const &S,
++                                      Tensor<Engine1, Layout1> &D, Tensor<Engine2, Layout2> const &identity_MN,
++                                      Tensor<Engine3, Layout3> const &predicate_K,
++                                      const int max_MN=0, const int min_MN=0) {
++    CUTE_STATIC_ASSERT_V(rank(S) == Int<3>{});
++    CUTE_STATIC_ASSERT_V(rank(D) == Int<3>{});
++    CUTE_STATIC_ASSERT_V(size<0>(S) == size<0>(D));                     // MMA
++    CUTE_STATIC_ASSERT_V(size<1>(S) == size<1>(D));                     // MMA_M
++    CUTE_STATIC_ASSERT_V(size<2>(S) == size<2>(D));                     // MMA_K
++    // if (threadIdx.x == 0 && blockIdx.z == 0) { printf("blockIdx.y = %d, max_MN = %d, min_MN = %d\n", blockIdx.y, max_MN, min_MN); }
++    #pragma unroll
++    for (int m = 0; m < size<1>(S); ++m) {
++        // if (threadIdx.x == 0 && blockIdx.z == 0) { printf("blockIdx.y = %d, m = %d\n", blockIdx.y, get<0>(identity_MN(0, m, 0))); }
++        if (get<0>(identity_MN(0, m, 0)) >= min_MN && get<0>(identity_MN(0, m, 0)) < max_MN) {
++            // if (threadIdx.x == 0 && blockIdx.z == 0) { printf("Inner loop, blockIdx.y = %d, m = %d\n", blockIdx.y, get<0>(identity_MN(0, m, 0))); }
++            #pragma unroll
++            for (int k = 0; k < size<2>(S); ++k) {
++                if (Is_even_K || predicate_K(k)) {
++                    cute::copy(S(_, m, k), D(_, m, k));
++                }
++            }
++        }
++    }
++}
++
++////////////////////////////////////////////////////////////////////////////////////////////////////
++
++}  // namespace flash
+diff --git a/csrc/flash_attn/src/kernel_traits.h b/csrc/flash_attn/src/kernel_traits.h
+index a7a5cf1..4bf4a7b 100644
+--- a/csrc/flash_attn/src/kernel_traits.h
++++ b/csrc/flash_attn/src/kernel_traits.h
+@@ -8,7 +8,7 @@
+ 
+ #include "cutlass/cutlass.h"
+ #include "cutlass/layout/layout.h"
+-#include <cutlass/numeric_types.h>
++#include "cutlass/numeric_types.h"
+ 
+ using namespace cute;
+ 
+diff --git a/csrc/flash_attn/src/mask.h b/csrc/flash_attn/src/mask.h
+index 3d9b429..73c52d5 100644
+--- a/csrc/flash_attn/src/mask.h
++++ b/csrc/flash_attn/src/mask.h
+@@ -4,7 +4,7 @@
+ 
+ #pragma once
+ 
+-#include <cute/tensor.hpp>
++#include "cute/tensor.hpp"
+ 
+ namespace flash {
+ 
+diff --git a/csrc/flash_attn/src/philox.cuh b/csrc/flash_attn/src/philox.cuh
+index cd7e4d2..d7cde3f 100644
+--- a/csrc/flash_attn/src/philox.cuh
++++ b/csrc/flash_attn/src/philox.cuh
+@@ -2,8 +2,87 @@
+ #pragma once
+ // Philox CUDA.
+ 
++#include <mutex>
++#include <random>
++#include <tuple>
++
+ namespace flash {
+ 
++struct PhiloxCudaState {
++    PhiloxCudaState() = default;
++    // Called if graph capture is not underway
++    PhiloxCudaState(uint64_t seed,
++                    uint64_t offset)
++    {
++        seed_.val = seed;
++        offset_.val = offset;
++    }
++    // Called if graph capture is underway
++    PhiloxCudaState(int64_t *seed,
++                    int64_t *offset_extragraph,
++                    uint32_t offset_intragraph)
++    {
++        seed_.ptr = seed;
++        offset_.ptr = offset_extragraph;
++        offset_intragraph_ = offset_intragraph;
++        captured_ = true;
++    }
++
++    // Public members, directly accessible by at::cuda::philox::unpack.
++    // If we made them private with getters/setters, the getters/setters
++    // would have to be __device__, and we can't declare __device__ in ATen.
++    union Payload
++    {
++        uint64_t val;
++        int64_t *ptr;
++    };
++
++    Payload seed_;
++    Payload offset_;
++    uint32_t offset_intragraph_ = 0;
++    bool captured_ = false;
++};
++
++class CUDAPhiloxRandomGenerator {
++public:
++    CUDAPhiloxRandomGenerator()
++    {
++        std::random_device rd;
++        seed_ = ((((uint64_t)rd()) << 32) + rd()) & 0x1FFFFFFFFFFFFF;
++        philox_offset_per_thread_ = 0;
++    }
++
++    PhiloxCudaState philox_cuda_state(uint64_t increment)
++    {
++        // rounds increment up to the nearest multiple of 4
++        increment = ((increment + 3) / 4) * 4;
++        uint64_t offset = this->philox_offset_per_thread_;
++        this->philox_offset_per_thread_ += increment;
++        return PhiloxCudaState(this->seed_, offset);
++    }
++    std::mutex mutex_;
++
++private:
++    uint64_t seed_;
++    uint64_t philox_offset_per_thread_;
++};
++
++namespace cuda::philox {
++
++__host__ __device__ __forceinline__ std::tuple<uint64_t, uint64_t>
++unpack(PhiloxCudaState arg) {
++  if (arg.captured_) {
++    // static_cast avoids "warning: invalid narrowing conversion from "long" to "unsigned long".
++    // *(arg.offset_.ptr) is a broadcast load of a single int64_t to the entire kernel.
++    // For most threads' reads it will hit in cache, so it shouldn't hurt performance.
++    return std::make_tuple(static_cast<uint64_t>(*arg.seed_.ptr), static_cast<uint64_t>(*(arg.offset_.ptr) + arg.offset_intragraph_));
++  } else {
++    return std::make_tuple(arg.seed_.val, arg.offset_.val);
++  }
++}
++
++} // namespace cuda::philox
++
+ struct ull2 {
+     unsigned long long x;
+     unsigned long long y;
+diff --git a/csrc/flash_attn/src/rotary.h b/csrc/flash_attn/src/rotary.h
+index dc2825b..4644027 100644
+--- a/csrc/flash_attn/src/rotary.h
++++ b/csrc/flash_attn/src/rotary.h
+@@ -4,9 +4,9 @@
+ 
+ #pragma once
+ 
+-#include <cute/algorithm/copy.hpp>
++#include "cute/algorithm/copy.hpp"
+ 
+-#include "utils.h"
++#include "flash_utils.h"
+ 
+ ////////////////////////////////////////////////////////////////////////////////////////////////////
+ 
+diff --git a/csrc/flash_attn/src/softmax.h b/csrc/flash_attn/src/softmax.h
+index ebf1b09..025fbc7 100644
+--- a/csrc/flash_attn/src/softmax.h
++++ b/csrc/flash_attn/src/softmax.h
+@@ -6,12 +6,12 @@
+ 
+ #include <cmath>
+ 
+-#include <cute/tensor.hpp>
++#include "cute/tensor.hpp"
+ 
+-#include <cutlass/numeric_types.h>
++#include "cutlass/numeric_types.h"
+ 
+ #include "philox.cuh"
+-#include "utils.h"
++#include "flash_utils.h"
+ 
+ namespace flash {
+ 
+diff --git a/csrc/flash_attn/src/utils.cc b/csrc/flash_attn/src/utils.cc
+new file mode 100644
+index 0000000..9e7808b
+--- /dev/null
++++ b/csrc/flash_attn/src/utils.cc
+@@ -0,0 +1,67 @@
++// Copyright (C) 2024 Ant Group Co., Ltd. All Rights Reserved.
++// SPDX-License-Identifier: Apache-2.0
++
++#include "utils.h"
++
++#include <deque>
++#include <memory>
++#include <mutex>
++#include <vector>
++
++namespace flash::cuda {
++
++int getCurrentDevice() {
++    int device;
++    FLASH_CUDA_CHECK(cudaGetDevice(&device));
++    return device;
++}
++
++static int num_gpus;
++static std::once_flag device_init_flag;
++static std::deque<std::once_flag> device_flags;
++static std::vector<cudaDeviceProp> device_properties;
++static std::deque<std::once_flag> cuda_gens_init_flag;
++static std::vector<std::unique_ptr<CUDAPhiloxRandomGenerator>> default_gens_cuda;
++
++static void initCUDAContextVectors() {
++    FLASH_CUDA_CHECK(cudaGetDeviceCount(&num_gpus));
++    device_flags.resize(num_gpus);
++    device_properties.resize(num_gpus);
++    cuda_gens_init_flag.resize(num_gpus);
++    default_gens_cuda.resize(num_gpus);
++}
++
++static void initDeviceProperty(int device) {
++    cudaDeviceProp prop;
++    FLASH_CUDA_CHECK(cudaGetDeviceProperties(&prop, device));
++    device_properties[device] = prop;
++}
++
++cudaDeviceProp* getDeviceProperties(int device) {
++    std::call_once(device_init_flag, initCUDAContextVectors);
++    if (device == -1) {
++        device = getCurrentDevice();
++    }
++    FLASH_ASSERT(device >= 0 && device < num_gpus);
++    std::call_once(device_flags[device], initDeviceProperty, device);
++    return &device_properties[device];
++}
++
++cudaDeviceProp* getCurrentDeviceProperties() {
++    int cur_device = getCurrentDevice();
++    return getDeviceProperties(cur_device);
++}
++
++CUDAPhiloxRandomGenerator& getDefaultCUDAGenerator(int device) {
++    std::call_once(device_init_flag, initCUDAContextVectors);
++    if (device == -1) {
++        device = getCurrentDevice();
++    }
++    FLASH_ASSERT(device >= 0 && device < num_gpus);
++    std::call_once(cuda_gens_init_flag[device], [&] {
++        default_gens_cuda[device] = std::make_unique<CUDAPhiloxRandomGenerator>();
++    });
++    return *default_gens_cuda[device];
++}
++
++} // namespace flash::cuda
+diff --git a/csrc/flash_attn/src/utils.h b/csrc/flash_attn/src/utils.h
+index 2b45e87..f816c4b 100644
+--- a/csrc/flash_attn/src/utils.h
++++ b/csrc/flash_attn/src/utils.h
+@@ -4,391 +4,46 @@
+ 
+ #pragma once
+ 
+-#include <assert.h>
+-#include <stdint.h>
+-#include <stdlib.h>
++#include <cassert>
++#include <cstdint>
++#include <cstdlib>
++#include <string>
+ 
+-#include <cuda_fp16.h>
++#include <cuda.h>
++#include <cuda_runtime.h>
+ 
+-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+-#include <cuda_bf16.h>
+-#endif
++#include "philox.cuh"
+ 
+-#include <cute/algorithm/copy.hpp>
+-#include <cute/algorithm/gemm.hpp>
+-
+-#include <cutlass/array.h>
+-#include <cutlass/cutlass.h>
+-#include <cutlass/numeric_conversion.h>
+-#include <cutlass/numeric_types.h>
+-
+-////////////////////////////////////////////////////////////////////////////////////////////////////
+-
+-namespace flash {
+-
+-////////////////////////////////////////////////////////////////////////////////////////////////////
+-
+-template<typename T>
+-__forceinline__ __device__ uint32_t relu2(const uint32_t x);
+-
+-template<>
+-__forceinline__ __device__ uint32_t relu2<cutlass::half_t>(const uint32_t x) {
+-    uint32_t res;
+-    const uint32_t zero = 0u;
+-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+-    asm volatile("max.f16x2 %0, %1, %2;\n" : "=r"(res) : "r"(x), "r"(zero));
+-#else
+-    asm volatile( \
+-        "{\n" \
+-        "\t .reg .f16x2 sela;\n" \
+-        "\t set.gtu.u32.f16x2 sela, %1, %2;\n" \
+-        "\t and.b32 %0, sela, %1;\n" 
+-        "}\n" : "=r"(res) : "r"(x), "r"(zero));
+-#endif
+-    return res;
+-}
+-
+-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+-template<>
+-__forceinline__ __device__ uint32_t relu2<cutlass::bfloat16_t>(const uint32_t x) {
+-    uint32_t res;
+-    const uint32_t zero = 0u;
+-    asm volatile("max.bf16x2 %0, %1, %2;\n" : "=r"(res) : "r"(x), "r"(zero));
+-    return res;
+-}
+-#endif
+-
+-////////////////////////////////////////////////////////////////////////////////////////////////////
+-
+-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+-
+-template<typename T>
+-__forceinline__ __device__ uint32_t convert_relu2(const float2 x);
+-
+-template<>
+-__forceinline__ __device__ uint32_t convert_relu2<cutlass::half_t>(const float2 x) {
+-    uint32_t res;
+-    const uint32_t a = reinterpret_cast<const uint32_t&>(x.x);
+-    const uint32_t b = reinterpret_cast<const uint32_t&>(x.y);
+-    asm volatile("cvt.rn.relu.f16x2.f32 %0, %1, %2;\n" : "=r"(res) : "r"(b), "r"(a));
+-    return res;
+-}
+-
+-template<>
+-__forceinline__ __device__ uint32_t convert_relu2<cutlass::bfloat16_t>(const float2 x) {
+-    uint32_t res;
+-    const uint32_t a = reinterpret_cast<const uint32_t&>(x.x);
+-    const uint32_t b = reinterpret_cast<const uint32_t&>(x.y);
+-    asm volatile("cvt.rn.relu.bf16x2.f32 %0, %1, %2;\n" : "=r"(res) : "r"(b), "r"(a));
+-    return res;
+-}
+-
+-#endif
+-
+-////////////////////////////////////////////////////////////////////////////////////////////////////
+-
+-template<typename T>
+-struct MaxOp {
+-__device__ __forceinline__ T operator()(T const & x, T const & y) { return x > y ? x : y; }
+-};
+-
+-template <>
+-struct MaxOp<float> {
+-// This is slightly faster
+-__device__ __forceinline__ float operator()(float const &x, float const &y) { return max(x, y); }
+-};
+-
+-////////////////////////////////////////////////////////////////////////////////////////////////////
+-
+-template<typename T>
+-struct SumOp {
+-__device__ __forceinline__ T operator()(T const & x, T const & y) { return x + y; }
+-};
+-
+-////////////////////////////////////////////////////////////////////////////////////////////////////
+-
+-template<int THREADS>
+-struct Allreduce {
+-    static_assert(THREADS == 32 || THREADS == 16 || THREADS == 8 || THREADS == 4);
+-    template<typename T, typename Operator>
+-    static __device__ __forceinline__ T run(T x, Operator &op) {
+-        constexpr int OFFSET = THREADS / 2;
+-        x = op(x, __shfl_xor_sync(uint32_t(-1), x, OFFSET));
+-        return Allreduce<OFFSET>::run(x, op);
++#define FLASH_ASSERT_WITH_MSG(EXPR, MSG)                                     \
++    if (!(EXPR)) {                                                           \
++        const char *origin_msg = (MSG);                                      \
++        const char *msg = origin_msg != nullptr ? origin_msg : "";           \
++        const char *msg_tail = origin_msg != nullptr ? ", " : "";            \
++        printf("Assertion failed: %s%sfunction %s, file %s, line %d\n", msg, \
++               msg_tail, __func__, __FILE__, __LINE__);                      \
++        ::abort();                                                           \
+     }
+-};
+-
+-////////////////////////////////////////////////////////////////////////////////////////////////////
+ 
+-template<>
+-struct Allreduce<2> {
+-template<typename T, typename Operator> 
+-static __device__ __forceinline__ T run(T x, Operator &op) {
+-    x = op(x, __shfl_xor_sync(uint32_t(-1), x, 1));
+-    return x;
+-}
+-};
++#define FLASH_ASSERT(EXPR) FLASH_ASSERT_WITH_MSG(EXPR, nullptr)
+ 
+-////////////////////////////////////////////////////////////////////////////////////////////////////
++namespace flash::cuda {
+ 
+-template<bool A_in_regs=false, bool B_in_regs=false, typename Tensor0, typename Tensor1,
+-         typename Tensor2, typename Tensor3, typename Tensor4,
+-         typename TiledMma, typename TiledCopyA, typename TiledCopyB,
+-         typename ThrCopyA, typename ThrCopyB>
+-__forceinline__ __device__ void gemm(Tensor0 &acc, Tensor1 &tCrA, Tensor2 &tCrB, Tensor3 const& tCsA,
+-                            Tensor4 const& tCsB, TiledMma tiled_mma,
+-                            TiledCopyA smem_tiled_copy_A, TiledCopyB smem_tiled_copy_B,
+-                            ThrCopyA smem_thr_copy_A, ThrCopyB smem_thr_copy_B) {
+-    CUTE_STATIC_ASSERT_V(size<1>(tCrA) == size<1>(acc));                     // MMA_M
+-    CUTE_STATIC_ASSERT_V(size<1>(tCrB) == size<2>(acc));                     // MMA_N
+-    CUTE_STATIC_ASSERT_V(size<2>(tCrA) == size<2>(tCrB));                     // MMA_K
+-    Tensor tCrA_copy_view = smem_thr_copy_A.retile_D(tCrA);
+-    CUTE_STATIC_ASSERT_V(size<1>(tCsA) == size<1>(tCrA_copy_view));            // M
+-    Tensor tCrB_copy_view = smem_thr_copy_B.retile_D(tCrB);
+-    CUTE_STATIC_ASSERT_V(size<1>(tCsB) == size<1>(tCrB_copy_view));            // N
+-    if (!A_in_regs) { cute::copy(smem_tiled_copy_A, tCsA(_, _, _0{}), tCrA_copy_view(_, _, _0{})); }
+-    if (!B_in_regs) { cute::copy(smem_tiled_copy_B, tCsB(_, _, _0{}), tCrB_copy_view(_, _, _0{})); }
+-    #pragma unroll
+-    for (int i = 0; i < size<2>(tCrA); ++i) {
+-        if (i < size<2>(tCrA) - 1) {
+-            if (!A_in_regs) { cute::copy(smem_tiled_copy_A, tCsA(_, _, i + 1), tCrA_copy_view(_, _, i + 1)); }
+-            if (!B_in_regs) { cute::copy(smem_tiled_copy_B, tCsB(_, _, i + 1), tCrB_copy_view(_, _, i + 1)); }
+-        }
+-        cute::gemm(tiled_mma, tCrA(_, _, i), tCrB(_, _, i), acc);
+-    }
+-}
+-
+-////////////////////////////////////////////////////////////////////////////////////////////////////
++#define FLASH_CUDA_CHECK(EXPR)                                                                  \
++    do                                                                                          \
++    {                                                                                           \
++        const cudaError_t cuda_err = EXPR;                                                      \
++        if (cuda_err != cudaSuccess)                                                            \
++        {                                                                                       \
++            const auto &error_msg = std::string("CUDA error: ") + cudaGetErrorString(cuda_err); \
++            FLASH_ASSERT_WITH_MSG(false, error_msg.c_str());                                    \
++        }                                                                                       \
++    } while (0)
+ 
+-template<typename Tensor0, typename Tensor1, typename Tensor2, typename Tensor3,
+-         typename TiledMma, typename TiledCopy, typename ThrCopy>
+-__forceinline__ __device__ void gemm_rs(Tensor0 &acc, Tensor1 &tCrA, Tensor2 &tCrB, Tensor3 const& tCsB,
+-                               TiledMma tiled_mma, TiledCopy smem_tiled_copy_B,
+-                               ThrCopy smem_thr_copy_B) {
+-    CUTE_STATIC_ASSERT_V(size<1>(tCrA) == size<1>(acc));                     // MMA_M
+-    CUTE_STATIC_ASSERT_V(size<1>(tCrB) == size<2>(acc));                     // MMA_N
+-    CUTE_STATIC_ASSERT_V(size<2>(tCrA) == size<2>(tCrB));                     // MMA_K
+-    Tensor tCrB_copy_view = smem_thr_copy_B.retile_D(tCrB);
+-    CUTE_STATIC_ASSERT_V(size<1>(tCsB) == size<1>(tCrB_copy_view));            // N
+-    cute::copy(smem_tiled_copy_B, tCsB(_, _, _0{}), tCrB_copy_view(_, _, _0{}));
+-    #pragma unroll
+-    for (int i = 0; i < size<2>(tCrA); ++i) {
+-        if (i < size<2>(tCrA) - 1) {
+-            cute::copy(smem_tiled_copy_B, tCsB(_, _, i + 1), tCrB_copy_view(_, _, i + 1));
+-        }
+-        cute::gemm(tiled_mma, tCrA(_, _, i), tCrB(_, _, i), acc);
+-    }
+-}
+-
+-////////////////////////////////////////////////////////////////////////////////////////////////////
+-
+-// Convert acc_layout from (MMA=4, MMA_M, MMA_N) to (nrow=(2, MMA_M), ncol=(2, MMA_N))
+-template<typename Layout>
+-__forceinline__ __device__ auto convert_layout_acc_rowcol(Layout acc_layout) {
+-    static_assert(decltype(size<0>(acc_layout))::value == 4);
+-    static_assert(decltype(rank(acc_layout))::value == 3);
+-    auto l = logical_divide(acc_layout, Shape<_2>{});  // ((2, 2), MMA_M, MMA_N)
+-    return make_layout(make_layout(get<0, 1>(l), get<1>(l)), make_layout(get<0, 0>(l), get<2>(l)));
+-};
+-
+-////////////////////////////////////////////////////////////////////////////////////////////////////
+-
+-// Convert acc_layout from (MMA=4, MMA_M, MMA_N) to ((4, 2), MMA_M, MMA_N / 2)
+-// if using m16n8k16, or to (4, MMA_M, MMA_N) if using m16n8k8.
+-template<typename MMA_traits, typename Layout>
+-__forceinline__ __device__ auto convert_layout_acc_Aregs(Layout acc_layout) {
+-    using X = Underscore;
+-    static_assert(decltype(size<0>(acc_layout))::value == 4);
+-    static_assert(decltype(rank(acc_layout))::value == 3);
+-    constexpr int mma_shape_K = get<2>(typename MMA_traits::Shape_MNK{});
+-    static_assert(mma_shape_K == 8 || mma_shape_K == 16);
+-    if constexpr (mma_shape_K == 8) {
+-        return acc_layout;
+-    } else {
+-        auto l = logical_divide(acc_layout, Shape<X, X, _2>{});  // (4, MMA_M, (2, MMA_N / 2)))
+-        return make_layout(make_layout(get<0>(l), get<2, 0>(l)), get<1>(l), get<2, 1>(l));
+-    }
+-};
+-
+-////////////////////////////////////////////////////////////////////////////////////////////////////
+-
+-// Convert acc_layout from (MMA=4, MMA_M, MMA_N) to ((4, 2), MMA_M, MMA_N / 2)
+-template<typename Layout>
+-__forceinline__ __device__ auto convert_layout_acc_dropout(Layout acc_layout) {
+-    using X = Underscore;
+-    static_assert(decltype(size<0>(acc_layout))::value == 4);
+-    static_assert(decltype(rank(acc_layout))::value == 3);
+-    auto l = logical_divide(acc_layout, Shape<X, X, _2>{});  // (4, MMA_M, (2, MMA_N / 2)))
+-    return make_layout(make_layout(get<0>(l), get<2, 0>(l)), get<1>(l), get<2, 1>(l));
+-};
+-
+-////////////////////////////////////////////////////////////////////////////////////////////////////
+-
+-template <typename To_type, typename Engine, typename Layout>
+-__forceinline__ __device__ auto convert_type(Tensor<Engine, Layout> const &tensor) {
+-    using From_type = typename Engine::value_type;
+-    constexpr int numel = decltype(size(tensor))::value;
+-    cutlass::NumericArrayConverter<To_type, From_type, numel> convert_op;
+-    // HACK: this requires tensor to be "contiguous"
+-    auto frag = convert_op(*reinterpret_cast<const cutlass::Array<From_type, numel> *>(tensor.data()));
+-    return make_tensor(make_rmem_ptr<To_type>(&frag), tensor.layout());
+-}
+-
+-////////////////////////////////////////////////////////////////////////////////////////////////////
+-
+-template <typename Engine, typename Layout>
+-__forceinline__ __device__ void relu_(Tensor<Engine, Layout> &tensor) {
+-    constexpr int numel = decltype(size(tensor))::value;
+-    static_assert(numel % 2 == 0);
+-    using value_t = typename Engine::value_type;
+-    // HACK: this requires tensor to be "contiguous"
+-    Tensor tensor_uint32 = recast<uint32_t>(tensor);
+-    #pragma unroll
+-    for (int i = 0; i < size(tensor_uint32); ++i) {
+-        tensor_uint32(i) = relu2<value_t>(tensor_uint32(i));
+-    }
+-}
+-
+-////////////////////////////////////////////////////////////////////////////////////////////////////
+-
+-// On SM80 and above, we can fuse fp32 -> fp16/bf16 conversion and relu into 1 instruction
+-template <typename To_type, typename Engine, typename Layout>
+-__forceinline__ __device__ auto convert_type_relu(Tensor<Engine, Layout> const &tensor) {
+-    using From_type = typename Engine::value_type;
+-    static_assert(std::is_same_v<To_type, cutlass::half_t> || std::is_same_v<To_type, cutlass::bfloat16_t>);
+-    static_assert(std::is_same_v<float, From_type>);
+-    constexpr int numel = decltype(size(tensor))::value;
+-    static_assert(numel % 2 == 0);
+-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+-    // HACK: this requires tensor to be "contiguous"
+-    Tensor tensor_float2 = recast<float2>(tensor);
+-    Tensor out_uint32 = make_tensor<uint32_t>(tensor_float2.layout());
+-    #pragma unroll
+-    for (int i = 0; i < size(out_uint32); ++i) {
+-        out_uint32(i) = convert_relu2<To_type>(tensor_float2(i));
+-    }
+-    Tensor out = make_tensor(make_rmem_ptr<To_type>(out_uint32.data()), tensor.layout());
+-#else
+-    Tensor out = flash::convert_type<To_type>(tensor);
+-    flash::relu_(out);
+-#endif
+-    return out;
+-}
+-
+-////////////////////////////////////////////////////////////////////////////////////////////////////
+-
+-// Blocks until all but N previous cp.async.commit_group operations have committed.
+-// This differs from cute::cp_async_wait in that when N = 0 we don't call cp.async.wait_all
+-// (which is equivalent to commit_group then wait_group 0).
+-// Instead we just call cp.async.wait_group 0, which is slightly faster.
+-// https://github.com/NVIDIA/cutlass/blob/master/include/cute/arch/copy_sm80.hpp#L113
+-template <int N>
+-CUTE_HOST_DEVICE
+-void cp_async_wait() {
+-#if defined(CUTE_ARCH_CP_ASYNC_SM80_ENABLED)
+-    asm volatile("cp.async.wait_group %0;\n" :: "n"(N));
+-#endif
+-}
+-
+-////////////////////////////////////////////////////////////////////////////////////////////////////
+-
+-template <bool Is_even_MN=true, bool Is_even_K=true, bool Clear_OOB_MN=false, bool Clear_OOB_K=true,
+-          typename TiledCopy, typename Engine0, typename Layout0, typename Engine1, typename Layout1,
+-          typename Engine2, typename Layout2, typename Engine3, typename Layout3>
+-__forceinline__ __device__ void copy(TiledCopy tiled_copy, Tensor<Engine0, Layout0> const &S,
+-                            Tensor<Engine1, Layout1> &D, Tensor<Engine2, Layout2> const &identity_MN,
+-                            Tensor<Engine3, Layout3> const &predicate_K, const int max_MN=0) {
+-    CUTE_STATIC_ASSERT_V(rank(S) == Int<3>{});
+-    CUTE_STATIC_ASSERT_V(rank(D) == Int<3>{});
+-    CUTE_STATIC_ASSERT_V(size<0>(S) == size<0>(D));                     // MMA
+-    CUTE_STATIC_ASSERT_V(size<1>(S) == size<1>(D));                     // MMA_M
+-    CUTE_STATIC_ASSERT_V(size<2>(S) == size<2>(D));                     // MMA_K
+-    // There's no case where !Clear_OOB_K && Clear_OOB_MN
+-    static_assert(!(Clear_OOB_MN && !Clear_OOB_K));
+-    #pragma unroll
+-    for (int m = 0; m < size<1>(S); ++m) {
+-        if (Is_even_MN || get<0>(identity_MN(0, m, 0)) < max_MN) {
+-            #pragma unroll
+-            for (int k = 0; k < size<2>(S); ++k) {
+-                if (Is_even_K || predicate_K(k)) {
+-                    cute::copy(tiled_copy, S(_, m, k), D(_, m, k));
+-                } else if (Clear_OOB_K) {
+-                    cute::clear(D(_, m, k));
+-                }
+-            }
+-        } else if (Clear_OOB_MN) {
+-            cute::clear(D(_, m, _));
+-        }
+-    }
+-    // TD [2023-04-13]: Strange that the code below can cause race condition.
+-    // I think it's because the copies are under an if statement.
+-    // if (Is_even_K) {
+-    //     #pragma unroll
+-    //     for (int m = 0; m < size<1>(S); ++m) {
+-    //         if (Is_even_MN || get<0>(identity_MN(0, m, 0)) < max_MN) {
+-    //             copy(tiled_copy, S(_, m, _), D(_, m, _));
+-    //         } else if (Clear_OOB_MN) {
+-    //             clear(D(_, m, _));
+-    //         }
+-    //     }
+-    // } else {  // It's slightly faster in this case if iterate over K first
+-    //     #pragma unroll
+-    //     for (int k = 0; k < size<2>(S); ++k) {
+-    //         if (predicate_K(k)) {
+-    //             #pragma unroll
+-    //             for (int m = 0; m < size<1>(S); ++m) {
+-    //                 if (Is_even_MN || get<0>(identity_MN(0, m, 0)) < max_MN) {
+-    //                     copy(tiled_copy, S(_, m, k), D(_, m, k));
+-    //                 } else if (Clear_OOB_MN) {
+-    //                     clear(D(_, m, k));
+-    //                 }
+-    //             }
+-    //         } else if (Clear_OOB_K) {  // There's no case where !Clear_OOB_K && Clear_OOB_MN
+-    //             if (Clear_OOB_MN || Is_even_MN) {
+-    //                 clear(D(_, _, k));
+-    //             } else {
+-    //                 #pragma unroll
+-    //                 for (int m = 0; m < size<1>(S); ++m) {
+-    //                     if (!(Is_even_MN || get<0>(identity_MN(0, m, 0)) < max_MN)) {
+-    //                         clear(D(_, m, k));
+-    //                     }
+-    //                 }
+-    //             }
+-    //         }
+-    //     }
+-    // }
+-}
+-
+-////////////////////////////////////////////////////////////////////////////////////////////////////
+-
+-template <bool Is_even_K=true,
+-          typename Engine0, typename Layout0, typename Engine1, typename Layout1,
+-          typename Engine2, typename Layout2, typename Engine3, typename Layout3>
+-__forceinline__ __device__ void copy_w_min_idx(Tensor<Engine0, Layout0> const &S,
+-                                      Tensor<Engine1, Layout1> &D, Tensor<Engine2, Layout2> const &identity_MN,
+-                                      Tensor<Engine3, Layout3> const &predicate_K,
+-                                      const int max_MN=0, const int min_MN=0) {
+-    CUTE_STATIC_ASSERT_V(rank(S) == Int<3>{});
+-    CUTE_STATIC_ASSERT_V(rank(D) == Int<3>{});
+-    CUTE_STATIC_ASSERT_V(size<0>(S) == size<0>(D));                     // MMA
+-    CUTE_STATIC_ASSERT_V(size<1>(S) == size<1>(D));                     // MMA_M
+-    CUTE_STATIC_ASSERT_V(size<2>(S) == size<2>(D));                     // MMA_K
+-    // if (threadIdx.x == 0 && blockIdx.z == 0) { printf("blockIdx.y = %d, max_MN = %d, min_MN = %d\n", blockIdx.y, max_MN, min_MN); }
+-    #pragma unroll
+-    for (int m = 0; m < size<1>(S); ++m) {
+-        // if (threadIdx.x == 0 && blockIdx.z == 0) { printf("blockIdx.y = %d, m = %d\n", blockIdx.y, get<0>(identity_MN(0, m, 0))); }
+-        if (get<0>(identity_MN(0, m, 0)) >= min_MN && get<0>(identity_MN(0, m, 0)) < max_MN) {
+-            // if (threadIdx.x == 0 && blockIdx.z == 0) { printf("Inner loop, blockIdx.y = %d, m = %d\n", blockIdx.y, get<0>(identity_MN(0, m, 0))); }
+-            #pragma unroll
+-            for (int k = 0; k < size<2>(S); ++k) {
+-                if (Is_even_K || predicate_K(k)) {
+-                    cute::copy(S(_, m, k), D(_, m, k));
+-                }
+-            }
+-        }
+-    }
+-}
++#define FLASH_CUDA_KERNEL_LAUNCH_CHECK() FLASH_CUDA_CHECK(cudaGetLastError())
+ 
+-////////////////////////////////////////////////////////////////////////////////////////////////////
++int getCurrentDevice();
++cudaDeviceProp* getDeviceProperties(int device);
++cudaDeviceProp* getCurrentDeviceProperties();
++CUDAPhiloxRandomGenerator& getDefaultCUDAGenerator(int device);
+ 
+-}  // namespace flash
++} // namespace flash::cuda
+diff --git a/flash_attn/flash_attn_interface.py b/flash_attn/flash_attn_interface.py
+index a7f15be..a1ef865 100644
+--- a/flash_attn/flash_attn_interface.py
++++ b/flash_attn/flash_attn_interface.py
+@@ -79,7 +79,6 @@ def _flash_attn_varlen_forward(
+     window_size,
+     alibi_slopes,
+     return_softmax,
+-    block_table,
+ ):
+     maybe_contiguous = lambda x: x.contiguous() if x.stride(-1) != 1 else x
+     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
+@@ -91,7 +90,6 @@ def _flash_attn_varlen_forward(
+         cu_seqlens_q,
+         cu_seqlens_k,
+         None,
+-        block_table,
+         alibi_slopes,
+         max_seqlen_q,
+         max_seqlen_k,
+@@ -301,7 +299,6 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
+             window_size=window_size,
+             alibi_slopes=alibi_slopes,
+             return_softmax=return_softmax and dropout_p > 0,
+-            block_table=None,
+         )
+         ctx.save_for_backward(q, k, v, out_padded, softmax_lse, cu_seqlens, rng_state)
+         ctx.dropout_p = dropout_p
+@@ -443,7 +440,6 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
+             window_size=window_size,
+             alibi_slopes=alibi_slopes,
+             return_softmax=return_softmax and dropout_p > 0,
+-            block_table=None,
+         )
+         ctx.save_for_backward(
+             q, k, v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state
+@@ -574,7 +570,6 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
+         alibi_slopes,
+         deterministic,
+         return_softmax,
+-        block_table,
+     ):
+         if softmax_scale is None:
+             softmax_scale = q.shape[-1] ** (-0.5)
+@@ -592,7 +587,6 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
+             window_size=window_size,
+             alibi_slopes=alibi_slopes,
+             return_softmax=return_softmax and dropout_p > 0,
+-            block_table=block_table,
+         )
+         ctx.save_for_backward(
+             q, k, v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state
+@@ -636,7 +630,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
+         dq = dq[..., : dout.shape[-1]]  # We could have padded the head dimension
+         dk = dk[..., : dout.shape[-1]]
+         dv = dv[..., : dout.shape[-1]]
+-        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None
++        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None
+ 
+ 
+ def flash_attn_qkvpacked_func(
+@@ -1007,7 +1001,6 @@ def flash_attn_varlen_func(
+     alibi_slopes=None,
+     deterministic=False,
+     return_attn_probs=False,
+-    block_table=None,
+ ):
+     """dropout_p should be set to 0.0 during evaluation
+     Supports multi-query and grouped-query attention (MQA/GQA) by passing in K, V with fewer heads
+@@ -1078,7 +1071,6 @@ def flash_attn_varlen_func(
+         alibi_slopes,
+         deterministic,
+         return_attn_probs,
+-        block_table,
+     )
+ 
+ 
+diff --git a/tests/test_flash_attn.py b/tests/test_flash_attn.py
+index 308e30b..892b8be 100644
+--- a/tests/test_flash_attn.py
++++ b/tests/test_flash_attn.py
+@@ -1542,12 +1542,8 @@ def test_flash_attn_causal(seqlen_q, seqlen_k, swap_sq_sk, d, local, dtype):
+         (1023, 1024),
+     ],
+ )
+-# TODO: add smaller page sizes when https://github.com/Dao-AILab/flash-attention/pull/824 is merged
+-@pytest.mark.parametrize("paged_kv_block_size", [None, 256, 512])
+ # @pytest.mark.parametrize("seqlen_q,seqlen_k", [(256, 128)])
+-def test_flash_attn_varlen_causal(
+-    seqlen_q, seqlen_k, swap_sq_sk, d, local, paged_kv_block_size, dtype
+-):
++def test_flash_attn_varlen_causal(seqlen_q, seqlen_k, swap_sq_sk, d, local, dtype):
+     if (
+         max(seqlen_q, seqlen_k) >= 2048
+         and torch.cuda.get_device_properties("cuda").total_memory <= 16 * 2**30
+@@ -1563,19 +1559,8 @@ def test_flash_attn_varlen_causal(
+     nheads = 9
+     window_size = (-1, -1) if not local else torch.randint(0, seqlen_k, (2,))
+     q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype, requires_grad=True)
+-
+-    if paged_kv_block_size is None:
+-        k = torch.randn(
+-            batch_size, seqlen_k, nheads, d, device=device, dtype=dtype, requires_grad=True
+-        )
+-        v = torch.randn(
+-            batch_size, seqlen_k, nheads, d, device=device, dtype=dtype, requires_grad=True
+-        )
+-        block_table = None
+-    else:
+-        k, v, block_table, k_cache_paged, v_cache_paged, num_blocks = _generate_block_kvcache(
+-            seqlen_k, paged_kv_block_size, batch_size, nheads, d, device, dtype
+-        )
++    k = torch.randn(batch_size, seqlen_k, nheads, d, device=device, dtype=dtype, requires_grad=True)
++    v = torch.randn(batch_size, seqlen_k, nheads, d, device=device, dtype=dtype, requires_grad=True)
+     query_padding_mask = generate_random_padding_mask(seqlen_q, batch_size, device, mode="random")
+     key_padding_mask = generate_random_padding_mask(seqlen_k, batch_size, device, mode="random")
+     (
+@@ -1595,8 +1580,8 @@ def test_flash_attn_varlen_causal(
+     ) = generate_qkv(q, k, v, query_padding_mask, key_padding_mask, kvpacked=False)
+     out_unpad = flash_attn_varlen_func(
+         q_unpad,
+-        k_unpad if paged_kv_block_size is None else k_cache_paged,
+-        v_unpad if paged_kv_block_size is None else v_cache_paged,
++        k_unpad,
++        v_unpad,
+         cu_seqlens_q,
+         cu_seqlens_k,
+         max_seqlen_q,
+@@ -1604,7 +1589,6 @@ def test_flash_attn_varlen_causal(
+         0.0,
+         causal=causal,
+         window_size=window_size,
+-        block_table=block_table,
+     )
+     out = output_pad_fn(out_unpad)
+     out_ref, attn_ref = attention_ref(
+@@ -1641,8 +1625,7 @@ def test_flash_attn_varlen_causal(
+ 
+     g = torch.randn_like(out)
+     do_o = (g.float() * out.float()).sum(-1)
+-    test_backward = (d <= MAX_HEADDIM_SM8x or d > 224 or is_sm80 or is_sm90) and block_table is None
+-    if test_backward:
++    if (d <= MAX_HEADDIM_SM8x or d > 224) or (is_sm80 or is_sm90):
+         (
+             dq_unpad,
+             dk_unpad,
+@@ -1678,7 +1661,7 @@ def test_flash_attn_varlen_causal(
+     # of a Pytorch implementation.
+     assert (out - out_ref).abs().max().item() <= 2 * (out_pt - out_ref).abs().max().item() + 1e-5
+ 
+-    if test_backward:
++    if (d <= MAX_HEADDIM_SM8x or d > 224) or (is_sm80 or is_sm90):
+         assert (dq - dq_ref).abs().max().item() <= 2 * (dq_pt - dq_ref).abs().max().item() + 1e-5
+         assert (dk - dk_ref).abs().max().item() <= 2 * (dk_pt - dk_ref).abs().max().item() + 1e-5
+         assert (dv - dv_ref).abs().max().item() <= 2 * (dv_pt - dv_ref).abs().max().item() + 1e-5
+@@ -1905,16 +1888,29 @@ def test_flash_attn_kvcache(
+         v_cache = torch.randn(batch_size_cache, seqlen_k, nheads_k, d, device=device, dtype=dtype)
+         block_table = None
+     else:
+-        (
+-            k_cache,
+-            v_cache,
+-            block_table,
+-            k_cache_paged,
+-            v_cache_paged,
+-            num_blocks,
+-        ) = _generate_block_kvcache(
+-            seqlen_k, paged_kv_block_size, batch_size, nheads_k, d, device, dtype
++        num_blocks = math.ceil(seqlen_k / paged_kv_block_size) * batch_size * 3
++        k_cache_paged = torch.randn(
++            num_blocks, paged_kv_block_size, nheads_k, d, device=device, dtype=dtype
++        )
++        v_cache_paged = torch.randn(
++            num_blocks, paged_kv_block_size, nheads_k, d, device=device, dtype=dtype
+         )
++        block_table = rearrange(
++            torch.randperm(num_blocks, dtype=torch.int32, device=device),
++            "(b nblocks) -> b nblocks",
++            b=batch_size,
++        )
++        k_cache = rearrange(
++            # pytorch 1.12 doesn't have indexing with int32
++            k_cache_paged[block_table.to(dtype=torch.long).flatten()],
++            "(b nblocks) block_size ... -> b (nblocks block_size) ...",
++            b=batch_size,
++        )[:, :seqlen_k]
++        v_cache = rearrange(
++            v_cache_paged[block_table.to(dtype=torch.long).flatten()],
++            "(b nblocks) block_size ... -> b (nblocks block_size) ...",
++            b=batch_size,
++        )[:, :seqlen_k]
+     cache_seqlens = torch.randint(
+         0 if new_kv else 1,
+         # If we don't use seqlen_q in the case of causal and rotary, cos/sin won't be long enough
+@@ -2077,33 +2073,6 @@ def test_flash_attn_kvcache(
+     assert (out - out_ref).abs().max().item() <= mult * (out_pt - out_ref).abs().max().item() + 1e-5
+ 
+ 
+-def _generate_block_kvcache(seqlen_k, paged_kv_block_size, batch_size, nheads_k, d, device, dtype):
+-    num_blocks = math.ceil(seqlen_k / paged_kv_block_size) * batch_size * 3
+-    k_cache_paged = torch.randn(
+-        num_blocks, paged_kv_block_size, nheads_k, d, device=device, dtype=dtype
+-    )
+-    v_cache_paged = torch.randn(
+-        num_blocks, paged_kv_block_size, nheads_k, d, device=device, dtype=dtype
+-    )
+-    block_table = rearrange(
+-        torch.randperm(num_blocks, dtype=torch.int32, device=device),
+-        "(b nblocks) -> b nblocks",
+-        b=batch_size,
+-    )
+-    k_cache = rearrange(
+-        # pytorch 1.12 doesn't have indexing with int32
+-        k_cache_paged[block_table.to(dtype=torch.long).flatten()],
+-        "(b nblocks) block_size ... -> b (nblocks block_size) ...",
+-        b=batch_size,
+-    )[:, :seqlen_k]
+-    v_cache = rearrange(
+-        v_cache_paged[block_table.to(dtype=torch.long).flatten()],
+-        "(b nblocks) block_size ... -> b (nblocks block_size) ...",
+-        b=batch_size,
+-    )[:, :seqlen_k]
+-    return k_cache, v_cache, block_table, k_cache_paged, v_cache_paged, num_blocks
+-
+-
+ # @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
+ @pytest.mark.parametrize("dtype", [torch.float16])
+ @pytest.mark.parametrize("causal", [False, True])

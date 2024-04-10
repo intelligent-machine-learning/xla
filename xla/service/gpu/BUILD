@@ -275,6 +275,7 @@ cc_library(
         ":gpu_constants",
         ":gpu_conv_runner",
         ":gpu_executable",
+        ":gpu_flash_attn",
         ":gpu_fused_mha_runner",
         ":gpu_fusible",
         ":gpu_norm_runner",
@@ -915,6 +916,7 @@ cc_library(
         "conditional_thunk.cc",
         "convolution_thunk.cc",
         "copy_thunk.cc",
+        "flash_attn_thunk.cc",
         "for_thunk.cc",
         "fused_mha_thunk.cc",
         "gpu_executable.cc",
@@ -931,6 +933,7 @@ cc_library(
         "conditional_thunk.h",
         "convolution_thunk.h",
         "copy_thunk.h",
+        "flash_attn_thunk.h",
         "for_thunk.h",
         "fused_mha_thunk.h",
         "gemm_thunk.h",
@@ -956,6 +959,7 @@ cc_library(
         ":gpu_constants",
         ":gpu_conv_runner",
         ":gpu_executable_run_options",
+        ":gpu_flash_attn",
         ":gpu_fused_mha_runner",
         ":gpu_norm_runner",
         ":io_feed_manager",
@@ -1940,6 +1944,32 @@ cc_library(
 )
 
 cc_library(
+    name = "gpu_flash_attn",
+    srcs = if_cuda_is_configured([
+        "gpu_flash_attn.cc"
+    ]),
+    hdrs = ["gpu_flash_attn.h"],
+    deps = [
+        ":stream_executor_util",
+        "//xla:shape_util",
+        "//xla:status",
+        "//xla:status_macros",
+        "//xla:statusor",
+        "//xla:types",
+        "//xla:util",
+        "//xla/hlo/ir:hlo",
+        "//xla/stream_executor",
+        "//xla/stream_executor:dnn",
+        "//xla/stream_executor/gpu:gpu_stream",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+    ] + if_cuda_is_configured([
+        "@flash_attn//:flash_attn",
+    ])
+)
+
+cc_library(
     name = "gpu_fused_mha_runner",
     srcs = ["gpu_fused_mha_runner.cc"],
     hdrs = ["gpu_fused_mha_runner.h"],
@@ -2293,6 +2323,24 @@ xla_cc_test(
         "@tsl//tsl/lib/core:status_test_util",
         "@tsl//tsl/platform:errors",
         "@tsl//tsl/platform:status_matchers",
+    ],
+)
+
+cc_library(
+    name = "gpu_flash_attn_normalization",
+    srcs = ["gpu_flash_attn_normalization.cc"],
+    hdrs = ["gpu_flash_attn_normalization.h"],
+    deps = [
+        ":backend_configs_cc",
+        ":gpu_flash_attn",
+        "//xla/hlo/ir:hlo",
+        "//xla:literal_util",
+        "//xla/service:hlo_pass",
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:string_view",
+        "@tsl//tsl/platform:logging",
+        "@tsl//tsl/platform:status",
     ],
 )
 
@@ -2838,6 +2886,7 @@ cc_library(
     deps = [
         ":alias_passthrough_params",
         ":copy_fusion",
+        ":gpu_flash_attn_normalization",
         ":gpu_sanitize_constant_names",
         ":horizontal_loop_fusion",
         "//xla:xla_proto_cc",
@@ -3421,6 +3470,7 @@ cc_library(
     hdrs = ["gpu_layout_assignment.h"],
     deps = [
         ":backend_configs_cc",
+        ":gpu_flash_attn",
         ":ir_emission_utils",
         ":matmul_utils",
         ":stream_executor_util",
