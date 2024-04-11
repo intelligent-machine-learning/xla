@@ -50,22 +50,22 @@ struct FlashAttnConfig {
       const Shape &value_shape,
       const std::optional<Shape> &cu_seqlens_query_shape,
       const std::optional<Shape> &cu_seqlens_key_shape,
-      const Shape &output_shape, const Shape &softmax_lse_shape,
-      const std::optional<Shape> &alibi_slopes_shape, float dropout_rate,
-      float scale, bool is_causal, const std::optional<int> &max_seqlen_q,
+      const std::optional<Shape> &alibi_slopes_shape, const Shape &output_shape,
+      const Shape &softmax_lse_shape, float dropout_rate, float scale,
+      bool is_causal, const std::optional<int> &max_seqlen_q,
       const std::optional<int> &max_seqlen_k);
   PrimitiveType type;
 
-  se::dnn::TensorDescriptor query_desc;        // input
-  se::dnn::TensorDescriptor key_desc;          // input
-  se::dnn::TensorDescriptor value_desc;        // input
-  se::dnn::TensorDescriptor output_desc;       // output(fwd), input(bwd)
-  se::dnn::TensorDescriptor softmax_lse_desc;  // output(fwd), input(bwd)
-  std::optional<se::dnn::TensorDescriptor> alibi_slopes_desc;  // input
-
-  // These four fields are only used in the variable-length flash-attention
+  se::dnn::TensorDescriptor query_desc;                            // input
+  se::dnn::TensorDescriptor key_desc;                              // input
+  se::dnn::TensorDescriptor value_desc;                            // input
   std::optional<se::dnn::TensorDescriptor> cu_seqlens_query_desc;  // input
   std::optional<se::dnn::TensorDescriptor> cu_seqlens_key_desc;    // input
+  std::optional<se::dnn::TensorDescriptor> alibi_slopes_desc;      // input
+
+  se::dnn::TensorDescriptor output_desc;       // output(fwd), input(bwd)
+  se::dnn::TensorDescriptor softmax_lse_desc;  // output(fwd), input(bwd)
+
   std::optional<int> max_seqlen_q;
   std::optional<int> max_seqlen_k;
 
@@ -80,10 +80,10 @@ struct FlashAttnFwdConfig : public FlashAttnConfig {
       const Shape &value_shape,
       const std::optional<Shape> &cu_seqlens_query_shape,
       const std::optional<Shape> &cu_seqlens_key_shape,
-      const Shape &output_shape, const Shape &softmax_lse_shape,
-      const std::optional<Shape> &s_dmask_shape,
-      const std::optional<Shape> &alibi_slopes_shape, float dropout_rate,
-      float scale, bool is_causal, const std::optional<int> &max_seqlen_q,
+      const std::optional<Shape> &alibi_slopes_shape, const Shape &output_shape,
+      const Shape &softmax_lse_shape, const std::optional<Shape> &s_dmask_shape,
+      float dropout_rate, float scale, bool is_causal,
+      const std::optional<int> &max_seqlen_q,
       const std::optional<int> &max_seqlen_k);
 
   FlashAttnFwdConfig(const FlashAttnConfig &config) : FlashAttnConfig(config) {}
@@ -95,13 +95,13 @@ struct FlashAttnBwdConfig : public FlashAttnConfig {
   static absl::StatusOr<FlashAttnBwdConfig> For(
       const Shape &grad_output_shape, const Shape &query_shape,
       const Shape &key_shape, const Shape &value_shape,
+      const Shape &output_shape, const Shape &softmax_lse_shape,
       const std::optional<Shape> &cu_seqlens_query_shape,
       const std::optional<Shape> &cu_seqlens_key_shape,
-      const Shape &output_shape, const Shape &softmax_lse_shape,
+      const std::optional<Shape> &alibi_slopes_shape,
       const Shape &grad_query_shape, const Shape &grad_key_shape,
       const Shape &grad_value_shape, const Shape &grad_softmax_shape,
-      const std::optional<Shape> &alibi_slopes_shape, float dropout_rate,
-      float scale, bool is_causal, bool deterministic,
+      float dropout_rate, float scale, bool is_causal, bool deterministic,
       const std::optional<int> &max_seqlen_q,
       const std::optional<int> &max_seqlen_k);
 
@@ -125,29 +125,29 @@ absl::Status RunFlashAttnFwd(
     se::DeviceMemoryBase value_buffer,
     std::optional<se::DeviceMemoryBase> cu_seqlens_query_buffer,
     std::optional<se::DeviceMemoryBase> cu_seqlens_key_buffer,
-    se::DeviceMemoryBase output_buffer, se::DeviceMemoryBase softmax_lse_buffer,
-    std::optional<se::DeviceMemoryBase> s_dmask_buffer,
-    se::DeviceMemoryBase rng_state_buffer,
     std::optional<se::DeviceMemoryBase> alibi_slopes_buffer,
-    std::optional<se::DeviceMemoryBase> softmax_lse_accum_buffer,
     std::optional<se::DeviceMemoryBase> output_accum_buffer,
-    int window_size_left, int window_size_right);
+    std::optional<se::DeviceMemoryBase> softmax_lse_accum_buffer,
+    se::DeviceMemoryBase output_buffer, se::DeviceMemoryBase softmax_lse_buffer,
+    se::DeviceMemoryBase rng_state_buffer,
+    std::optional<se::DeviceMemoryBase> s_dmask_buffer,
+    int window_size_left = -1, int window_size_right = -1);
 
 absl::Status RunFlashAttnBwd(
     se::Stream *stream, const FlashAttnBwdConfig &config,
     se::DeviceMemoryBase grad_output_buffer, se::DeviceMemoryBase query_buffer,
     se::DeviceMemoryBase key_buffer, se::DeviceMemoryBase value_buffer,
-    std::optional<se::DeviceMemoryBase> cu_seqlens_query_buffer,
-    std::optional<se::DeviceMemoryBase> cu_seqlens_key_buffer,
     se::DeviceMemoryBase output_buffer, se::DeviceMemoryBase softmax_lse_buffer,
     se::DeviceMemoryBase rng_state_buffer,
+    std::optional<se::DeviceMemoryBase> cu_seqlens_query_buffer,
+    std::optional<se::DeviceMemoryBase> cu_seqlens_key_buffer,
+    std::optional<se::DeviceMemoryBase> alibi_slopes_buffer,
+    se::DeviceMemoryBase grad_query_accum_buffer,
     se::DeviceMemoryBase grad_query_buffer,
     se::DeviceMemoryBase grad_key_buffer,
     se::DeviceMemoryBase grad_value_buffer,
-    se::DeviceMemoryBase grad_softmax_buffer,
-    std::optional<se::DeviceMemoryBase> alibi_slopes_buffer,
-    se::DeviceMemoryBase grad_query_accum_buffer, int window_size_left,
-    int window_size_right);
+    se::DeviceMemoryBase grad_softmax_buffer, int window_size_left = -1,
+    int window_size_right = -1);
 
 }  // namespace gpu
 }  // namespace xla

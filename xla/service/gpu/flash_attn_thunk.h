@@ -34,15 +34,15 @@ class FlashAttnFwdThunk : public Thunk {
       ThunkInfo thunk_info, FlashAttnFwdConfig config,
       BufferAllocation::Slice query_slice, BufferAllocation::Slice key_slice,
       BufferAllocation::Slice value_slice,
-      BufferAllocation::Slice cu_seqlens_query_slice /* may be null */,
-      BufferAllocation::Slice cu_seqlens_key_slice /* may be null */,
+      BufferAllocation::Slice cu_seqlens_query_slice,  /* may be null */
+      BufferAllocation::Slice cu_seqlens_key_slice,    /* may be null */
+      BufferAllocation::Slice alibi_slopes_slice,      /* may be null */
+      BufferAllocation::Slice output_accum_slice,      /* may be null */
+      BufferAllocation::Slice softmax_lse_accum_slice, /* may be null */
       BufferAllocation::Slice output_slice,
       BufferAllocation::Slice softmax_lse_slice,
-      BufferAllocation::Slice s_dmask_slice /* may be null */,
       BufferAllocation::Slice rng_state_slice,
-      BufferAllocation::Slice alibi_slopes_slice /* may be null */,
-      BufferAllocation::Slice softmax_lse_accum_slice /* may be null */,
-      BufferAllocation::Slice output_accum_slice /* may be null */);
+      BufferAllocation::Slice s_dmask_slice /* may be null */);
 
   FlashAttnFwdThunk(const FlashAttnFwdThunk &) = delete;
   FlashAttnFwdThunk &operator=(const FlashAttnFwdThunk &) = delete;
@@ -50,23 +50,21 @@ class FlashAttnFwdThunk : public Thunk {
   absl::Status ExecuteOnStream(const ExecuteParams &params) override;
 
  private:
+  const FlashAttnFwdConfig config_;
+
   BufferAllocation::Slice query_buffer_;              // input
   BufferAllocation::Slice key_buffer_;                // input
   BufferAllocation::Slice value_buffer_;              // input
-  BufferAllocation::Slice output_buffer_;             // output
-  BufferAllocation::Slice softmax_lse_buffer_;        // output
-  BufferAllocation::Slice s_dmask_buffer_;            // output
-  BufferAllocation::Slice rng_state_buffer_;          // output
+  BufferAllocation::Slice cu_seqlens_query_buffer_;   // input(varlen)
+  BufferAllocation::Slice cu_seqlens_key_buffer_;     // input(varlen)
   BufferAllocation::Slice alibi_slopes_buffer_;       // input
-  BufferAllocation::Slice softmax_lse_accum_buffer_;  // input(temp)
   BufferAllocation::Slice output_accum_buffer_;       // input(temp)
+  BufferAllocation::Slice softmax_lse_accum_buffer_;  // input(temp)
 
-  // Required by variable-length flash-attention
-  BufferAllocation::Slice cu_seqlens_query_buffer_;  // input
-  BufferAllocation::Slice cu_seqlens_key_buffer_;    // input
-
-  // Flash-attention config
-  const FlashAttnFwdConfig config_;
+  BufferAllocation::Slice output_buffer_;       // output
+  BufferAllocation::Slice softmax_lse_buffer_;  // output
+  BufferAllocation::Slice rng_state_buffer_;    // output
+  BufferAllocation::Slice s_dmask_buffer_;      // output
 };
 
 class FlashAttnBwdThunk : public Thunk {
@@ -75,18 +73,17 @@ class FlashAttnBwdThunk : public Thunk {
       ThunkInfo thunk_info, FlashAttnBwdConfig config,
       BufferAllocation::Slice grad_output_slice,
       BufferAllocation::Slice query_slice, BufferAllocation::Slice key_slice,
-      BufferAllocation::Slice value_slice,
-      BufferAllocation::Slice cu_seqlens_query_slice /* may be null */,
-      BufferAllocation::Slice cu_seqlens_key_slice /* may be null */,
-      BufferAllocation::Slice output_slice,
+      BufferAllocation::Slice value_slice, BufferAllocation::Slice output_slice,
       BufferAllocation::Slice softmax_lse_slice,
       BufferAllocation::Slice rng_state_slice,
+      BufferAllocation::Slice cu_seqlens_query_slice, /* may be null */
+      BufferAllocation::Slice cu_seqlens_key_slice,   /* may be null */
+      BufferAllocation::Slice alibi_slopes_slice,     /* may be null */
+      BufferAllocation::Slice grad_query_accum_slice,
       BufferAllocation::Slice grad_query_slice,
       BufferAllocation::Slice grad_key_slice,
       BufferAllocation::Slice grad_value_slice,
-      BufferAllocation::Slice grad_softmax_slice,
-      BufferAllocation::Slice alibi_slopes_slice /* may be null */,
-      BufferAllocation::Slice grad_query_accum_slice);
+      BufferAllocation::Slice grad_softmax_slice);
 
   FlashAttnBwdThunk(const FlashAttnBwdThunk &) = delete;
   FlashAttnBwdThunk &operator=(const FlashAttnBwdThunk &) = delete;
@@ -94,6 +91,8 @@ class FlashAttnBwdThunk : public Thunk {
   absl::Status ExecuteOnStream(const ExecuteParams &params) override;
 
  private:
+  const FlashAttnBwdConfig config_;
+
   BufferAllocation::Slice grad_output_buffer_;       // input
   BufferAllocation::Slice query_buffer_;             // input
   BufferAllocation::Slice key_buffer_;               // input
@@ -101,19 +100,15 @@ class FlashAttnBwdThunk : public Thunk {
   BufferAllocation::Slice output_buffer_;            // input
   BufferAllocation::Slice softmax_lse_buffer_;       // input
   BufferAllocation::Slice rng_state_buffer_;         // input
-  BufferAllocation::Slice grad_query_buffer_;        // output
-  BufferAllocation::Slice grad_key_buffer_;          // output
-  BufferAllocation::Slice grad_value_buffer_;        // output
-  BufferAllocation::Slice grad_softmax_buffer_;      // output
+  BufferAllocation::Slice cu_seqlens_query_buffer_;  // input(varlen)
+  BufferAllocation::Slice cu_seqlens_key_buffer_;    // input(varlen)
   BufferAllocation::Slice alibi_slopes_buffer_;      // input
   BufferAllocation::Slice grad_query_accum_buffer_;  // input(temp)
 
-  // Required by variable-length flash-attention
-  BufferAllocation::Slice cu_seqlens_query_buffer_;  // input
-  BufferAllocation::Slice cu_seqlens_key_buffer_;    // input
-
-  // Flash-attention config
-  const FlashAttnBwdConfig config_;
+  BufferAllocation::Slice grad_query_buffer_;    // output
+  BufferAllocation::Slice grad_key_buffer_;      // output
+  BufferAllocation::Slice grad_value_buffer_;    // output
+  BufferAllocation::Slice grad_softmax_buffer_;  // output
 };
 
 }  // namespace gpu

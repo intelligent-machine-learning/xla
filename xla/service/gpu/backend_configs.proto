@@ -207,9 +207,15 @@ message FlashAttnBackendConfig {
 
   bool deterministic = 5;
 
+  // Whether there is 'alibi_slopes' in the input arguments
   bool has_alibi_slopes = 6;
 
+  // Max sequence length of query in variable-length flash-attention
   optional int32 max_seqlen_q = 7;
 
+  // Max sequence length of key in variable-length flash-attention
   optional int32 max_seqlen_k = 8;
+
+  // Whether to return softmax in forward flash-attention
+  optional bool return_softmax = 9; 
 }

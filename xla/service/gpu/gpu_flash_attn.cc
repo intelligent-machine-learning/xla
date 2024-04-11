@@ -69,10 +69,10 @@ absl::StatusOr<FlashAttnKind> GetFlashAttnKind(
 absl::StatusOr<FlashAttnConfig> FlashAttnConfig::For(
     const Shape &query_shape, const Shape &key_shape, const Shape &value_shape,
     const std::optional<Shape> &cu_seqlens_query_shape,
-    const std::optional<Shape> &cu_seqlens_key_shape, const Shape &output_shape,
-    const Shape &softmax_lse_shape,
-    const std::optional<Shape> &alibi_slopes_shape, float dropout_rate,
-    float scale, bool is_causal, const std::optional<int> &max_seqlen_q,
+    const std::optional<Shape> &cu_seqlens_key_shape,
+    const std::optional<Shape> &alibi_slopes_shape, const Shape &output_shape,
+    const Shape &softmax_lse_shape, float dropout_rate, float scale,
+    bool is_causal, const std::optional<int> &max_seqlen_q,
     const std::optional<int> &max_seqlen_k) {
   PrimitiveType type = query_shape.element_type();
 
@@ -116,18 +116,18 @@ absl::StatusOr<FlashAttnConfig> FlashAttnConfig::For(
     config.max_seqlen_k = max_seqlen_k;
   }
 
+  if (alibi_slopes_shape.has_value()) {
+    config.alibi_slopes_desc = se::dnn::TensorDescriptor::For(
+        f32_type, alibi_slopes_shape.value().dimensions(),
+        alibi_slopes_shape.value().layout().minor_to_major());
+  }
+
   config.output_desc =
       se::dnn::TensorDescriptor::For(elem_type, output_shape.dimensions(),
                                      output_shape.layout().minor_to_major());
   config.softmax_lse_desc = se::dnn::TensorDescriptor::For(
       f32_type, softmax_lse_shape.dimensions(),
       softmax_lse_shape.layout().minor_to_major());
-
-  if (alibi_slopes_shape.has_value()) {
-    config.alibi_slopes_desc = se::dnn::TensorDescriptor::For(
-        f32_type, alibi_slopes_shape.value().dimensions(),
-        alibi_slopes_shape.value().layout().minor_to_major());
-  }
 
   config.dropout_rate = dropout_rate;
   config.scale = scale;
@@ -138,16 +138,17 @@ absl::StatusOr<FlashAttnConfig> FlashAttnConfig::For(
 absl::StatusOr<FlashAttnFwdConfig> FlashAttnFwdConfig::For(
     const Shape &query_shape, const Shape &key_shape, const Shape &value_shape,
     const std::optional<Shape> &cu_seqlens_query_shape,
-    const std::optional<Shape> &cu_seqlens_key_shape, const Shape &output_shape,
+    const std::optional<Shape> &cu_seqlens_key_shape,
+    const std::optional<Shape> &alibi_slopes_shape, const Shape &output_shape,
     const Shape &softmax_lse_shape, const std::optional<Shape> &s_dmask_shape,
-    const std::optional<Shape> &alibi_slopes_shape, float dropout_rate,
-    float scale, bool is_causal, const std::optional<int> &max_seqlen_q,
+    float dropout_rate, float scale, bool is_causal,
+    const std::optional<int> &max_seqlen_q,
     const std::optional<int> &max_seqlen_k) {
   TF_ASSIGN_OR_RETURN(
       FlashAttnFwdConfig config,
       FlashAttnConfig::For(query_shape, key_shape, value_shape,
                            cu_seqlens_query_shape, cu_seqlens_key_shape,
-                           output_shape, softmax_lse_shape, alibi_slopes_shape,
+                           alibi_slopes_shape, output_shape, softmax_lse_shape,
                            dropout_rate, scale, is_causal, max_seqlen_q,
                            max_seqlen_k));
 
@@ -165,21 +166,21 @@ absl::StatusOr<FlashAttnFwdConfig> FlashAttnFwdConfig::For(
 
 absl::StatusOr<FlashAttnBwdConfig> FlashAttnBwdConfig::For(
     const Shape &grad_output_shape, const Shape &query_shape,
-    const Shape &key_shape, const Shape &value_shape,
+    const Shape &key_shape, const Shape &value_shape, const Shape &output_shape,
+    const Shape &softmax_lse_shape,
     const std::optional<Shape> &cu_seqlens_query_shape,
-    const std::optional<Shape> &cu_seqlens_key_shape, const Shape &output_shape,
-    const Shape &softmax_lse_shape, const Shape &grad_query_shape,
-    const Shape &grad_key_shape, const Shape &grad_value_shape,
-    const Shape &grad_softmax_shape,
-    const std::optional<Shape> &alibi_slopes_shape, float dropout_rate,
-    float scale, bool is_causal, bool deterministic,
+    const std::optional<Shape> &cu_seqlens_key_shape,
+    const std::optional<Shape> &alibi_slopes_shape,
+    const Shape &grad_query_shape, const Shape &grad_key_shape,
+    const Shape &grad_value_shape, const Shape &grad_softmax_shape,
+    float dropout_rate, float scale, bool is_causal, bool deterministic,
     const std::optional<int> &max_seqlen_q,
     const std::optional<int> &max_seqlen_k) {
   TF_ASSIGN_OR_RETURN(
       FlashAttnBwdConfig config,
       FlashAttnConfig::For(query_shape, key_shape, value_shape,
                            cu_seqlens_query_shape, cu_seqlens_key_shape,
-                           output_shape, softmax_lse_shape, alibi_slopes_shape,
+                           alibi_slopes_shape, output_shape, softmax_lse_shape,
                            dropout_rate, scale, is_causal, max_seqlen_q,
                            max_seqlen_k));
 
@@ -453,8 +454,8 @@ static void set_params_splitkv(
     Flash_fwd_params &params, const int batch_size, const int num_heads,
     const int head_size, const int max_seqlen_k, const int max_seqlen_q,
     const int head_size_rounded, const float p_dropout, const int num_splits,
-    std::optional<se::DeviceMemoryBase> softmax_lse_accum_buffer,
     std::optional<se::DeviceMemoryBase> output_accum_buffer,
+    std::optional<se::DeviceMemoryBase> softmax_lse_accum_buffer,
     const cudaDeviceProp *dprops) {
   params.num_splits = num_splits;
   if (p_dropout == 0.0f) {  // SplitKV is not implemented for dropout
@@ -471,11 +472,11 @@ static void set_params_splitkv(
           dprops->multiProcessorCount * 2, num_n_blocks, 128);
     }
     bool splitkv = params.num_splits > 1;
-    CHECK(splitkv == softmax_lse_accum_buffer.has_value() &&
-          splitkv == output_accum_buffer.has_value());
+    CHECK(splitkv == output_accum_buffer.has_value() &&
+          splitkv == softmax_lse_accum_buffer.has_value());
     if (splitkv) {
-      params.softmax_lseaccum_ptr = softmax_lse_accum_buffer->opaque();
       params.oaccum_ptr = output_accum_buffer->opaque();
+      params.softmax_lseaccum_ptr = softmax_lse_accum_buffer->opaque();
     }
     CHECK(params.num_splits <= 128) << "num_splits > 128 not supported";
   }
@@ -541,13 +542,13 @@ absl::Status RunFlashAttnFwd(
     se::DeviceMemoryBase value_buffer,
     std::optional<se::DeviceMemoryBase> cu_seqlens_query_buffer,
     std::optional<se::DeviceMemoryBase> cu_seqlens_key_buffer,
-    se::DeviceMemoryBase output_buffer, se::DeviceMemoryBase softmax_lse_buffer,
-    std::optional<se::DeviceMemoryBase> s_dmask_buffer,
-    se::DeviceMemoryBase rng_state_buffer,
     std::optional<se::DeviceMemoryBase> alibi_slopes_buffer,
-    std::optional<se::DeviceMemoryBase> softmax_lse_accum_buffer,
     std::optional<se::DeviceMemoryBase> output_accum_buffer,
-    int window_size_left, int window_size_right) {
+    std::optional<se::DeviceMemoryBase> softmax_lse_accum_buffer,
+    se::DeviceMemoryBase output_buffer, se::DeviceMemoryBase softmax_lse_buffer,
+    se::DeviceMemoryBase rng_state_buffer,
+    std::optional<se::DeviceMemoryBase> s_dmask_buffer, int window_size_left,
+    int window_size_right) {
   const float p_dropout = config.dropout_rate;
   const float softmax_scale = config.scale;
   bool is_causal = config.is_causal;
@@ -654,8 +655,8 @@ absl::Status RunFlashAttnFwd(
   if (!is_varlen) {
     set_params_splitkv(params, batch_size, num_heads, head_size, seqlen_k,
                        seqlen_q, head_size_rounded, p_dropout,
-                       /*num_splits*/ 0, softmax_lse_accum_buffer,
-                       output_accum_buffer, dprops);
+                       /*num_splits*/ 0, output_accum_buffer,
+                       softmax_lse_accum_buffer, dprops);
   }
 
   // number of times random will be generated per thread, to offset philox
@@ -699,16 +700,16 @@ absl::Status RunFlashAttnBwd(
     se::Stream *stream, const FlashAttnBwdConfig &config,
     se::DeviceMemoryBase grad_output_buffer, se::DeviceMemoryBase query_buffer,
     se::DeviceMemoryBase key_buffer, se::DeviceMemoryBase value_buffer,
-    std::optional<se::DeviceMemoryBase> cu_seqlens_query_buffer,
-    std::optional<se::DeviceMemoryBase> cu_seqlens_key_buffer,
     se::DeviceMemoryBase output_buffer, se::DeviceMemoryBase softmax_lse_buffer,
     se::DeviceMemoryBase rng_state_buffer,
+    std::optional<se::DeviceMemoryBase> cu_seqlens_query_buffer,
+    std::optional<se::DeviceMemoryBase> cu_seqlens_key_buffer,
+    std::optional<se::DeviceMemoryBase> alibi_slopes_buffer,
+    se::DeviceMemoryBase grad_query_accum_buffer,
     se::DeviceMemoryBase grad_query_buffer,
     se::DeviceMemoryBase grad_key_buffer,
     se::DeviceMemoryBase grad_value_buffer,
-    se::DeviceMemoryBase grad_softmax_buffer,
-    std::optional<se::DeviceMemoryBase> alibi_slopes_buffer,
-    se::DeviceMemoryBase grad_query_accum_buffer, int window_size_left,
+    se::DeviceMemoryBase grad_softmax_buffer, int window_size_left,
     int window_size_right) {
 #ifdef FLASHATTENTION_DISABLE_BACKWARD
   CHECK(false) << "This flash attention build does not support backward.";

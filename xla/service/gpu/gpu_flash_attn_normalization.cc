@@ -90,13 +90,20 @@ StatusOr<bool> GpuFlashAttnNormalization::Run(
 static int RoundMultiple(int x, int m) { return (x + m - 1) / m * m; }
 
 static HloInstruction* CreateZeroTensor(HloComputation* computation,
+                                        HloInstruction* const_zero,
+                                        PrimitiveType element_type,
+                                        absl::Span<const int64_t> dimensions) {
+  const Shape& shape = ShapeUtil::MakeShape(element_type, dimensions);
+  return computation->AddInstruction(
+      HloInstruction::CreateBroadcast(shape, const_zero, {}));
+}
+
+static HloInstruction* CreateZeroTensor(HloComputation* computation,
                                         PrimitiveType element_type,
                                         absl::Span<const int64_t> dimensions) {
   HloInstruction* const_zero = computation->AddInstruction(
       HloInstruction::CreateConstant(LiteralUtil::Zero(element_type)));
-  const Shape& shape = ShapeUtil::MakeShape(element_type, dimensions);
-  return computation->AddInstruction(
-      HloInstruction::CreateBroadcast(shape, const_zero, {}));
+  return CreateZeroTensor(computation, const_zero, element_type, dimensions);
 }
 
 absl::StatusOr<bool> GpuFlashAttnNormalization::RunOnFwdFlashAttn(
@@ -133,14 +140,19 @@ absl::StatusOr<bool> GpuFlashAttnNormalization::RunOnFwdFlashAttn(
                                           dprops->multiProcessorCount * 2,
                                           num_n_blocks, 128);
     if (num_splits > 1) {
-      HloInstruction* softmax_lse_accum =
-          CreateZeroTensor(computation, PrimitiveType::F32,
-                           {num_splits, batch_size, num_heads, max_seqlen_q});
+      PrimitiveType accum_type = PrimitiveType::F32;
+      HloInstruction* const_zero = computation->AddInstruction(
+          HloInstruction::CreateConstant(LiteralUtil::Zero(accum_type)));
+
       HloInstruction* output_accum = CreateZeroTensor(
-          computation, PrimitiveType::F32,
+          computation, const_zero, accum_type,
           {num_splits, batch_size, num_heads, max_seqlen_q, head_size_rounded});
-      instr->AppendOperand(softmax_lse_accum);
       instr->AppendOperand(output_accum);
+
+      HloInstruction* softmax_lse_accum =
+          CreateZeroTensor(computation, const_zero, accum_type,
+                           {num_splits, batch_size, num_heads, max_seqlen_q});
+      instr->AppendOperand(softmax_lse_accum);
       return true;
     }
   }

@@ -96,8 +96,8 @@ limitations under the License.
 #include "xla/service/gpu/conditional_thunk.h"
 #include "xla/service/gpu/convolution_thunk.h"
 #include "xla/service/gpu/copy_thunk.h"
-#include "xla/service/gpu/for_thunk.h"
 #include "xla/service/gpu/flash_attn_thunk.h"
+#include "xla/service/gpu/for_thunk.h"
 #include "xla/service/gpu/fused_mha_thunk.h"
 #include "xla/service/gpu/fusions/fusion_emitter.h"
 #include "xla/service/gpu/fusions/fusions.h"
@@ -1502,26 +1502,6 @@ Status IrEmitterUnnested::EmitFlashAttnFwdThunk(
                       GetAllocationSliceForHlo(key));
   TF_ASSIGN_OR_RETURN(BufferAllocation::Slice value_slice,
                       GetAllocationSliceForHlo(value));
-  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice output_slice,
-                      GetAllocationSliceForHlo(instr, {0}));
-  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice softmax_lse_slice,
-                      GetAllocationSliceForHlo(instr, {1}));
-
-  const Shape& output_shape =
-      ShapeUtil::GetTupleElementShape(instr->shape(), 0);
-  const Shape& softmax_lse_shape =
-      ShapeUtil::GetTupleElementShape(instr->shape(), 1);
-
-  BufferAllocation::Slice s_dmask_slice;
-  std::optional<Shape> s_dmask_shape;
-  bool return_softmax = xla::ShapeUtil::TupleElementCount(instr->shape()) == 4;
-  if (return_softmax) {
-    TF_ASSIGN_OR_RETURN(s_dmask_slice, GetAllocationSliceForHlo(instr, {2}));
-    s_dmask_shape = ShapeUtil::GetTupleElementShape(instr->shape(), 2);
-  }
-
-  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice rng_state_slice,
-                      GetAllocationSliceForHlo(instr, {2 + return_softmax}));
 
   BufferAllocation::Slice cu_seqlens_query_slice, cu_seqlens_key_slice;
   std::optional<Shape> cu_seqlens_query_shape, cu_seqlens_key_shape;
@@ -1553,21 +1533,43 @@ Status IrEmitterUnnested::EmitFlashAttnFwdThunk(
     alibi_slopes_shape = alibi_slopes->shape();
   }
 
-  BufferAllocation::Slice softmax_lse_accum_slice;
+  // These two parameters are inserted by FlashAttnNormalization pass.
   BufferAllocation::Slice output_accum_slice;
+  BufferAllocation::Slice softmax_lse_accum_slice;
   int64_t num_explicit_operands =
       alibi_slopes_opnd_idx + config.has_alibi_slopes();
   if (num_operands == num_explicit_operands + 2) {
+    const HloInstruction* output_accum = instr->operand(num_explicit_operands);
     const HloInstruction* softmax_lse_accum =
-        instr->operand(num_explicit_operands);
-    const HloInstruction* output_accum =
         instr->operand(num_explicit_operands + 1);
-    TF_ASSIGN_OR_RETURN(softmax_lse_accum_slice,
-                        GetAllocationSliceForHlo(softmax_lse_accum));
     TF_ASSIGN_OR_RETURN(output_accum_slice,
                         GetAllocationSliceForHlo(output_accum));
+    TF_ASSIGN_OR_RETURN(softmax_lse_accum_slice,
+                        GetAllocationSliceForHlo(softmax_lse_accum));
   } else {
     CHECK(num_operands == num_explicit_operands);
+  }
+
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice output_slice,
+                      GetAllocationSliceForHlo(instr, {0}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice softmax_lse_slice,
+                      GetAllocationSliceForHlo(instr, {1}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice rng_state_slice,
+                      GetAllocationSliceForHlo(instr, {2}));
+
+  const Shape& output_shape =
+      ShapeUtil::GetTupleElementShape(instr->shape(), 0);
+  const Shape& softmax_lse_shape =
+      ShapeUtil::GetTupleElementShape(instr->shape(), 1);
+
+  BufferAllocation::Slice s_dmask_slice;
+  std::optional<Shape> s_dmask_shape;
+  CHECK(config.has_return_softmax());
+  bool return_softmax = config.return_softmax();
+  if (return_softmax) {
+    CHECK(xla::ShapeUtil::TupleElementCount(instr->shape()) == 4);
+    TF_ASSIGN_OR_RETURN(s_dmask_slice, GetAllocationSliceForHlo(instr, {3}));
+    s_dmask_shape = ShapeUtil::GetTupleElementShape(instr->shape(), 3);
   }
 
   std::optional<int> max_seqlen_q, max_seqlen_k;
@@ -1581,15 +1583,15 @@ Status IrEmitterUnnested::EmitFlashAttnFwdThunk(
       FlashAttnFwdConfig flash_attn_fwd_config,
       FlashAttnFwdConfig::For(
           query->shape(), key->shape(), value->shape(), cu_seqlens_query_shape,
-          cu_seqlens_key_shape, output_shape, softmax_lse_shape, s_dmask_shape,
-          alibi_slopes_shape, config.dropout_rate(), config.scale(),
-          config.is_causal(), max_seqlen_q, max_seqlen_k));
+          cu_seqlens_key_shape, alibi_slopes_shape, output_shape,
+          softmax_lse_shape, s_dmask_shape, config.dropout_rate(),
+          config.scale(), config.is_causal(), max_seqlen_q, max_seqlen_k));
   AddThunkToThunkSequence(std::make_unique<FlashAttnFwdThunk>(
       Thunk::ThunkInfo::WithProfileAnnotation(instr),
       std::move(flash_attn_fwd_config), query_slice, key_slice, value_slice,
-      cu_seqlens_query_slice, cu_seqlens_key_slice, output_slice,
-      softmax_lse_slice, s_dmask_slice, rng_state_slice, alibi_slopes_slice,
-      softmax_lse_accum_slice, output_accum_slice));
+      cu_seqlens_query_slice, cu_seqlens_key_slice, alibi_slopes_slice,
+      output_accum_slice, softmax_lse_accum_slice, output_slice,
+      softmax_lse_slice, rng_state_slice, s_dmask_slice));
   return OkStatus();
 }
 
@@ -1620,24 +1622,6 @@ Status IrEmitterUnnested::EmitFlashAttnBwdThunk(
                       GetAllocationSliceForHlo(softmax_lse));
   TF_ASSIGN_OR_RETURN(BufferAllocation::Slice rng_state_slice,
                       GetAllocationSliceForHlo(rng_state));
-
-  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_query_slice,
-                      GetAllocationSliceForHlo(instr, {0}));
-  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_key_slice,
-                      GetAllocationSliceForHlo(instr, {1}));
-  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_value_slice,
-                      GetAllocationSliceForHlo(instr, {2}));
-  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_softmax_slice,
-                      GetAllocationSliceForHlo(instr, {3}));
-
-  const Shape& grad_query_shape =
-      ShapeUtil::GetTupleElementShape(instr->shape(), 0);
-  const Shape& grad_key_shape =
-      ShapeUtil::GetTupleElementShape(instr->shape(), 1);
-  const Shape& grad_value_shape =
-      ShapeUtil::GetTupleElementShape(instr->shape(), 2);
-  const Shape& grad_softmax_shape =
-      ShapeUtil::GetTupleElementShape(instr->shape(), 3);
 
   BufferAllocation::Slice cu_seqlens_query_slice, cu_seqlens_key_slice;
   std::optional<Shape> cu_seqlens_query_shape, cu_seqlens_key_shape;
@@ -1672,10 +1656,29 @@ Status IrEmitterUnnested::EmitFlashAttnBwdThunk(
   int64_t num_explicit_operands =
       alibi_slopes_opnd_idx + config.has_alibi_slopes();
   CHECK(num_operands == num_explicit_operands + 1);
+  // This parameter is inserted by FlashAttnNormalization pass.
   const HloInstruction* grad_query_accum =
       instr->operand(num_explicit_operands);
   TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_query_accum_slice,
                       GetAllocationSliceForHlo(grad_query_accum));
+
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_query_slice,
+                      GetAllocationSliceForHlo(instr, {0}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_key_slice,
+                      GetAllocationSliceForHlo(instr, {1}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_value_slice,
+                      GetAllocationSliceForHlo(instr, {2}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_softmax_slice,
+                      GetAllocationSliceForHlo(instr, {3}));
+
+  const Shape& grad_query_shape =
+      ShapeUtil::GetTupleElementShape(instr->shape(), 0);
+  const Shape& grad_key_shape =
+      ShapeUtil::GetTupleElementShape(instr->shape(), 1);
+  const Shape& grad_value_shape =
+      ShapeUtil::GetTupleElementShape(instr->shape(), 2);
+  const Shape& grad_softmax_shape =
+      ShapeUtil::GetTupleElementShape(instr->shape(), 3);
 
   std::optional<int> max_seqlen_q, max_seqlen_k;
   if (is_varlen) {
@@ -1688,18 +1691,18 @@ Status IrEmitterUnnested::EmitFlashAttnBwdThunk(
       FlashAttnBwdConfig flash_attn_bwd_config,
       FlashAttnBwdConfig::For(
           grad_output->shape(), query->shape(), key->shape(), value->shape(),
-          cu_seqlens_query_shape, cu_seqlens_key_shape, output->shape(),
-          softmax_lse->shape(), grad_query_shape, grad_key_shape,
-          grad_value_shape, grad_softmax_shape, alibi_slopes_shape,
+          output->shape(), softmax_lse->shape(), cu_seqlens_query_shape,
+          cu_seqlens_key_shape, alibi_slopes_shape, grad_query_shape,
+          grad_key_shape, grad_value_shape, grad_softmax_shape,
           config.dropout_rate(), config.scale(), config.is_causal(),
           config.deterministic(), max_seqlen_q, max_seqlen_k));
   AddThunkToThunkSequence(std::make_unique<FlashAttnBwdThunk>(
       Thunk::ThunkInfo::WithProfileAnnotation(instr),
       std::move(flash_attn_bwd_config), grad_output_slice, query_slice,
-      key_slice, value_slice, cu_seqlens_query_slice, cu_seqlens_key_slice,
-      output_slice, softmax_lse_slice, rng_state_slice, grad_query_slice,
-      grad_key_slice, grad_value_slice, grad_softmax_slice, alibi_slopes_slice,
-      grad_query_accum_slice));
+      key_slice, value_slice, output_slice, softmax_lse_slice, rng_state_slice,
+      cu_seqlens_query_slice, cu_seqlens_key_slice, alibi_slopes_slice,
+      grad_query_accum_slice, grad_query_slice, grad_key_slice,
+      grad_value_slice, grad_softmax_slice));
   return OkStatus();
 }
 #endif  // GOOGLE_CUDA
