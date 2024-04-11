@@ -408,6 +408,9 @@ ENTRY %elementwise {
     std::set<HloInstruction*> used_insts;
     std::set<HloInstruction*> not_used_insts;
 
+    CostGenerator random_gen = CostGenerator(50, 5, kRandomSeed);
+
+
     for (size_t i = 0; i < inst_nums; i++) {
       // random deps from 1~5
       if (i < 2) {
@@ -437,10 +440,24 @@ ENTRY %elementwise {
       if (deps.size() != 2) {
         return absl::InvalidArgumentError("deps size not equal 2");
       }
-
+      
       auto inst = builder.AddInstruction(HloInstruction::CreateBinary(
           shape, HloOpcode::kAdd, deps.at(0), deps.at(1)));
-
+      // we can add control dependency to inst
+      //random add control dep, test control_predecessors issue
+      if(random_gen()>60){
+        std::vector<HloInstruction*> control_deps;
+        std::sample(insts_list.begin(), insts_list.end(),
+                    std::back_inserter(control_deps), 2, gen);
+        for(auto control_dep: control_deps){
+          auto status = control_dep->AddControlDependencyTo(inst);
+          if (!status.ok()) {
+            return absl::InvalidArgumentError("AddControlDependencyTo error");
+          }
+        }
+        
+      }
+      
       insts_list.push_back(inst);
       insts2cost.push_back(std::make_tuple(inst, cost_gen()));
       not_used_insts.insert(inst);

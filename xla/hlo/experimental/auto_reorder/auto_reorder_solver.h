@@ -23,7 +23,7 @@ namespace xla {
   using CpModelBuilder = operations_research::sat::CpModelBuilder;
   using IntervalVar = operations_research::sat::IntervalVar;
   namespace reorder{
-    const uint32_t ksolveTimeout = 60;  // 30s
+    const uint32_t ksolveTimeout = 180;  // 30s
     
     static const int kChannelNumber = 2;
     int get_horizon(int max_time){
@@ -156,6 +156,10 @@ class LPContainer{
   CostType GetCost() const { return cost_; }
   void SetStart(CostType start) { startat_ = start; }
   CostType GetStart() { return startat_; }
+  // speed up reorder, we can set a hint start time
+  CostType GetHintStart() { return hint_start_; }
+  void SetHintStart(CostType start) { hint_start_ = start; }
+
   // Get the type of the container: compute or communication
   bool IsComputation() const { return type_ == NodeType::kCompute; }
   bool IsCommunication() const { return type_ == NodeType::kCommunication; }
@@ -189,6 +193,7 @@ class LPContainer{
   private:
   CostType cost_;
   CostType startat_;
+  CostType hint_start_=-1;
   NodeType type_;
   ElementType inner_element_;
   // deps store the edge

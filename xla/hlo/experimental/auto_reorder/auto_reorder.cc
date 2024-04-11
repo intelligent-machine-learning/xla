@@ -58,6 +58,8 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
   // scan instructions, get every instruction cost and deps
   // post order,every inst will iter before it's operators
   for (HloInstruction* instr : post_order_instructions) {
+    // AddHint
+
     const HloGraphNode& instr_node = schedule_graph.GetNode(instr);
     VLOG(2) << instr->ToShortString() << "flops cost :" << instr_node.GetCost();
     auto addEdge = [&](const xla::HloInstruction* from_inst, 
@@ -103,6 +105,15 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
           TF_RET_CHECK(is_success)
               << "operand_lp_node not found:" << operand_inst->ToShortString();
         }
+        instr->control_predecessors();
+        for (auto control_inst: instr->control_predecessors()) {
+          //if it's communication, if control_inst is communicate op,this type should be kCommunication?
+          auto is_success = addEdge(control_inst, current_inst_lp_node,
+                                    NodeType::kCompute);//which type?
+          TF_RET_CHECK(is_success)
+              << "operand_lp_node not found:" << control_inst->ToShortString();
+        }
+        
       }
 
       TF_CHECK_OK(solver_->AddConstraint(current_inst_lp_node));
@@ -121,6 +132,14 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
         TF_RET_CHECK(is_success)
             << "operand_lp_node not found:" << operand_inst->ToShortString();
       }
+      for (auto control_inst: instr->control_predecessors()) {
+          //if it's 
+          auto is_success = addEdge(control_inst, current_inst_lp_node,
+                                    NodeType::kCompute);//which type?
+          TF_RET_CHECK(is_success)
+              << "operand_lp_node not found:" << control_inst->ToShortString();
+        }
+
       TF_CHECK_OK(solver_->AddConstraint(current_inst_lp_node));
     }
   }
@@ -145,6 +164,28 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
     }
   }
   
+  //set hint, using post order
+  std::reverse(post_order_instructions.begin(), post_order_instructions.end());
+  for (HloInstruction* instr : post_order_instructions){
+    auto lp_node = solver_->FindInstructionLPNode(instr);
+    if (!lp_node.ok()) {
+        VLOG(2) << "operand_lp_node not found:" << instr->ToShortString();
+        continue;
+    }
+    auto operand_lp_node = lp_node.value();
+    CostType start_at=-1;
+    for(auto dep_pair :operand_lp_node->GetDeps()){
+      CostType cost = std::get<1>(dep_pair);
+      auto dep_node = std::get<0>(dep_pair);
+      if(dep_node->GetHintStart()>-1){
+        start_at = std::max(start_at,dep_node->GetHintStart()+cost);
+      }
+    }
+    if(start_at>-1){
+      operand_lp_node->SetHintStart(start_at);
+    }
+    
+  }
 
   auto status = solver_->Solve();
   if(reorder::solve_debug){

@@ -93,6 +93,10 @@ LPSchedulerFunc(StatusOr<TaskType>)::AddNodeToTask(ContainerType* node) {
   IntVar end = cp_model_.NewIntVar({0, horizon_});
   IntervalVar interval = cp_model_.NewIntervalVar(start, node->GetCost(), end);
   TaskType task{start, end, interval};
+  if(node->GetHintStart()!=-1){
+
+    cp_model_.AddHint(start, node->GetHintStart());
+  }
   // AddNodeToTask(node, task);
   node_to_task_.emplace(node->UUID(), std::make_tuple(node, task));
   return task;
