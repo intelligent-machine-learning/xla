@@ -6,10 +6,16 @@
 #include <unordered_map>
 #include <set>
 #include <thread>
+#include <fstream>
+#include <filesystem>
 #include "absl/container/flat_hash_map.h"
 #include "absl/strings/string_view.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/utils/common_ortools_deps.h"
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/file.h>
+#include <fcntl.h>
 
 
 namespace xla {
@@ -21,8 +27,8 @@ namespace xla {
     
     static const int kChannelNumber = 2;
     int get_horizon(int max_time){
-      //scale
-      return max_time*1.2;
+      //scale should be fit with module?
+      return max_time*2;
     }
     bool solve_debug=true;
      // TODO: no keep order will cause hung on multi processing, we should consider how to resolve it
@@ -33,6 +39,68 @@ namespace xla {
         return false;
       }
       return std::strcmp(env, "true") == 0;
+    };
+    void save_to_cache(const std::string& content){
+      const char* cache_filename = std::getenv("XLA_REORDER_CACHE_FILE");
+      if (cache_filename == nullptr) {
+        cache_filename="reorder.cache";
+      }
+      std::ofstream file(cache_filename);
+      file << content;
+      file.close();
+    };
+    bool is_cache_enable(){
+      const char* cache_filename = std::getenv("XLA_REORDER_CACHE_FILE");
+      if (cache_filename == nullptr) {
+        cache_filename="reorder.cache";
+      }
+      //check file exists
+      return std::filesystem::exists(cache_filename);
+    };
+    std::string load_from_cache(){
+      const char* cache_filename = std::getenv("XLA_REORDER_CACHE_FILE");
+      if (cache_filename == nullptr) {
+        cache_filename="reorder.cache";
+      }
+      
+      std::ifstream file(cache_filename);
+      std::string content;
+      std::string line;
+      while (std::getline(file, line)) {
+        content += line;
+      }
+      file.close();
+      return content;
+    };
+    bool accuired_reorder_lock(){
+      const char* lock_filename = std::getenv("XLA_REORDER_LOCK_FILE");
+      if (lock_filename == nullptr) {
+        lock_filename="/tmp/reorder.lock";
+      }
+      mode_t m = umask( 0 );
+      int fd=open(lock_filename, O_RDWR|O_CREAT, 0666 );
+      umask( m );
+      if( fd >= 0 && flock( fd, LOCK_EX | LOCK_NB ) < 0 )
+      {
+          close( fd );
+          fd = -1;
+      }
+      return fd>=0;
+    };
+    void release_reorder_lock(){
+      const char* lock_filename = std::getenv("XLA_REORDER_LOCK_FILE");
+      if (lock_filename == nullptr) {
+        lock_filename="/tmp/reorder.lock";
+      }
+      mode_t m = umask( 0 );
+      int fd=open(lock_filename, O_RDWR|O_CREAT, 0666 );
+      umask( m );
+      if( fd >= 0 && flock( fd, LOCK_UN ) < 0 )
+      {
+          close( fd );
+          fd = -1;
+      }
+
     };
     int get_cpu_number(){
       // return 8;
@@ -218,6 +286,7 @@ class LinearProgramScheduler {
   // find LPNode by instruction,if not exist,create it
   ContainerType* FindLPNodeOrCreate(ElementType instruction, CostType cost,
                              NodeType type);
+  std::vector<ContainerType*> GetSortedNodes();
   // for debug: render graph viz
   void RenderGraphviz(std::string filename) const;
   // for debug: render gantt chart
@@ -227,7 +296,6 @@ class LinearProgramScheduler {
   StatusOr<TaskType> FindTask(ContainerType* node);
   bool NodeHasAddTasks(ContainerType* node);
   CostType GetNodeStartTime(ContainerType* node);
-  std::vector<ContainerType*> GetSortedNodes();
   void AddNodeToTask(ContainerType* node, TaskType task);
   StatusOr<TaskType> AddNodeToTask(ContainerType* node);
   

@@ -148,21 +148,37 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
 
   auto status = solver_->Solve();
   if(reorder::solve_debug){
-    solver_->RenderGantt(absl::StrCat("gantt_", computation->name()));
-    solver_->RenderGraphviz(absl::StrCat("gantt_", computation->name()));
+    //save to pid related file
+    auto pid = getpid();
+    solver_->RenderGantt(absl::StrCat("gantt_",pid, computation->name()));
+    solver_->RenderGraphviz(absl::StrCat("gantt_",pid, computation->name()));
   }
   
   if (status.ok()) {
     // return instruction order by solver
+    std::vector<HloInstruction*> new_schedule_params;
     std::vector<HloInstruction*> new_schedule;
     auto sorted_nodes = solver_->GetSortedNodes();
     for (auto node : sorted_nodes) {
       auto insts = node->GetValues();
       for (auto inst : insts) {
-        new_schedule.push_back(const_cast<xla::HloInstruction*>(inst));
+      //extra check: param inst must move to head;
+        if(inst->opcode() == HloOpcode::kParameter)
+        {
+          new_schedule_params.insert(new_schedule_params.begin(),const_cast<xla::HloInstruction*>(inst));
+        }else{
+          new_schedule.push_back(const_cast<xla::HloInstruction*>(inst));
+        }
+        
       }
     }
-    return new_schedule;
+    std::sort(new_schedule_params.begin(), new_schedule_params.end(),
+              [](const HloInstruction* a, const HloInstruction* b) {
+                return a->unique_id() < b->unique_id();
+              });
+    new_schedule_params.insert(new_schedule_params.end(), new_schedule.begin(),
+                        new_schedule.end());
+    return new_schedule_params;
   }
   TF_RET_CHECK(status.ok()) << "Solver error:" << status.message();
   return status;
@@ -322,6 +338,7 @@ StatusOr<bool> AutoReorderPass::Run(
     VLOG(2) << "new_schedule length:" << new_schedule.size()
             << " computation instruction_count:"
             << computation->instruction_count();
+    
     saved_schedules[computation] = std::move(new_schedule);
   }
 

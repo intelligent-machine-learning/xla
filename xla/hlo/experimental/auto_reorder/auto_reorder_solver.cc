@@ -112,6 +112,7 @@ LPSchedulerFunc(tsl::Status)::Solve() {
   for (auto node : nodes_) {
     VLOG(3) << "Add to scheduler" << node->GetName();
     TF_ASSIGN_OR_RETURN(TaskType node_task, AddNodeToTask(node));
+    
   }
   for (auto node : nodes_) {
     auto node_task = std::get<1>(node_to_task_.at(node->UUID()));
@@ -148,11 +149,16 @@ LPSchedulerFunc(tsl::Status)::Solve() {
   VLOG(1) << "Solving:" << node_to_task_.size() << " nodes";
   operations_research::sat::SatParameters parameters;
   parameters.set_max_time_in_seconds(reorder::ksolveTimeout);
-  // if(reorder::solve_debug){
-  //   parameters.set_log_to_stdout(true);
-  //   parameters.set_log_search_progress(true);
-  // }
-  parameters.set_num_search_workers(reorder::get_cpu_number());
+  parameters.set_random_seed(19260817);
+  // Currently, at level 1 we detect them in presolve and try
+  // to fix Booleans. At level 2, we also do some form of dynamic symmetry
+  // breaking during search.(default=2)
+  parameters.set_symmetry_level(1);
+  if(reorder::solve_debug){
+    // parameters.set_log_to_stdout(true);
+    // parameters.set_log_search_progress(true);
+  }
+  parameters.set_num_search_workers(1);
   const operations_research::sat::CpSolverResponse response =
       operations_research::sat::SolveWithParameters(cp_model_.Build(),
                                                     parameters);
@@ -188,6 +194,7 @@ std::string ReplaceUnusedChar(const std::string str,
   }
   return result;
 }
+
 LPSchedulerFunc(void)::RenderGraphviz(std::string filename) const {
   // write a dot file
   std::string dot_file = absl::StrCat("/tmp/", filename, ".dot");
