@@ -1492,6 +1492,9 @@ Status IrEmitterUnnested::EmitFlashAttnFwdThunk(
   int64_t num_operands = instr->operand_count();
   CHECK(num_operands >= 3);
 
+  TF_ASSIGN_OR_RETURN(const auto config,
+                      instr->backend_config<FlashAttnBackendConfig>());
+
   const HloInstruction* query = instr->operand(0);
   const HloInstruction* key = instr->operand(1);
   const HloInstruction* value = instr->operand(2);
@@ -1503,31 +1506,31 @@ Status IrEmitterUnnested::EmitFlashAttnFwdThunk(
   TF_ASSIGN_OR_RETURN(BufferAllocation::Slice value_slice,
                       GetAllocationSliceForHlo(value));
 
+  int64_t cur_arg_idx = 3;
+
   BufferAllocation::Slice cu_seqlens_query_slice, cu_seqlens_key_slice;
   std::optional<Shape> cu_seqlens_query_shape, cu_seqlens_key_shape;
-  bool is_varlen =
-      instr->custom_call_target() == kGpuFlashAttnVarLenFwdCallTarget;
-  if (is_varlen) {
-    CHECK(num_operands >= 5);
-    const HloInstruction* cu_seqlens_query = instr->operand(3);
-    const HloInstruction* cu_seqlens_key = instr->operand(4);
+  std::optional<int> max_seqlen_q, max_seqlen_k;
+  if (instr->custom_call_target() == kGpuFlashAttnVarLenFwdCallTarget) {
+    CHECK(num_operands >= cur_arg_idx + 2);
+    const HloInstruction* cu_seqlens_query = instr->operand(cur_arg_idx++);
+    const HloInstruction* cu_seqlens_key = instr->operand(cur_arg_idx++);
     TF_ASSIGN_OR_RETURN(cu_seqlens_query_slice,
                         GetAllocationSliceForHlo(cu_seqlens_query));
     TF_ASSIGN_OR_RETURN(cu_seqlens_key_slice,
                         GetAllocationSliceForHlo(cu_seqlens_key));
     cu_seqlens_query_shape = cu_seqlens_query->shape();
     cu_seqlens_key_shape = cu_seqlens_key->shape();
+    CHECK(config.has_max_seqlen_q() && config.has_max_seqlen_k());
+    max_seqlen_q = config.max_seqlen_q();
+    max_seqlen_k = config.max_seqlen_k();
   }
-
-  TF_ASSIGN_OR_RETURN(const auto config,
-                      instr->backend_config<FlashAttnBackendConfig>());
 
   BufferAllocation::Slice alibi_slopes_slice;
   std::optional<Shape> alibi_slopes_shape;
-  int64_t alibi_slopes_opnd_idx = is_varlen ? 5 : 3;
   if (config.has_alibi_slopes()) {
-    CHECK(num_operands > alibi_slopes_opnd_idx);
-    const HloInstruction* alibi_slopes = instr->operand(alibi_slopes_opnd_idx);
+    CHECK(num_operands >= cur_arg_idx + 1);
+    const HloInstruction* alibi_slopes = instr->operand(cur_arg_idx++);
     TF_ASSIGN_OR_RETURN(alibi_slopes_slice,
                         GetAllocationSliceForHlo(alibi_slopes));
     alibi_slopes_shape = alibi_slopes->shape();
@@ -1536,18 +1539,15 @@ Status IrEmitterUnnested::EmitFlashAttnFwdThunk(
   // These two parameters are inserted by FlashAttnNormalization pass.
   BufferAllocation::Slice output_accum_slice;
   BufferAllocation::Slice softmax_lse_accum_slice;
-  int64_t num_explicit_operands =
-      alibi_slopes_opnd_idx + config.has_alibi_slopes();
-  if (num_operands == num_explicit_operands + 2) {
-    const HloInstruction* output_accum = instr->operand(num_explicit_operands);
-    const HloInstruction* softmax_lse_accum =
-        instr->operand(num_explicit_operands + 1);
+  if (num_operands == cur_arg_idx + 2) {
+    const HloInstruction* output_accum = instr->operand(cur_arg_idx++);
+    const HloInstruction* softmax_lse_accum = instr->operand(cur_arg_idx++);
     TF_ASSIGN_OR_RETURN(output_accum_slice,
                         GetAllocationSliceForHlo(output_accum));
     TF_ASSIGN_OR_RETURN(softmax_lse_accum_slice,
                         GetAllocationSliceForHlo(softmax_lse_accum));
   } else {
-    CHECK(num_operands == num_explicit_operands);
+    CHECK(num_operands == cur_arg_idx);
   }
 
   TF_ASSIGN_OR_RETURN(BufferAllocation::Slice output_slice,
@@ -1572,13 +1572,6 @@ Status IrEmitterUnnested::EmitFlashAttnFwdThunk(
     s_dmask_shape = ShapeUtil::GetTupleElementShape(instr->shape(), 3);
   }
 
-  std::optional<int> max_seqlen_q, max_seqlen_k;
-  if (is_varlen) {
-    CHECK(config.has_max_seqlen_q() && config.has_max_seqlen_k());
-    max_seqlen_q = config.max_seqlen_q();
-    max_seqlen_k = config.max_seqlen_k();
-  }
-
   TF_ASSIGN_OR_RETURN(
       FlashAttnFwdConfig flash_attn_fwd_config,
       FlashAttnFwdConfig::For(
@@ -1599,6 +1592,9 @@ Status IrEmitterUnnested::EmitFlashAttnBwdThunk(
     const HloCustomCallInstruction* instr) {
   int64_t num_operands = instr->operand_count();
   CHECK(num_operands >= 7);
+
+  TF_ASSIGN_OR_RETURN(const auto config,
+                      instr->backend_config<FlashAttnBackendConfig>());
 
   const HloInstruction* grad_output = instr->operand(0);
   const HloInstruction* query = instr->operand(1);
@@ -1623,42 +1619,39 @@ Status IrEmitterUnnested::EmitFlashAttnBwdThunk(
   TF_ASSIGN_OR_RETURN(BufferAllocation::Slice rng_state_slice,
                       GetAllocationSliceForHlo(rng_state));
 
+  int64_t cur_arg_idx = 7;
+
   BufferAllocation::Slice cu_seqlens_query_slice, cu_seqlens_key_slice;
   std::optional<Shape> cu_seqlens_query_shape, cu_seqlens_key_shape;
-  bool is_varlen =
-      instr->custom_call_target() == kGpuFlashAttnVarLenBwdCallTarget;
-  if (is_varlen) {
-    CHECK(num_operands >= 9);
-    const HloInstruction* cu_seqlens_query = instr->operand(7);
-    const HloInstruction* cu_seqlens_key = instr->operand(8);
+  std::optional<int> max_seqlen_q, max_seqlen_k;
+  if (instr->custom_call_target() == kGpuFlashAttnVarLenBwdCallTarget) {
+    CHECK(num_operands >= cur_arg_idx + 2);
+    const HloInstruction* cu_seqlens_query = instr->operand(cur_arg_idx++);
+    const HloInstruction* cu_seqlens_key = instr->operand(cur_arg_idx++);
     TF_ASSIGN_OR_RETURN(cu_seqlens_query_slice,
                         GetAllocationSliceForHlo(cu_seqlens_query));
     TF_ASSIGN_OR_RETURN(cu_seqlens_key_slice,
                         GetAllocationSliceForHlo(cu_seqlens_key));
     cu_seqlens_query_shape = cu_seqlens_query->shape();
     cu_seqlens_key_shape = cu_seqlens_key->shape();
+    CHECK(config.has_max_seqlen_q() && config.has_max_seqlen_k());
+    max_seqlen_q = config.max_seqlen_q();
+    max_seqlen_k = config.max_seqlen_k();
   }
-
-  TF_ASSIGN_OR_RETURN(const auto config,
-                      instr->backend_config<FlashAttnBackendConfig>());
 
   BufferAllocation::Slice alibi_slopes_slice;
   std::optional<Shape> alibi_slopes_shape;
-  int64_t alibi_slopes_opnd_idx = is_varlen ? 9 : 7;
   if (config.has_alibi_slopes()) {
-    CHECK(num_operands > alibi_slopes_opnd_idx);
-    const HloInstruction* alibi_slopes = instr->operand(alibi_slopes_opnd_idx);
+    CHECK(num_operands >= cur_arg_idx + 1);
+    const HloInstruction* alibi_slopes = instr->operand(cur_arg_idx++);
     TF_ASSIGN_OR_RETURN(alibi_slopes_slice,
                         GetAllocationSliceForHlo(alibi_slopes));
     alibi_slopes_shape = alibi_slopes->shape();
   }
 
-  int64_t num_explicit_operands =
-      alibi_slopes_opnd_idx + config.has_alibi_slopes();
-  CHECK(num_operands == num_explicit_operands + 1);
+  CHECK(num_operands == cur_arg_idx + 1);
   // This parameter is inserted by FlashAttnNormalization pass.
-  const HloInstruction* grad_query_accum =
-      instr->operand(num_explicit_operands);
+  const HloInstruction* grad_query_accum = instr->operand(cur_arg_idx++);
   TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_query_accum_slice,
                       GetAllocationSliceForHlo(grad_query_accum));
 
@@ -1679,13 +1672,6 @@ Status IrEmitterUnnested::EmitFlashAttnBwdThunk(
       ShapeUtil::GetTupleElementShape(instr->shape(), 2);
   const Shape& grad_softmax_shape =
       ShapeUtil::GetTupleElementShape(instr->shape(), 3);
-
-  std::optional<int> max_seqlen_q, max_seqlen_k;
-  if (is_varlen) {
-    CHECK(config.has_max_seqlen_q() && config.has_max_seqlen_k());
-    max_seqlen_q = config.max_seqlen_q();
-    max_seqlen_k = config.max_seqlen_k();
-  }
 
   TF_ASSIGN_OR_RETURN(
       FlashAttnBwdConfig flash_attn_bwd_config,
