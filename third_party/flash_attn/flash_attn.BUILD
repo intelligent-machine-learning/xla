@@ -76,6 +76,16 @@ cuda_library(
         "csrc/flash_attn/src/flash_fwd_split_hdim256_bf16_sm80.cu.cc",
         "csrc/flash_attn/src/utils.cc",
     ]),
+    # https://github.com/Dao-AILab/flash-attention/blob/v2.5.7/setup.py#L193-L199
+    copts = [
+        "-U__CUDA_NO_HALF_OPERATORS__",
+        "-U__CUDA_NO_HALF_CONVERSIONS__",
+        "-U__CUDA_NO_HALF2_OPERATORS__",
+        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        "--expt-relaxed-constexpr",
+        "--expt-extended-lambda",
+        "--use_fast_math",
+    ],
     include_prefix = "flash_attn",
     strip_include_prefix = "csrc/flash_attn/src",
     deps = if_cuda_is_configured([
