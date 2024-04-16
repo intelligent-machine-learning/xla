@@ -82,6 +82,7 @@ Thunk::ExecuteParams::ExecuteParams(
     CASE(kTriangularSolve);
     CASE(kWhile);
     CASE(kFusedMHA);
+    CASE(kFlashAttn);
   }
 }
 

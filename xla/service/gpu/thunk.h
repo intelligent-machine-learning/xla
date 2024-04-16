@@ -103,7 +103,8 @@ class Thunk {
     kSequential,
     kTriangularSolve,
     kWhile,
-    kFusedMHA
+    kFusedMHA,
+    kFlashAttn
   };
 
   // TODO(ezhulenev): This should become a part of StreamExecutor library, but

@@ -9,12 +9,14 @@ load("//third_party:repo.bzl", "tf_http_archive", "tf_mirror_urls")
 
 # Import third party repository rules. See go/tfbr-thirdparty.
 load("//third_party/dlpack:workspace.bzl", dlpack = "repo")
+load("//third_party/flash_attn:workspace.bzl", flash_attn = "repo")
 load("//third_party/stablehlo:workspace.bzl", stablehlo = "repo")
 load("//third_party/triton:workspace.bzl", triton = "repo")
 
 def _initialize_third_party():
     """ Load third party repositories.  See above load() statements. """
     dlpack()
+    flash_attn()
     stablehlo()
     triton()
 
@@ -82,6 +84,15 @@ def _tf_repositories():
         sha256 = "f57bf32804140cad58b1240b804e0dbd68f7e6bf67eba8e0c0fa3a62fd7f0f84",
         urls = tf_mirror_urls("https://github.com/google/or-tools/releases/download/v9.0/bliss-0.73.zip"),
         #url = "http://www.tcs.hut.fi/Software/bliss/bliss-0.73.zip",
+    )
+
+    # v3.4.1
+    tf_http_archive(
+        name = "cutlass_for_flash_attn",
+        build_file = "//third_party:cutlass.BUILD",
+        sha256 = "9fa1da6be3d2d9207b801d5768cbced59c202444a8c84b82325b0670f47f9d48",
+        strip_prefix = "cutlass-bbe579a9e3beb6ea6626d9227ec32d0dae119a49",
+        urls = tf_mirror_urls("https://github.com/NVIDIA/cutlass/archive/bbe579a9e3beb6ea6626d9227ec32d0dae119a49.tar.gz"),
     )
 
 # buildifier: disable=function-docstring

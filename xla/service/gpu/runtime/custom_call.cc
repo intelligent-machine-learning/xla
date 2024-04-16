@@ -23,6 +23,7 @@ limitations under the License.
 #include "xla/service/custom_call_status_internal.h"
 #include "xla/service/custom_call_target_registry.h"
 #include "xla/service/gpu/cublas_cudnn.h"
+#include "xla/service/gpu/runtime/flash_attn.h"
 #include "xla/service/gpu/runtime/support.h"
 #include "xla/service/gpu/runtime/triangular_solve.h"
 #include "xla/service/service_executable_run_options.h"
@@ -57,6 +58,20 @@ static absl::Status XlaCustomCallImpl(
   if (call_target_name == kTriangularSolveCallTarget)
     return TriangularSolve::run(run_options, debug_options, args,
                                 backend_config);
+
+  if (call_target_name == kGpuFlashAttnFwdCallTarget) {
+    return FlashAttnFwd::Run(run_options, debug_options, call_target_name, args,
+                             backend_config, /*is_varlen=*/false);
+  } else if (call_target_name == kGpuFlashAttnVarLenFwdCallTarget) {
+    return FlashAttnFwd::Run(run_options, debug_options, call_target_name, args,
+                             backend_config, /*is_varlen=*/true);
+  } else if (call_target_name == kGpuFlashAttnBwdCallTarget) {
+    return FlashAttnBwd::Run(run_options, debug_options, call_target_name, args,
+                             backend_config, /*is_varlen=*/false);
+  } else if (call_target_name == kGpuFlashAttnVarLenBwdCallTarget) {
+    return FlashAttnBwd::Run(run_options, debug_options, call_target_name, args,
+                             backend_config, /*is_varlen=*/true);
+  }
 
   // Find the Xla custom call handler.
   auto& platform_name = run_options->stream()->parent()->platform()->Name();

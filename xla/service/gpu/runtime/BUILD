@@ -193,6 +193,23 @@ cc_library(
 )
 
 cc_library(
+    name = "flash_attn",
+    srcs = ["flash_attn.cc"],
+    hdrs = ["flash_attn.h"],
+    local_defines = if_cuda_is_configured(["GOOGLE_CUDA=1"]),
+    deps = [
+        ":support",
+        "//xla:xla_proto_cc",
+        "//xla/runtime:custom_call",
+        "//xla/runtime:executable",
+        "//xla/service:executable",
+        "//xla/service/gpu:backend_configs_cc",
+        "//xla/service/gpu:gpu_flash_attn",
+        "@tsl//tsl/platform:human_readable_json",
+    ],
+)
+
+cc_library(
     name = "fused_attention",
     srcs = ["fused_attention.cc"],
     hdrs = ["fused_attention.h"],
@@ -252,6 +269,7 @@ cc_library(
     ]),
     deps = [
         ":support",
+        ":flash_attn",
         ":triangular_solve",
         "//xla/runtime:custom_call",
         "//xla/runtime:custom_call_registry",
