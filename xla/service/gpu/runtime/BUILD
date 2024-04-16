@@ -616,6 +616,22 @@ cc_library(
 )
 
 cc_library(
+    name = "flash_attn_thunk",
+    srcs = ["flash_attn_thunk.cc"],
+    hdrs = ["flash_attn_thunk.h"],
+    deps = [
+        "//xla:util",
+        "//xla:xla_data_proto_cc",
+        "//xla/service:buffer_assignment",
+        "//xla/service/gpu:gpu_flash_attn",
+        "//xla/service/gpu/runtime:thunk",
+        "//xla/stream_executor",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/status",
+    ],
+)
+
+cc_library(
     name = "fused_mha_thunk",
     srcs = ["fused_mha_thunk.cc"],
     hdrs = ["fused_mha_thunk.h"],

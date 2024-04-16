@@ -137,6 +137,7 @@ class Thunk {
     kSendDone,
     kTriangularSolve,
     kWhile,
+    kFlashAttn,
     kFusedMHA,
     kWaitForStreams,
     kCuDnn
