@@ -267,6 +267,15 @@ class GpuPerformanceWithCollectiveModel : public GpuPerformanceModel {
   static absl::Duration ComputeAllreduceTime(
       const HloInstruction& instr, const GpuHloCostAnalysis* cost_analysis,
       const se::DeviceDescription& gpu_device_info);
+  static absl::Duration ComputeAllgatherTime(
+      const HloInstruction& instr, const GpuHloCostAnalysis* cost_analysis,
+      const se::DeviceDescription& gpu_device_info);
+  // TODO: support reduce scatter
+
+  // return internode/innernode bandwidths in GB/s
+  static std::vector<double> GetInterInnerBandwidths(
+      const HloInstruction& instr, const GpuHloCostAnalysis* cost_analysis,
+      const se::DeviceDescription& gpu_device_info);
 };
 
 }  // namespace gpu

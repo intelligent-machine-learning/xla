@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
@@ -17,7 +18,6 @@
 #include <string>
 #include <utility>
 #include <vector>
-#include <chrono>
 
 #include "absl/algorithm/container.h"
 #include "xla/hlo/experimental/auto_reorder/auto_reorder.h"
@@ -39,12 +39,14 @@ struct ScheduleStatus {
 };
 class CostGenerator {
  public:
-  CostGenerator(int mean,int std,int seed){
+  CostGenerator(int mean, int std, int seed) {
     gen_ = std::mt19937(seed);
-    dist_ = std::normal_distribution<float>(static_cast<float>(mean), static_cast<float>(std));
+    dist_ = std::normal_distribution<float>(static_cast<float>(mean),
+                                            static_cast<float>(std));
   };
   int operator()() { return std::max(1, static_cast<int>(dist_(gen_))); }
-  private:
+
+ private:
   std::mt19937 gen_;
   std::normal_distribution<float> dist_;
 };
@@ -138,6 +140,8 @@ class SavedInstLatencyEstimator : public GpuLatencyEstimator {
     // let all node link to target have cost
     if (target->unique_id() == -1) {
       // raise exception?
+      std::cout << "SetInstructionBetween fail" << target->ToShortString()
+                << std::endl;
       ASSERT_ANY_THROW(target->unique_id() != -1);
     }
     edge_cost_.emplace(target->unique_id(), cost);
@@ -208,11 +212,13 @@ ENTRY %elementwise {
         module->AddEmbeddedComputation(sum_builder.Build());
     return reduction;
   }
-  std::string GetInstructionsOrderString(HloModule* hlo_module){
-    auto insts = hlo_module->schedule().sequence(hlo_module->entry_computation()).instructions();
+  std::string GetInstructionsOrderString(HloModule* hlo_module) {
+    auto insts = hlo_module->schedule()
+                     .sequence(hlo_module->entry_computation())
+                     .instructions();
     auto ret = std::string("");
     // hard to keep all instruction order,only keep communicate order
-    for(auto inst:insts){
+    for (auto inst : insts) {
       switch (inst->opcode()) {
         case HloOpcode::kAllToAll:
         case HloOpcode::kAllGather:
@@ -225,32 +231,60 @@ ENTRY %elementwise {
         case HloOpcode::kSend:
         case HloOpcode::kSendDone:
         case HloOpcode::kRecv:
-        case HloOpcode::kRecvDone:
-        {
-          ret = ret +"\n"+ inst->ToString();
+        case HloOpcode::kRecvDone: {
+          ret = ret + "\n" + inst->ToString();
         }
-        default:{
+        default: {
+          continue;
+        }
+      }
+    }
+    bool isStart = false;
+    // check start-done pair, there is no start-start
+    for (auto inst : insts) {
+      switch (inst->opcode()) {
+        case HloOpcode::kAllGatherStart:
+        case HloOpcode::kAllReduceStart:
+        case HloOpcode::kCollectivePermuteStart:
+        case HloOpcode::kSend:
+        case HloOpcode::kRecv: {
+          CHECK_NE(isStart, true);
+          isStart = true;
+          continue;
+        }
+        case HloOpcode::kAllGatherDone:
+        case HloOpcode::kAllReduceDone:
+        case HloOpcode::kCollectivePermuteDone:
+        case HloOpcode::kSendDone:
+        case HloOpcode::kRecvDone: {
+          isStart = false;
+          continue;
+        }
+        case HloOpcode::kReduceScatter: {
+          ret = ret + "\n" + inst->ToString();
+        }
+        default: {
           continue;
         }
       }
     }
     return ret;
   }
-  bool CheckParameterInst(HloModule* hlo_module){
-    auto insts = hlo_module->schedule().sequence(hlo_module->entry_computation()).instructions();
-    bool isParameter=true;
+  bool CheckParameterInst(HloModule* hlo_module) {
+    auto insts = hlo_module->schedule()
+                     .sequence(hlo_module->entry_computation())
+                     .instructions();
+    bool isParameter = true;
     // check parameter must at head
-    for(auto inst:insts){
-      if(inst->opcode() == HloOpcode::kParameter){
-        if(isParameter){
+    for (auto inst : insts) {
+      if (inst->opcode() == HloOpcode::kParameter) {
+        if (isParameter) {
           continue;
-        }
-        else{
+        } else {
           return false;
         }
-      }
-      else{
-        isParameter=false;
+      } else {
+        isParameter = false;
       }
     }
     return true;
@@ -297,6 +331,86 @@ ENTRY %elementwise {
                                                   groups[i].end()};
     }
     return replica_groups;
+  }
+  StatusOr<HloComputation*> MakeCommunicateComputation(
+      HloModule* module, SavedInstLatencyEstimator* estimator) {
+    /*
+     p0->allreduce-100->allreduce_done->p0.1
+     p1->allreduce.1-10->allreduce_done.1->p0.2
+     dot(p0,p1):cost=10
+     dot(p0.1,p0.2):cost=10
+
+    p0
+
+    */
+    HloComputation::Builder builder("test");
+    auto add_reducer = MakeReduction(HloOpcode::kAdd, module);
+    Shape shape = ShapeUtil::MakeShape(F32, {4, 256, 256});
+    DotDimensionNumbers dot_dnums;
+    dot_dnums.add_lhs_contracting_dimensions(1);
+    dot_dnums.add_rhs_contracting_dimensions(0);
+    int64_t channel_id = 0;
+    auto precision_config = DefaultPrecisionConfig(2);
+
+    auto p0 = builder.AddInstruction(HloInstruction::CreateParameter(
+        /*parameter_number=*/0, shape, "p0"));
+    auto p1 = builder.AddInstruction(HloInstruction::CreateParameter(
+        /*parameter_number=*/1, shape, "p1"));
+    HloInstruction* ar_start0 =
+        builder.AddInstruction(HloInstruction::CreateAllReduceStart(
+            shape, {p0}, add_reducer,
+            /*replica_groups=*/CreateReplicaGroups({{0, 1}}),
+            /*constrain_layout=*/false, /*channel_id=*/std::nullopt,
+            /*use_global_device_ids=*/false));
+    HloInstruction* ar_done0 =
+        builder.AddInstruction(HloInstruction::CreateUnary(
+            shape, HloOpcode::kAllReduceDone, ar_start0));
+
+    auto dot0 = builder.AddInstruction(
+        HloInstruction::CreateDot(shape, p0, p1, dot_dnums, precision_config));
+
+    HloInstruction* ar_start1 =
+        builder.AddInstruction(HloInstruction::CreateAllReduceStart(
+            shape, {p1}, add_reducer,
+            /*replica_groups=*/CreateReplicaGroups({{0, 1}}),
+            /*constrain_layout=*/false, /*channel_id=*/std::nullopt,
+            /*use_global_device_ids=*/false));
+    HloInstruction* ar_done1 =
+        builder.AddInstruction(HloInstruction::CreateUnary(
+            shape, HloOpcode::kAllReduceDone, ar_start1));
+
+    auto dot1 = builder.AddInstruction(HloInstruction::CreateDot(
+        shape, ar_done0, ar_done1, dot_dnums, precision_config));
+
+    auto ret =
+        builder.AddInstruction(HloInstruction::CreateTuple({dot0, dot1}));
+    auto computation = builder.Build();
+    computation->set_root_instruction(ret);
+    auto entry_computation =
+        module->AddEntryComputation(std::move(computation));
+    estimator->SetInstructionCost(ar_start0, 1);
+    estimator->SetInstructionCost(ar_done0, 1);
+    estimator->SetInstructionCost(dot0, 10);
+    estimator->SetInstructionCost(ar_start1, 1);
+    estimator->SetInstructionCost(ar_done1, 1);
+    estimator->SetInstructionCost(dot1, 10);
+    estimator->SetInstructionBetween(ar_done0, 100);
+    estimator->SetInstructionBetween(ar_done1, 10);
+
+    VLOG(2) << "finish creating instruction now scheduling"
+            << module->has_schedule();
+
+    // let module have one schedule
+    TF_ASSIGN_OR_RETURN(HloSchedule schedule,
+                        ScheduleModule(module, [](const BufferValue& buffer) {
+                          return ShapeUtil::ByteSizeOf(
+                              buffer.shape(),
+                              /*pointer_size=*/sizeof(void*));
+                        }));
+
+    TF_RETURN_IF_ERROR(module->set_schedule(std::move(schedule)));
+
+    return entry_computation;
   }
   StatusOr<HloComputation*> MakeTestComputation(HloModule* module) {
     // param: p0,p1,p2,p3
@@ -382,8 +496,7 @@ ENTRY %elementwise {
       uint32_t inst_nums = 100, uint8_t max_deps = 5,
       double communication_rate = 0.1f,
       std::mt19937 gen = std::mt19937{kRandomSeed},
-      CostGenerator cost_gen = CostGenerator(50, 5, kRandomSeed)
-      ) {
+      CostGenerator cost_gen = CostGenerator(50, 5, kRandomSeed)) {
     /* create instruction list with inst_nums instructions
      every inst be used by output
     */
@@ -399,7 +512,6 @@ ENTRY %elementwise {
     uint32_t communication_count = std::floor(communication_rate * inst_nums);
     uint32_t insert_comm_every = inst_nums / communication_count;
 
-    
     // Node cost must add after AddEntryComputation,so that instruction have
     // unique_id
     std::vector<std::tuple<HloInstruction*, int>> insts2cost;
@@ -409,7 +521,6 @@ ENTRY %elementwise {
     std::set<HloInstruction*> not_used_insts;
 
     CostGenerator random_gen = CostGenerator(50, 5, kRandomSeed);
-
 
     for (size_t i = 0; i < inst_nums; i++) {
       // random deps from 1~5
@@ -440,24 +551,23 @@ ENTRY %elementwise {
       if (deps.size() != 2) {
         return absl::InvalidArgumentError("deps size not equal 2");
       }
-      
+
       auto inst = builder.AddInstruction(HloInstruction::CreateBinary(
           shape, HloOpcode::kAdd, deps.at(0), deps.at(1)));
       // we can add control dependency to inst
-      //random add control dep, test control_predecessors issue
-      if(random_gen()>60){
+      // random add control dep, test control_predecessors issue
+      if (random_gen() > 60) {
         std::vector<HloInstruction*> control_deps;
         std::sample(insts_list.begin(), insts_list.end(),
                     std::back_inserter(control_deps), 2, gen);
-        for(auto control_dep: control_deps){
+        for (auto control_dep : control_deps) {
           auto status = control_dep->AddControlDependencyTo(inst);
           if (!status.ok()) {
             return absl::InvalidArgumentError("AddControlDependencyTo error");
           }
         }
-        
       }
-      
+
       insts_list.push_back(inst);
       insts2cost.push_back(std::make_tuple(inst, cost_gen()));
       not_used_insts.insert(inst);
@@ -497,7 +607,7 @@ ENTRY %elementwise {
           insts2cost.push_back(std::make_tuple(ar_done, 1));
 
           insts_list.push_back(ar_done);
-          edge2cost.push_back(std::make_tuple(ar_done, cost_gen()+50));
+          edge2cost.push_back(std::make_tuple(ar_done, cost_gen() + 50));
           not_used_insts.insert(ar_done);
         }
       }
@@ -782,7 +892,103 @@ ENTRY %elementwise {
     }
   }
 };
+TEST_F(AutoReorderingTest, SPMDAutoReorder) {
+  absl::string_view hlo_string = R"(
+HloModule spmd_module, is_scheduled=true
 
+%add {
+  %p0 = f32[] parameter(0)
+  %p1 = f32[] parameter(1)
+  ROOT %a = f32[] add(p0, p1)
+}
+%fused_computation {
+  param_1 = f32[400,1280]{1,0} parameter(0)
+  param_1.1 = f32[1280]{0} parameter(1)
+  broadcast.6 = f32[400,1280]{1,0} broadcast(param_1.1), dimensions={1}, metadata={op_type="aten__addmm" op_name="aten__addmm"}
+  ROOT add.4 = f32[400,1280]{1,0} add(param_1, broadcast.6), metadata={op_type="aten__addmm" op_name="aten__addmm"}
+}
+
+%fused_computation.1 {
+  param_0.1 = f32[400,9600]{1,0} parameter(0)
+  param_1.3 = f32[9600]{0} parameter(1)
+  broadcast.7 = f32[400,9600]{1,0} broadcast(param_1.3), dimensions={1}, metadata={op_type="aten__addmm" op_name="aten__addmm"}
+  ROOT add.5 = f32[400,9600]{1,0} add(param_0.1, broadcast.7), metadata={op_type="aten__addmm" op_name="aten__addmm"}
+}
+
+ENTRY %spmd_module (param: f32[9600], param.1: f32[1280], param.3: f32[2400,12800], param.2: f32[400,12800], param.4: f32[320,9600]) -> (f32[9600], f32[1280], f32[400,9600], f32[9600,320], f32[400,1280]) {
+  %param = f32[9600]{0} parameter(0), sharding={replicated}, metadata={op_type="xla__device_data" op_name="xla__device_data"}
+  %copy.5 = f32[9600]{0} copy(f32[9600]{0} %param)
+  %param.1 = f32[1280]{0} parameter(1), sharding={replicated}, metadata={op_type="xla__device_data" op_name="xla__device_data"}
+  %copy.6 = f32[1280]{0} copy(f32[1280]{0} %param.1)
+  %param.2 = f32[400,12800]{1,0} parameter(3), sharding={devices=[4,1]0,1,2,3}, metadata={op_type="xla__device_data" op_name="xla__device_data"}
+  %param.3 = f32[2400,12800]{1,0} parameter(2), sharding={devices=[4,1]0,1,2,3}, metadata={op_type="xla__device_data" op_name="xla__device_data"}
+  %bitcast.11 = f32[12800,2400]{0,1} bitcast(f32[2400,12800]{1,0} %param.3)
+  %all-gather-start = (f32[12800,2400]{0,1}, f32[12800,9600]{0,1}) all-gather-start(f32[12800,2400]{0,1} %bitcast.11), channel_id=1, replica_groups={{0,1,2,3}}, dimensions={1}, use_global_device_ids=true, metadata={op_type="aten__addmm" op_name="aten__addmm"}, backend_config={"is_sync":false,"no_parallel_custom_call":false}
+  %all-gather-done = f32[12800,9600]{0,1} all-gather-done((f32[12800,2400]{0,1}, f32[12800,9600]{0,1}) %all-gather-start), metadata={op_type="aten__addmm" op_name="aten__addmm"}
+  %custom-call.2 = (f32[400,9600]{1,0}, s8[4194304]{0}) custom-call(f32[400,12800]{1,0} %param.2, f32[12800,9600]{0,1} %all-gather-done), custom_call_target="__cublas$gemm", metadata={op_type="aten__addmm" op_name="aten__addmm"}, backend_config={"alpha_real":1,"alpha_imag":0,"beta":0,"dot_dimension_numbers":{"lhs_contracting_dimensions":["1"],"rhs_contracting_dimensions":["0"],"lhs_batch_dimensions":[],"rhs_batch_dimensions":[]},"precision_config":{"operand_precision":["DEFAULT","DEFAULT"]},"epilogue":"DEFAULT","lhs_stride":"5120000","rhs_stride":"122880000","grad_x":false,"grad_y":false}
+  %get-tuple-element.5 = f32[400,9600]{1,0} get-tuple-element((f32[400,9600]{1,0}, s8[4194304]{0}) %custom-call.2), index=0, metadata={op_type="aten__addmm" op_name="aten__addmm"}
+  %fusion.1 = f32[400,9600]{1,0} fusion(f32[400,9600]{1,0} %get-tuple-element.5, f32[9600]{0} %param), kind=kLoop, calls=%fused_computation.1, metadata={op_type="aten__addmm" op_name="aten__addmm"}
+  %param.4 = f32[320,9600]{1,0} parameter(4), sharding={devices=[4,1]0,1,2,3}, metadata={op_type="xla__device_data" op_name="xla__device_data"}
+  %transpose.2 = f32[9600,320]{1,0} transpose(f32[320,9600]{1,0} %param.4), dimensions={1,0}
+  %bitcast.28 = f32[9600,320]{0,1} bitcast(f32[320,9600]{1,0} %param.4)
+  %all-gather-start.1 = (f32[9600,320]{0,1}, f32[9600,1280]{0,1}) all-gather-start(f32[9600,320]{0,1} %bitcast.28), channel_id=2, replica_groups={{0,1,2,3}}, dimensions={1}, use_global_device_ids=true, metadata={op_type="aten__addmm" op_name="aten__addmm"}, backend_config={"is_sync":false,"no_parallel_custom_call":false}
+  %all-gather-done.1 = f32[9600,1280]{0,1} all-gather-done((f32[9600,320]{0,1}, f32[9600,1280]{0,1}) %all-gather-start.1), metadata={op_type="aten__addmm" op_name="aten__addmm"}
+  %custom-call.3 = (f32[400,1280]{1,0}, s8[4194304]{0}) custom-call(f32[400,9600]{1,0} %fusion.1, f32[9600,1280]{0,1} %all-gather-done.1), custom_call_target="__cublas$gemm", metadata={op_type="aten__addmm" op_name="aten__addmm"}, backend_config={"alpha_real":1,"alpha_imag":0,"beta":0,"dot_dimension_numbers":{"lhs_contracting_dimensions":["1"],"rhs_contracting_dimensions":["0"],"lhs_batch_dimensions":[],"rhs_batch_dimensions":[]},"precision_config":{"operand_precision":["DEFAULT","DEFAULT"]},"epilogue":"DEFAULT","lhs_stride":"3840000","rhs_stride":"12288000","grad_x":false,"grad_y":false}
+  %get-tuple-element.6 = f32[400,1280]{1,0} get-tuple-element((f32[400,1280]{1,0}, s8[4194304]{0}) %custom-call.3), index=0, metadata={op_type="aten__addmm" op_name="aten__addmm"}
+  %fusion = f32[400,1280]{1,0} fusion(f32[400,1280]{1,0} %get-tuple-element.6, f32[1280]{0} %param.1), kind=kLoop, calls=%fused_computation, metadata={op_type="aten__addmm" op_name="aten__addmm"}
+  ROOT %tuple.2 = (f32[9600]{0}, f32[1280]{0}, f32[400,9600]{1,0}, f32[9600,320]{1,0}, f32[400,1280]{1,0}) tuple(f32[9600]{0} %copy.5, f32[1280]{0} %copy.6, f32[400,9600]{1,0} %fusion.1, f32[9600,320]{1,0} %transpose.2, f32[400,1280]{1,0} %fusion)
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(auto hlo_module, ParseHloText(hlo_string));
+  auto gpu_latency_estimator = std::make_unique<GpuLatencyEstimator>();
+  std::unique_ptr<LatencyEstimator> latency_estimator;
+  int pointer_size_ = 4;
+  Backend& test_backend = backend();
+  auto gpu_device_info = TestGpuDeviceInfo::RTXA6000DeviceInfo();
+
+  VLOG(2) << "threads_per_block_limit:"
+          << gpu_device_info.threads_per_block_limit() << " threads_per_warp"
+          << gpu_device_info.threads_per_warp();
+  const int64_t scheduler_mem_limit = xla::gpu::GetSchedulerMemoryLimit(
+      hlo_module.get(), gpu_device_info, pointer_size_);
+  SchedulerConfig config = GetSchedulerConfig(scheduler_mem_limit);
+  SchedulerConfig sched_config = GetDefaultSchedConfig();
+  HloCostAnalysis::ShapeSizeFunction shape_size_bytes =
+      [&shape_size_bytes](const Shape& shape) -> int64_t {
+    int64_t shape_size = 0;
+    if (shape.IsTuple()) {
+      for (auto& sub_shape : shape.tuple_shapes()) {
+        shape_size += shape_size_bytes(sub_shape);
+      }
+      return shape_size;
+    }
+    return ShapeUtil::ByteSizeOfElements(shape);
+  };
+
+  auto async_tracker = std::make_unique<AsyncTracker>(sched_config);
+  latency_estimator = std::make_unique<AnalyticalLatencyEstimator>(
+      config, std::move(gpu_latency_estimator), gpu_device_info,
+      [input_pointer_size = pointer_size_](const Shape& shape) {
+        return GetSizeOfShape(shape, input_pointer_size);
+      },
+      hlo_module->entry_computation());
+  auto entry_computation = hlo_module->entry_computation();
+  auto scheduler_core = std::make_unique<DefaultSchedulerCore>(
+      shape_size_bytes, async_tracker.get(), latency_estimator.get(),
+      sched_config);
+  auto test_pass =
+      AutoReorderPass(std::move(latency_estimator), std::move(async_tracker),
+                      std::move(scheduler_core), shape_size_bytes);
+
+  for (HloComputation* computation :
+       hlo_module->MakeNonfusionComputations({})) {
+    auto status = test_pass.ScheduleComputation(computation);
+    if (!status.ok()) {
+      std::cout << "NonfusionComputations src_module fail" << std::endl;
+    }
+    EXPECT_TRUE(status.ok());
+  }
+}
 TEST_F(AutoReorderingTest, DemoAutoReorder) {
   GTEST_SKIP() << "Skipping DemoAutoReorder";
 
@@ -1029,6 +1235,28 @@ TEST_F(AutoReorderingTest, ReorderPassWithDefaultEstimator) {
   EXPECT_TRUE(status.ok());
   EXPECT_TRUE(CheckParameterInst(hlo_module.get()));
 }
+TEST_F(AutoReorderingTest, ReorderPassCommunicateComputation) {
+  // GTEST_SKIP() << "Skipping single test";
+  std::srand(kRandomSeed);
+  auto hlo_module = CreateNewUnverifiedModule();
+  auto gpu_latency_estimator = std::make_unique<SavedInstLatencyEstimator>();
+  SchedulerConfig sched_config = GetDefaultSchedConfig();
+  auto st =
+      MakeCommunicateComputation(hlo_module.get(), gpu_latency_estimator.get());
+  auto gpu_latency_estimator2 = gpu_latency_estimator->clone();
+  auto gpu_latency_estimator3 = gpu_latency_estimator->clone();
+
+  auto status = RunScheduler(hlo_module.get(), sched_config,
+                             std::move(gpu_latency_estimator));
+  EXPECT_TRUE(status.ok());
+  auto insts = hlo_module->schedule()
+                   .sequence(hlo_module->entry_computation())
+                   .instructions();
+  for (auto inst : insts) {
+    std::cout << inst->ToString() << std::endl;
+  }
+}
+
 TEST_F(AutoReorderingTest, ReorderPassStableOrder) {
   // GTEST_SKIP() << "Skipping single test";
   std::srand(kRandomSeed);
@@ -1049,7 +1277,7 @@ TEST_F(AutoReorderingTest, ReorderPassStableOrder) {
 
   // get hlo_module instruction order,and compute a hash
   status = RunScheduler(hlo_module.get(), sched_config,
-                             std::move(gpu_latency_estimator2));
+                        std::move(gpu_latency_estimator2));
   auto comm_op_2 = GetInstructionsOrderString(hlo_module.get());
 
   EXPECT_TRUE(status.ok());
@@ -1082,8 +1310,7 @@ TEST_F(AutoReorderingTest, ReorderPassWithRandom) {
   EXPECT_TRUE(statics.ok());
   EXPECT_TRUE(CheckParameterInst(hlo_module.get()));
   auto auto_reorder_cost = statics.value().total_cycles;
-  std::cout << "ReorderPassWithRandom:" << auto_reorder_cost
-            << std::endl;
+  std::cout << "ReorderPassWithRandom:" << auto_reorder_cost << std::endl;
 
   // compare post order vs reorder
   auto post_insts_order =
@@ -1096,11 +1323,11 @@ TEST_F(AutoReorderingTest, ReorderPassWithRandom) {
   EXPECT_TRUE(statics.ok());
   auto post_order_cost = statics.value().total_cycles;
   EXPECT_TRUE(CheckParameterInst(hlo_module.get()));
-  std::cout << "MakeInstructionPostOrder:" << post_order_cost
-            << std::endl;
+  std::cout << "MakeInstructionPostOrder:" << post_order_cost << std::endl;
 
   // run LatencyHidingScheduler for compare
-  // NOTICE:  DO NOT using gpu_latency_estimator after std::move(gpu_latency_estimator)
+  // NOTICE:  DO NOT using gpu_latency_estimator after
+  // std::move(gpu_latency_estimator)
   auto lhs_status = RunLatencyHidingScheduler(
       hlo_module.get(), sched_config, std::move(gpu_latency_estimator3));
   EXPECT_TRUE(lhs_status.ok());
@@ -1111,8 +1338,6 @@ TEST_F(AutoReorderingTest, ReorderPassWithRandom) {
   auto xla_lhs_cost = statics.value().total_cycles;
   EXPECT_LE(auto_reorder_cost, post_order_cost);
   EXPECT_LE(auto_reorder_cost, xla_lhs_cost);
-
-  
 }
 // skip this test
 TEST_F(AutoReorderingTest, ReorderPassDataAnalyse) {
@@ -1125,72 +1350,82 @@ TEST_F(AutoReorderingTest, ReorderPassDataAnalyse) {
   //  = {
   //   0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9
   // };
-  for (float current=0.1; current < 0.9; current+=0.05)
-  {
+  for (float current = 0.1; current < 0.9; current += 0.05) {
     communication_rates.push_back(current);
   }
-  
+
   // communication rate from 0.05 to 0.95,step is 0.05
   std::ofstream csv_out("/tmp/test_ret.csv");
-  csv_out<<"exp_id,nnodes,communication_rate,auto_reorder_cost,post_order_cost,xla_hiding_order_cost,xla_hiding_solve_time,auto_reorder_solve_time"<<std::endl;
-  for(auto communication_rate :communication_rates){
+  csv_out
+      << "exp_id,nnodes,communication_rate,auto_reorder_cost,post_order_cost,"
+         "xla_hiding_order_cost,xla_hiding_solve_time,auto_reorder_solve_time"
+      << std::endl;
+  for (auto communication_rate : communication_rates) {
     for (size_t i = 0; i < repeat_time; i++) {
-    std::cout<<TestName()<<" repeat time:"<<i<<std::endl;
-    auto hlo_module = CreateNewUnverifiedModule();
-    auto gpu_latency_estimator = std::make_unique<SavedInstLatencyEstimator>();
-    // float communication_rate = 0.2;
-    SchedulerConfig sched_config = GetDefaultSchedConfig();
-    auto st =
-        MakeRandomComputation(hlo_module.get(), gpu_latency_estimator.get(),
-                              /*inst num*/ nnodes,
-                              /*max deps*/ 5,
-                              /*communication rate*/ communication_rate,
-                              /* gen */gen);
-    EXPECT_TRUE(st.ok());
-    // auto latency_estimator = create_latency_estimator();
+      std::cout << TestName() << " repeat time:" << i << std::endl;
+      auto hlo_module = CreateNewUnverifiedModule();
+      auto gpu_latency_estimator =
+          std::make_unique<SavedInstLatencyEstimator>();
+      // float communication_rate = 0.2;
+      SchedulerConfig sched_config = GetDefaultSchedConfig();
+      auto st =
+          MakeRandomComputation(hlo_module.get(), gpu_latency_estimator.get(),
+                                /*inst num*/ nnodes,
+                                /*max deps*/ 5,
+                                /*communication rate*/ communication_rate,
+                                /* gen */ gen);
+      EXPECT_TRUE(st.ok());
+      // auto latency_estimator = create_latency_estimator();
 
-    auto gpu_latency_estimator2 = gpu_latency_estimator->clone();
-    auto gpu_latency_estimator3 = gpu_latency_estimator->clone();
-    // run AutoReorder for compare
-    //get running time cost
-    auto start = std::chrono::steady_clock::now();
-    auto status = RunScheduler(hlo_module.get(), sched_config,
-                               std::move(gpu_latency_estimator));
-    EXPECT_TRUE(status.ok());
-    auto end = std::chrono::steady_clock::now();
-    auto auto_reorder_solve_time = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+      auto gpu_latency_estimator2 = gpu_latency_estimator->clone();
+      auto gpu_latency_estimator3 = gpu_latency_estimator->clone();
+      // run AutoReorder for compare
+      // get running time cost
+      auto start = std::chrono::steady_clock::now();
+      auto status = RunScheduler(hlo_module.get(), sched_config,
+                                 std::move(gpu_latency_estimator));
+      EXPECT_TRUE(status.ok());
+      auto end = std::chrono::steady_clock::now();
+      auto auto_reorder_solve_time =
+          std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
+              .count();
 
-    auto statics = GetModuleCost(hlo_module.get(), sched_config,
-                                 gpu_latency_estimator2.get());
-    EXPECT_TRUE(statics.ok());
-    auto auto_reorder_cost = statics.value().total_cycles;
-    // compare post order vs reorder
-    auto post_insts_order =
-        hlo_module->entry_computation()->MakeInstructionPostOrder();
-    hlo_module->schedule().set_sequence(hlo_module->entry_computation(),
-                                        post_insts_order);
+      auto statics = GetModuleCost(hlo_module.get(), sched_config,
+                                   gpu_latency_estimator2.get());
+      EXPECT_TRUE(statics.ok());
+      auto auto_reorder_cost = statics.value().total_cycles;
+      // compare post order vs reorder
+      auto post_insts_order =
+          hlo_module->entry_computation()->MakeInstructionPostOrder();
+      hlo_module->schedule().set_sequence(hlo_module->entry_computation(),
+                                          post_insts_order);
 
-    statics = GetModuleCost(hlo_module.get(), sched_config,
-                            gpu_latency_estimator2.get());
-    EXPECT_TRUE(statics.ok());
-    auto post_order_cost = statics.value().total_cycles;
+      statics = GetModuleCost(hlo_module.get(), sched_config,
+                              gpu_latency_estimator2.get());
+      EXPECT_TRUE(statics.ok());
+      auto post_order_cost = statics.value().total_cycles;
 
-    // run LatencyHidingScheduler for compare
-    // NOTICE:  DO NOT using gpu_latency_estimator after std::move(gpu_latency_estimator)
-    start = std::chrono::steady_clock::now();
-    auto lhs_status = RunLatencyHidingScheduler(
-        hlo_module.get(), sched_config, std::move(gpu_latency_estimator3));
-    EXPECT_TRUE(lhs_status.ok());
-    end = std::chrono::steady_clock::now();
-    auto xla_hiding_solve_time = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    statics = GetModuleCost(hlo_module.get(), sched_config,
-                            gpu_latency_estimator2.get());
-    EXPECT_TRUE(statics.ok());
-    auto xla_hiding_order_cost = statics.value().total_cycles;
-    csv_out<<i<<","<<nnodes<<","<<communication_rate<<","<<auto_reorder_cost<<","<<post_order_cost<<","<<xla_hiding_order_cost<<","<<xla_hiding_solve_time<<","<<auto_reorder_solve_time<<std::endl;
+      // run LatencyHidingScheduler for compare
+      // NOTICE:  DO NOT using gpu_latency_estimator after
+      // std::move(gpu_latency_estimator)
+      start = std::chrono::steady_clock::now();
+      auto lhs_status = RunLatencyHidingScheduler(
+          hlo_module.get(), sched_config, std::move(gpu_latency_estimator3));
+      EXPECT_TRUE(lhs_status.ok());
+      end = std::chrono::steady_clock::now();
+      auto xla_hiding_solve_time =
+          std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
+              .count();
+      statics = GetModuleCost(hlo_module.get(), sched_config,
+                              gpu_latency_estimator2.get());
+      EXPECT_TRUE(statics.ok());
+      auto xla_hiding_order_cost = statics.value().total_cycles;
+      csv_out << i << "," << nnodes << "," << communication_rate << ","
+              << auto_reorder_cost << "," << post_order_cost << ","
+              << xla_hiding_order_cost << "," << xla_hiding_solve_time << ","
+              << auto_reorder_solve_time << std::endl;
+    }
   }
-  }
-  
 }
 
 }  // namespace xla

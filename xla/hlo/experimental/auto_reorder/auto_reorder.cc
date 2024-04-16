@@ -48,13 +48,11 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
   async_tracker_->PostProcessScheduleGraph(&schedule_graph,
                                            latency_estimator_.get());
   // we don't need InitializeGraphAnalysis for init node status;
-  
-    
+
   auto solver_ = absl::make_unique<LinearProgramScheduler<
-      LPContainer<const HloInstruction*>, const HloInstruction*>
-    >();
-  std::vector<LPContainer<const HloInstruction*>* > comm_lp_nodes;
-  
+      LPContainer<const HloInstruction*>, const HloInstruction*>>();
+  std::vector<LPContainer<const HloInstruction*>*> comm_lp_nodes;
+
   // scan instructions, get every instruction cost and deps
   // post order,every inst will iter before it's operators
   for (HloInstruction* instr : post_order_instructions) {
@@ -62,8 +60,8 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
 
     const HloGraphNode& instr_node = schedule_graph.GetNode(instr);
     VLOG(2) << instr->ToShortString() << "flops cost :" << instr_node.GetCost();
-    auto addEdge = [&](const xla::HloInstruction* from_inst, 
-                      LPContainer<const HloInstruction*>* dst_node,
+    auto addEdge = [&](const xla::HloInstruction* from_inst,
+                       LPContainer<const HloInstruction*>* dst_node,
                        NodeType edge_type) {
       auto operand_lp_node = solver_->FindInstructionLPNode(from_inst);
       if (!operand_lp_node.ok()) {
@@ -75,7 +73,14 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
           latency_estimator_->GetLatencyBetween(operand_node, instr_node);
       VLOG(2) << from_inst->ToShortString() + " should execute before " +
                      instr->ToShortString();
-      dst_node->AddDep(operand_lp_node.value(), edge_cost);
+      // if(edge_type==NodeType::kCommunication){
+      //   //let edge become a node,so edge will no overlap
+      //   auto edge_node = solver_->FindLPNodeOrCreate(nullptr, edge_cost,
+      //   edge_type);
+      // }else{
+      dst_node->AddDep(operand_lp_node.value(), edge_cost, edge_type);
+      // }
+
       return true;
     };
 
@@ -85,8 +90,8 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
         async_tracker_->IsSupportedAsyncDone(*instr)) {
       // communication
       // GetCost return float, floor to int
-      auto current_inst_lp_node = solver_->FindLPNodeOrCreate(
-          instr, cost, NodeType::kCommunication);
+      auto current_inst_lp_node =
+          solver_->FindLPNodeOrCreate(instr, cost, NodeType::kCommunication);
       // add current node as constraint
 
       if (async_tracker_->IsSupportedAsyncDone(*instr)) {
@@ -100,25 +105,24 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
         // add it's operands to his deps
         for (auto i = 0; i < instr->operand_count(); i++) {
           auto operand_inst = instr->operand(i);
-          auto is_success = addEdge(operand_inst, current_inst_lp_node,
-                                    NodeType::kCompute);
+          auto is_success =
+              addEdge(operand_inst, current_inst_lp_node, NodeType::kCompute);
           TF_RET_CHECK(is_success)
               << "operand_lp_node not found:" << operand_inst->ToShortString();
         }
         instr->control_predecessors();
-        for (auto control_inst: instr->control_predecessors()) {
-          //if it's communication, if control_inst is communicate op,this type should be kCommunication?
+        for (auto control_inst : instr->control_predecessors()) {
+          // if it's communication, if control_inst is communicate op,this type
+          // should be kCommunication?
           auto is_success = addEdge(control_inst, current_inst_lp_node,
-                                    NodeType::kCompute);//which type?
+                                    NodeType::kCompute);  // which type?
           TF_RET_CHECK(is_success)
               << "operand_lp_node not found:" << control_inst->ToShortString();
         }
-        
       }
 
       TF_CHECK_OK(solver_->AddConstraint(current_inst_lp_node));
-      if(reorder::is_keep_communicate_order()){
-        
+      if (reorder::is_keep_communicate_order()) {
         comm_lp_nodes.push_back(current_inst_lp_node);
       }
     } else {  // compute
@@ -127,74 +131,52 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
       // when adding edge node, current node have no add to Constraint?
       for (auto i = 0; i < instr->operand_count(); i++) {
         auto operand_inst = instr->operand(i);
-        auto is_success = addEdge(operand_inst, current_inst_lp_node,
-                                  NodeType::kCompute);
+        auto is_success =
+            addEdge(operand_inst, current_inst_lp_node, NodeType::kCompute);
         TF_RET_CHECK(is_success)
             << "operand_lp_node not found:" << operand_inst->ToShortString();
       }
-      for (auto control_inst: instr->control_predecessors()) {
-          //if it's 
-          auto is_success = addEdge(control_inst, current_inst_lp_node,
-                                    NodeType::kCompute);//which type?
-          TF_RET_CHECK(is_success)
-              << "operand_lp_node not found:" << control_inst->ToShortString();
-        }
+      for (auto control_inst : instr->control_predecessors()) {
+        // if it's
+        auto is_success = addEdge(control_inst, current_inst_lp_node,
+                                  NodeType::kCompute);  // which type?
+        TF_RET_CHECK(is_success)
+            << "operand_lp_node not found:" << control_inst->ToShortString();
+      }
 
       TF_CHECK_OK(solver_->AddConstraint(current_inst_lp_node));
     }
   }
-  if(reorder::is_keep_communicate_order()){
-    // TODO: no keep order will cause hung on multi processing, we should consider how to resolve it
-    // but now,we add constraint to let communication node keep order
-    std::cout<<"keep_communicate_order=true, add edge to keep order"<<std::endl;
-    //iter comm_lp_nodes,get one node and its next node
-    for (auto i = 0; i < comm_lp_nodes.size(); i++) {
-      auto next_node = comm_lp_nodes.at(i);
-      VLOG(3)<<"current node:"<<next_node->GetName();
-      if (i + 1 < comm_lp_nodes.size()) {
-        auto current_node = comm_lp_nodes.at(i + 1);
-        // if current_node is not next_node operators, add one edge to next_node
-        if(!next_node->HasDep(current_node)){
-          VLOG(3)<<"add edge from "<<current_node->GetName()<<" to "<<next_node->GetName();
 
-          current_node->AddDep(next_node, 1);
-        }
-        
-      }
-    }
-  }
-  
-  //set hint, using post order
+  // set hint, using post order
   std::reverse(post_order_instructions.begin(), post_order_instructions.end());
-  for (HloInstruction* instr : post_order_instructions){
+  for (HloInstruction* instr : post_order_instructions) {
     auto lp_node = solver_->FindInstructionLPNode(instr);
     if (!lp_node.ok()) {
-        VLOG(2) << "operand_lp_node not found:" << instr->ToShortString();
-        continue;
+      VLOG(2) << "operand_lp_node not found:" << instr->ToShortString();
+      continue;
     }
     auto operand_lp_node = lp_node.value();
-    CostType start_at=-1;
-    for(auto dep_pair :operand_lp_node->GetDeps()){
+    CostType start_at = -1;
+    for (auto dep_pair : operand_lp_node->GetDeps()) {
       CostType cost = std::get<1>(dep_pair);
       auto dep_node = std::get<0>(dep_pair);
-      if(dep_node->GetHintStart()>-1){
-        start_at = std::max(start_at,dep_node->GetHintStart()+cost);
+      if (dep_node->GetHintStart() > -1) {
+        start_at = std::max(start_at, dep_node->GetHintStart() + cost);
       }
     }
-    if(start_at>-1){
+    if (start_at > -1) {
       operand_lp_node->SetHintStart(start_at);
     }
-    
   }
 
   auto status = solver_->Solve();
-  if(reorder::solve_debug){
-    //save to pid related file
-    auto pid = getpid();
-    solver_->RenderGantt(absl::StrCat("gantt_",pid, computation->name()));
-    solver_->RenderGraphviz(absl::StrCat("gantt_",pid, computation->name()));
+  if (reorder::solve_debug) {
+    // save to pid related file
+    solver_->RenderGantt(absl::StrCat("gantt_", computation->name()));
+    solver_->RenderGraphviz(absl::StrCat("gantt_", computation->name()));
   }
-  
+
   if (status.ok()) {
     // return instruction order by solver
     std::vector<HloInstruction*> new_schedule_params;
@@ -203,14 +185,13 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
     for (auto node : sorted_nodes) {
       auto insts = node->GetValues();
       for (auto inst : insts) {
-      //extra check: param inst must move to head;
-        if(inst->opcode() == HloOpcode::kParameter)
-        {
-          new_schedule_params.insert(new_schedule_params.begin(),const_cast<xla::HloInstruction*>(inst));
-        }else{
+        // extra check: param inst must move to head;
+        if (inst->opcode() == HloOpcode::kParameter) {
+          new_schedule_params.insert(new_schedule_params.begin(),
+                                     const_cast<xla::HloInstruction*>(inst));
+        } else {
           new_schedule.push_back(const_cast<xla::HloInstruction*>(inst));
         }
-        
       }
     }
     std::sort(new_schedule_params.begin(), new_schedule_params.end(),
@@ -218,7 +199,7 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
                 return a->unique_id() < b->unique_id();
               });
     new_schedule_params.insert(new_schedule_params.end(), new_schedule.begin(),
-                        new_schedule.end());
+                               new_schedule.end());
     return new_schedule_params;
   }
   TF_RET_CHECK(status.ok()) << "Solver error:" << status.message();
@@ -379,7 +360,7 @@ StatusOr<bool> AutoReorderPass::Run(
     VLOG(2) << "new_schedule length:" << new_schedule.size()
             << " computation instruction_count:"
             << computation->instruction_count();
-    
+
     saved_schedules[computation] = std::move(new_schedule);
   }
 

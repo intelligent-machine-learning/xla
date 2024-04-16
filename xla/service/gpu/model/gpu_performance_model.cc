@@ -828,13 +828,15 @@ float GpuPerformanceWithCollectiveModel::GetNvlinkBw(
     se::CudaComputeCapability compute_capability) {
   return compute_capability.IsAtLeast(se::CudaComputeCapability::HOPPER)
              ? kSm90NvlinkBandwidth
-         : compute_capability.IsAtLeast(se::CudaComputeCapability::AMPERE)
-             ? kSm80NvlinkBandwidth
-         : compute_capability.IsAtLeast(se::CudaComputeCapability::VOLTA)
-             ? kSm70NvlinkBandwidth
-         : compute_capability.IsAtLeast(se::CudaComputeCapability::PASCAL_)
-             ? kSm60NvlinkBandwidth
-             : kSm80NvlinkBandwidth;
+             : compute_capability.IsAtLeast(se::CudaComputeCapability::AMPERE)
+                   ? kSm80NvlinkBandwidth
+                   : compute_capability.IsAtLeast(
+                         se::CudaComputeCapability::VOLTA)
+                         ? kSm70NvlinkBandwidth
+                         : compute_capability.IsAtLeast(
+                               se::CudaComputeCapability::PASCAL_)
+                               ? kSm60NvlinkBandwidth
+                               : kSm80NvlinkBandwidth;
 }
 
 /*static*/ bool GpuPerformanceWithCollectiveModel::InitNvml() {
@@ -894,7 +896,11 @@ GpuPerformanceWithCollectiveModel::CheckIfNvlinkSupportsP2P() {
   nvmlReturn_t nvlink_cap_result = xla_nvmlDeviceGetNvLinkCapability(
       nvml_device, /*nvlink link number*/ 0, NVML_NVLINK_CAP_P2P_SUPPORTED,
       &supported_p2p);
-  CHECK(nvlink_cap_result == NVML_SUCCESS);
+  if (nvlink_cap_result == NVML_ERROR_NOT_SUPPORTED) {
+    LOG(WARNING) << "NVML error not supported. NVLink capability check failed.";
+    return 0;
+  }
+  CHECK(nvlink_cap_result == NVML_SUCCESS) << nvlink_cap_result;
   CHECK(ShutdownNvml()) << "NVML shutdown failed.";
   return supported_p2p;
 #else
@@ -973,8 +979,110 @@ GpuPerformanceWithCollectiveModel::ComputeAllreduceTime(
                            num_channels * per_channel_ring_ll128_Bw);
   double actual_bandwidth = bus_bandwidth * cost_analysis->ScalingRatio(instr);
 
-  absl::Duration communication_time = absl::Microseconds(
+  absl::Duration communication_time = absl::Milliseconds(
       cost_analysis->bytes_accessed(instr) / (1e6 * actual_bandwidth));
+  total_time += communication_time;
+  return total_time;
+}
+std::vector<double> GpuPerformanceWithCollectiveModel::GetInterInnerBandwidths(
+    const HloInstruction& instr, const GpuHloCostAnalysis* cost_analysis,
+    const se::DeviceDescription& gpu_device_info) {
+  stream_executor::CudaComputeCapability compute_cap =
+      gpu_device_info.cuda_compute_capability();
+
+  int64_t size_of_speed_array = kIntraNodeSpeeds.size();
+  int64_t size_of_sm90_speed_array = kIntraNodeSpeedsSm90.size();
+
+  int num_speeds = compute_cap.major >= se::CudaComputeCapability::HOPPER
+                       ? size_of_sm90_speed_array
+                       : size_of_speed_array;
+  const double* speeds = compute_cap.major >= se::CudaComputeCapability::HOPPER
+                             ? kIntraNodeSpeedsSm90.data()
+                             : kIntraNodeSpeeds.data();
+
+  int speed_index = 0;
+  float max_sys_bw =
+      GetMaxSysBwFromGpu(compute_cap, kLowLatencyMaxBandwidths.data());
+
+  CHECK_GT(max_sys_bw, 0);
+
+  while ((speed_index < num_speeds - 1) && speeds[speed_index] > max_sys_bw) {
+    speed_index++;
+  }
+  float bw_intra_node = speeds[speed_index];
+  int64_t num_devices = cost_analysis->NumOfDevices(instr);
+
+  int64_t min_nchannels =
+      std::max(num_devices, GetMinNumberOfChannels(CollectiveAlgo::RING));
+  int64_t num_channels =
+      std::max(min_nchannels, GetNcclMaxNumChannels(CollectiveAlgo::RING));
+  int default_threads =
+      (bw_intra_node * num_channels <= kPciBandwidth) ? 256 : kLL128NumThreads;
+
+  int warp_size = gpu_device_info.threads_per_warp();
+  int num_threads = GetNumThreads(warp_size, kLL128NumThreads / 4,
+                                  kLL128NumThreads, default_threads);
+
+  uint32_t supported_p2p = CheckIfNvlinkSupportsP2P();
+
+  if (supported_p2p == 0) {
+    VLOG(8) << "Nvlink doesn't support p2p communication. Model will "
+               "continue using default system bandwidth.";
+  } else {
+    VLOG(8) << "Nvlink supports p2p communication, setting intra node "
+               "bandwidth to nvlink bw.";
+    bw_intra_node = GetNvlinkBw(compute_cap);
+  }
+  // Get per channel LL128 ring bandwidth
+  double per_channel_ring_ll128_Bw =
+      GetMaxSysBwFromGpu(compute_cap, kPerChannelMaxRingLL128Bandwidths.data());
+  double bus_bandwidth = bw_intra_node * num_channels;
+  double intra_node_bus_bandwidth =
+      bw_intra_node * num_channels * kRingAlgorithmDiscountFactor;
+  double inner_node_bus_bandwidth = num_channels * per_channel_ring_ll128_Bw;
+  // maybe get from env is better?
+  return std::vector<double>(
+      {intra_node_bus_bandwidth, inner_node_bus_bandwidth});
+}
+/*static*/ absl::Duration
+GpuPerformanceWithCollectiveModel::ComputeAllgatherTime(
+    const HloInstruction& instr, const GpuHloCostAnalysis* cost_analysis,
+    const se::DeviceDescription& gpu_device_info) {
+  // allgather: all devices send their data to all other devices.  there is
+  // allgather ring method
+  // TODO if using bruck algorithm, the time will be different
+  // communication inter_node time = bytes_accessed * (total_gpu - local_gpu) /
+  // bandwidth
+  absl::Duration total_time = kKernelLaunchOverhead;
+  auto bandswidth_vector =
+      GetInterInnerBandwidths(instr, cost_analysis, gpu_device_info);
+  double intra_node_bus_bandwidth = bandswidth_vector[0];
+  double inner_node_bus_bandwidth = bandswidth_vector[1];
+
+  auto numel_bytes = cost_analysis->bytes_accessed(instr);
+
+  int64_t total_gpu = cost_analysis->NumOfDevices(instr);
+  // TODO: hard code, inner_node_gpu=8,we can't load this attr from instr
+  int64_t kInnerNodeGpu = 8;
+  int64_t intra_nodes = (total_gpu - kInnerNodeGpu) / kInnerNodeGpu;
+  //
+  auto intra_nodes_numel_bytes =
+      numel_bytes *
+      ((total_gpu - kInnerNodeGpu) > 0 ? (total_gpu - kInnerNodeGpu) : 0);
+  auto inner_node_numel_bytes = numel_bytes * (kInnerNodeGpu - 1);
+
+  //  all-gather-start(f32[12800,2400]{0,1} replica_groups={{0,1,2,3}})
+  //  local size=12800*2400/2*4= 61.44MB;
+  //  inner_node_numel_bytes=61.44*(4-1)=184.32MB;
+  absl::Duration communication_time = absl::Milliseconds(
+      std::max(intra_nodes_numel_bytes / (intra_node_bus_bandwidth * 1e6),
+               inner_node_numel_bytes / (inner_node_bus_bandwidth * 1e6)));
+  VLOG(5) << instr.ToString() << " numel_bytes:" << numel_bytes
+          << " intra_nodes_numel_bytes: " << intra_nodes_numel_bytes
+          << " inner_node_numel_bytes: " << inner_node_numel_bytes
+          << " intra_node_bus_bandwidth: " << intra_node_bus_bandwidth
+          << "Gbps,inner_node_bus_bandwidth: " << inner_node_bus_bandwidth
+          << "Gbps  communication_time: " << communication_time;
   total_time += communication_time;
   return total_time;
 }
@@ -996,6 +1104,9 @@ GpuPerformanceWithCollectiveModel::ComputeCollectiveTime(
     case HloOpcode::kAllReduce:
     case HloOpcode::kAllReduceStart:
       return ComputeAllreduceTime(instr, cost_analysis, gpu_device_info);
+    case HloOpcode::kAllGather:
+    case HloOpcode::kAllGatherStart:
+      return ComputeAllgatherTime(instr, cost_analysis, gpu_device_info);
     default: {
       LOG(WARNING)
           << "Runtime estimate for " << instr.name()
