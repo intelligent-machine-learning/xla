@@ -245,7 +245,8 @@ class GpuPerformanceWithCollectiveModel : public GpuPerformanceModel {
   // ll128 is by default enabled for Volta, Ampere and Hopper, ll128 by default
   // launches 640 threads.
   static constexpr int64_t kLL128NumThreads = 640;
-
+  // TODO: hard code, inner_node_gpu=8,we can't load this attr from instr
+  static constexpr int64_t kInnerNodeGpu = 8;
   static absl::Duration ComputeCollectiveTime(
       const HloInstruction& instr, const GpuHloCostAnalysis* cost_analysis,
       const se::DeviceDescription& gpu_device_info);
@@ -270,8 +271,9 @@ class GpuPerformanceWithCollectiveModel : public GpuPerformanceModel {
   static absl::Duration ComputeAllgatherTime(
       const HloInstruction& instr, const GpuHloCostAnalysis* cost_analysis,
       const se::DeviceDescription& gpu_device_info);
-  // TODO: support reduce scatter
-
+  static absl::Duration ComputeReducescatterTime(
+      const HloInstruction& instr, const GpuHloCostAnalysis* cost_analysis,
+      const se::DeviceDescription& gpu_device_info);
   // return internode/innernode bandwidths in GB/s
   static std::vector<double> GetInterInnerBandwidths(
       const HloInstruction& instr, const GpuHloCostAnalysis* cost_analysis,

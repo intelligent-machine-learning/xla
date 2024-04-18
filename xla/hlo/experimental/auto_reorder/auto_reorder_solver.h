@@ -22,8 +22,14 @@ using IntVar = operations_research::sat::IntVar;
 using CpModelBuilder = operations_research::sat::CpModelBuilder;
 using IntervalVar = operations_research::sat::IntervalVar;
 namespace reorder {
-const uint32_t ksolveTimeout = 180;  // 30s
-
+const uint32_t ksolveTimeout = 180;  // 3min
+uint32_t get_autoreorder_timeout() {
+  const char* env = std::getenv("XLA_AUTOREORDER_TIMEOUT");
+  if (env == nullptr) {
+    return ksolveTimeout;
+  }
+  return std::atoi(env);
+};
 static const int kChannelNumber = 2;
 int get_horizon(int max_time) {
   // scale should be fit with module?

@@ -212,6 +212,19 @@ ENTRY %elementwise {
         module->AddEmbeddedComputation(sum_builder.Build());
     return reduction;
   }
+  HloComputation* MakeReduceScatter(const HloOpcode type, Shape input_shape,
+                                    Shape output_shape, HloModule* module) {
+    HloComputation::Builder async_builder("AsyncOp");
+    HloInstruction* param = async_builder.AddInstruction(
+        HloInstruction::CreateParameter(0, input_shape, "pasync"));
+    async_builder.AddInstruction(HloInstruction::CreateReduceScatter(
+        output_shape, {param}, MakeReduction(type, module), {}, false,
+        std::nullopt, false, 0));
+    HloComputation* reduction =
+        module->AddEmbeddedComputation(async_builder.Build());
+
+    return reduction;
+  }
   std::string GetInstructionsOrderString(HloModule* hlo_module) {
     auto insts = hlo_module->schedule()
                      .sequence(hlo_module->entry_computation())
@@ -418,8 +431,9 @@ ENTRY %elementwise {
     // d23 = dot(p2,p3)
     //
     auto add_reducer = MakeReduction(HloOpcode::kAdd, module);
-    HloComputation::Builder builder("test");
+    HloComputation::Builder builder(TestName());
     Shape shape = ShapeUtil::MakeShape(F32, {4, 256, 256});
+    Shape reduce_shape = ShapeUtil::MakeShape(F32, {2, 256, 256});
     DotDimensionNumbers dot_dnums;
     dot_dnums.add_lhs_contracting_dimensions(1);
     dot_dnums.add_rhs_contracting_dimensions(0);
@@ -469,9 +483,38 @@ ENTRY %elementwise {
     // d23_dot_p1 add p3
     auto d23_dot_p1_add_p3 = builder.AddInstruction(
         HloInstruction::CreateBinary(shape, HloOpcode::kAdd, d23_dot_p1, p3));
+    auto rs_computation =
+        MakeReduceScatter(HloOpcode::kAdd, shape, reduce_shape, module);
+
+    const Shape async_start_shape = ShapeUtil::MakeTupleShape(
+        {ShapeUtil::MakeTupleShape({shape}), reduce_shape});
+    HloInstruction* async_start0 =
+        builder.AddInstruction(HloInstruction::CreateAsyncStart(
+            async_start_shape, {d01_dot_p0_add_p2}, rs_computation,
+            /*async_group_id=*/std::nullopt,
+            /*async_execution_thread=*/"parallel_thread"));
+    auto reducescater_ret0 =
+        builder.AddInstruction(HloInstruction::CreateAsyncDone(
+            reduce_shape, async_start0, rs_computation,
+            /*async_group_id=*/std::nullopt,
+            /*async_execution_thread=*/"parallel_thread"));
+    HloInstruction* async_start1 =
+        builder.AddInstruction(HloInstruction::CreateAsyncStart(
+            async_start_shape, {d23_dot_p1_add_p3}, rs_computation,
+            /*async_group_id=*/std::nullopt,
+            /*async_execution_thread=*/"parallel_thread"));
+    auto reducescater_ret1 =
+        builder.AddInstruction(HloInstruction::CreateAsyncDone(
+            reduce_shape, async_start1, rs_computation,
+            /*async_group_id=*/std::nullopt,
+            /*async_execution_thread=*/"parallel_thread"));
+
+    auto add_reduce_scatter =
+        builder.AddInstruction(HloInstruction::CreateBinary(
+            shape, HloOpcode::kAdd, reducescater_ret1, reducescater_ret0));
     // root:  d01_dot_p0,d23_dot_p1
-    auto ret = builder.AddInstruction(
-        HloInstruction::CreateTuple({d01_dot_p0_add_p2, d23_dot_p1_add_p3}));
+    auto ret = builder.AddInstruction(HloInstruction::CreateTuple(
+        {d01_dot_p0_add_p2, d23_dot_p1_add_p3, add_reduce_scatter}));
     auto computation = builder.Build();
     computation->set_root_instruction(ret);
     auto entry_computation =

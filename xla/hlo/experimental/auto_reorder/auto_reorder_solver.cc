@@ -37,14 +37,14 @@ LinearProgramScheduler<ContainerType, ElementType>::~LinearProgramScheduler() {
 };
 template <class T>
 void LPContainer<T>::AddDep(LPContainer<T>* dep, CostType cost,
-                            NodeType nodetype) {
+                            NodeType edgetype) {
   if (frozen_) {
     LOG(FATAL) << "Can not add dep to a frozen node";
     // raise exception
     return;
   }
   // every node should start after dep+cost
-  deps_.push_back(std::make_tuple(dep, cost, nodetype));
+  deps_.push_back(std::make_tuple(dep, cost, edgetype));
 };
 
 LPSchedulerFunc(StatusOr<ContainerType*>)::FindInstructionLPNode(
@@ -171,12 +171,13 @@ LPSchedulerFunc(tsl::Status)::Solve() {
   }
   cp_model_.AddMaxEquality(obj_var, ends);
   cp_model_.Minimize(obj_var);
+
   // cp_model_.
   // VLOG(2)<<"Number of variables:"<<cp_model_.NumVariables()<<" Number of
   // constraint:"<<cp_model_.NumConstraints();
   VLOG(1) << "Solving:" << node_to_task_.size() << " nodes";
   operations_research::sat::SatParameters parameters;
-  parameters.set_max_time_in_seconds(reorder::ksolveTimeout);
+  parameters.set_max_time_in_seconds(reorder::get_autoreorder_timeout());
   parameters.set_random_seed(19260817);
   // Currently, at level 1 we detect them in presolve and try
   // to fix Booleans. At level 2, we also do some form of dynamic symmetry

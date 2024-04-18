@@ -914,6 +914,7 @@ GpuPerformanceWithCollectiveModel::ComputeAllreduceTime(
     const se::DeviceDescription& gpu_device_info) {
   // We use nccl group call to launch multiple allreduces so launch overhead
   // only occurs once.
+  VLOG(5) << instr.ToString() << " ComputeAllreduceTime begin";
   absl::Duration total_time = kKernelLaunchOverhead;
   stream_executor::CudaComputeCapability compute_cap =
       gpu_device_info.cuda_compute_capability();
@@ -1053,6 +1054,7 @@ GpuPerformanceWithCollectiveModel::ComputeAllgatherTime(
   // TODO if using bruck algorithm, the time will be different
   // communication inter_node time = bytes_accessed * (total_gpu - local_gpu) /
   // bandwidth
+  VLOG(5) << instr.ToString() << " ComputeAllgatherTime begin";
   absl::Duration total_time = kKernelLaunchOverhead;
   auto bandswidth_vector =
       GetInterInnerBandwidths(instr, cost_analysis, gpu_device_info);
@@ -1062,14 +1064,14 @@ GpuPerformanceWithCollectiveModel::ComputeAllgatherTime(
   auto numel_bytes = cost_analysis->bytes_accessed(instr);
 
   int64_t total_gpu = cost_analysis->NumOfDevices(instr);
-  // TODO: hard code, inner_node_gpu=8,we can't load this attr from instr
-  int64_t kInnerNodeGpu = 8;
+
   int64_t intra_nodes = (total_gpu - kInnerNodeGpu) / kInnerNodeGpu;
   //
   auto intra_nodes_numel_bytes =
       numel_bytes *
       ((total_gpu - kInnerNodeGpu) > 0 ? (total_gpu - kInnerNodeGpu) : 0);
-  auto inner_node_numel_bytes = numel_bytes * (kInnerNodeGpu - 1);
+  auto inner_node_numel_bytes =
+      numel_bytes * (std::min(kInnerNodeGpu, total_gpu) - 1);
 
   //  all-gather-start(f32[12800,2400]{0,1} replica_groups={{0,1,2,3}})
   //  local size=12800*2400/2*4= 61.44MB;
@@ -1086,12 +1088,48 @@ GpuPerformanceWithCollectiveModel::ComputeAllgatherTime(
   total_time += communication_time;
   return total_time;
 }
+/*static*/ absl::Duration
+GpuPerformanceWithCollectiveModel::ComputeReducescatterTime(
+    const HloInstruction& instr, const GpuHloCostAnalysis* cost_analysis,
+    const se::DeviceDescription& gpu_device_info) {
+  VLOG(5) << instr.ToString() << " ComputeReducescatterTime begin";
+  absl::Duration total_time = kKernelLaunchOverhead;
+  auto bandswidth_vector =
+      GetInterInnerBandwidths(instr, cost_analysis, gpu_device_info);
+  double intra_node_bus_bandwidth = bandswidth_vector[0];
+  double inner_node_bus_bandwidth = bandswidth_vector[1];
+  auto numel_bytes = cost_analysis->bytes_accessed(instr);
+  auto num_devices = cost_analysis->NumOfDevices(instr);
+  auto local_gpu = std::min(kInnerNodeGpu, num_devices);
+  if (num_devices <= 1) {
+    return kKernelLaunchOverhead;
+  }
+  if (intra_node_bus_bandwidth == 0 || inner_node_bus_bandwidth == 0) {
+    return kKernelLaunchOverhead;
+  }
+  // compute and comm on op will overlap,ignore compute
 
+  auto intra_nodes_numel_bytes =
+      numel_bytes * (num_devices - kInnerNodeGpu) / num_devices;
+  auto inner_node_numel_bytes = numel_bytes * (local_gpu - 1) / num_devices;
+
+  absl::Duration communication_time = absl::Milliseconds(
+      std::max(intra_nodes_numel_bytes / (intra_node_bus_bandwidth * 1e6),
+               inner_node_numel_bytes / (inner_node_bus_bandwidth * 1e6)));
+  VLOG(5) << instr.ToString() << " numel_bytes:" << numel_bytes
+          << " intra_nodes_numel_bytes: " << intra_nodes_numel_bytes
+          << " inner_node_numel_bytes: " << inner_node_numel_bytes
+          << " intra_node_bus_bandwidth: " << intra_node_bus_bandwidth
+          << "Gbps,inner_node_bus_bandwidth: " << inner_node_bus_bandwidth
+          << "Gbps  communication_time: " << communication_time;
+  total_time += communication_time;
+  return total_time;
+}
 /*static*/ absl::Duration
 GpuPerformanceWithCollectiveModel::ComputeCollectiveTime(
     const HloInstruction& instr, const GpuHloCostAnalysis* cost_analysis,
     const se::DeviceDescription& gpu_device_info) {
-  if (cost_analysis->NumOfDevices(instr) == 1) {
+  if (cost_analysis->NumOfDevices(instr) <= 1) {
     VLOG(8) << "Returning only kernel launch overhead for a single partition.";
     return kKernelLaunchOverhead;
   }
@@ -1107,9 +1145,20 @@ GpuPerformanceWithCollectiveModel::ComputeCollectiveTime(
     case HloOpcode::kAllGather:
     case HloOpcode::kAllGatherStart:
       return ComputeAllgatherTime(instr, cost_analysis, gpu_device_info);
+    case HloOpcode::kReduceScatter:
+      return ComputeReducescatterTime(instr, cost_analysis, gpu_device_info);
+    // asyncop+reducescatter
+    case HloOpcode::kAsyncStart: {
+      if (instr.async_wrapped_instruction()->opcode() ==
+          HloOpcode::kReduceScatter) {
+        return ComputeReducescatterTime(*instr.async_wrapped_instruction(),
+                                        cost_analysis, gpu_device_info);
+      }
+    }
+
     default: {
       LOG(WARNING)
-          << "Runtime estimate for " << instr.name()
+          << "Runtime estimate for " << instr.name() << instr.opcode()
           << " not implemented. Returning only the kernel launch time.";
       return kKernelLaunchOverhead;
     }
