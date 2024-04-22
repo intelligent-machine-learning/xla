@@ -1,4 +1,4 @@
-/* Copyright 2022 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2022 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,9 +21,16 @@ limitations under the License.
 #include <string>
 #include <utility>
 
+#include "absl/container/flat_hash_map.h"
+#include "absl/functional/any_invocable.h"
 #include "absl/memory/memory.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_join.h"
 #include "absl/types/span.h"
+#include "xla/layout.h"
+#include "xla/pjrt/pjrt_client.h"
+#include "xla/pjrt/pjrt_layout.h"
+#include "xla/python/ifrt/client.h"
 #include "xla/python/ifrt/sharding.h"
 #include "xla/python/pjrt_ifrt/pjrt_array.h"
 #include "xla/python/pjrt_ifrt/pjrt_tuple.h"
@@ -34,6 +41,16 @@ limitations under the License.
 
 namespace xla {
 namespace ifrt {
+namespace {
+
+// A nullptr std::function implicitly converts to a non-nullptr
+// absl::AnyInvocable, which later crashes when being invoked. absl team
+// explicitly said this is WAI. See b/258212655#comment10.
+absl::AnyInvocable<void() &&> FromStdFunction(std::function<void()>&& f) {
+  return f ? std::move(f) : absl::AnyInvocable<void() &&>();
+}
+
+}  // namespace
 
 char PjRtCompatibleClient::ID = 0;
 char PjRtClient::ID = 0;
@@ -43,21 +60,43 @@ std::unique_ptr<PjRtClient> PjRtClient::Create(
   return absl::WrapUnique(new PjRtClient(std::move(pjrt_client)));
 }
 
-StatusOr<tsl::RCReference<PjRtCompatibleArray>> PjRtClient::CreatePjRtArray(
-    std::shared_ptr<PjRtBuffer> pjrt_buffer) {
+absl::flat_hash_map<std::string, Client::ClientAttribute>
+PjRtClient::attributes() const {
+  absl::flat_hash_map<std::string, ClientAttribute> attributes;
+  attributes.insert({"supports_executable_serialization", true});
+
+  if (std::optional<PjRtPluginAttributes> plugin_attributes =
+          pjrt_client_->plugin_attributes();
+      plugin_attributes.has_value()) {
+    attributes.insert(
+        {"pjrt_c_api_major_version",
+         ClientAttribute(plugin_attributes->pjrt_c_api_major_version)});
+    attributes.insert(
+        {"pjrt_c_api_minor_version",
+         ClientAttribute(plugin_attributes->pjrt_c_api_minor_version)});
+    for (const auto& [key, value] : plugin_attributes->attributes) {
+      attributes.insert({key, value});
+    }
+  }
+
+  return attributes;
+}
+
+absl::StatusOr<tsl::RCReference<PjRtCompatibleArray>>
+PjRtClient::CreatePjRtArray(std::shared_ptr<PjRtBuffer> pjrt_buffer) {
   TF_ASSIGN_OR_RETURN(auto array,
                       PjRtArray::Create(this, std::move(pjrt_buffer)));
   return tsl::RCReference<PjRtCompatibleArray>(std::move(array));
 }
 
-StatusOr<tsl::RCReference<PjRtCompatibleArray>> PjRtClient::CreatePjRtArray(
-    Shape shape, PjRtBuffers pjrt_buffers) {
+absl::StatusOr<tsl::RCReference<PjRtCompatibleArray>>
+PjRtClient::CreatePjRtArray(Shape shape, PjRtBuffers pjrt_buffers) {
   TF_ASSIGN_OR_RETURN(auto array, PjRtArray::Create(this, std::move(shape),
                                                     std::move(pjrt_buffers)));
   return tsl::RCReference<PjRtCompatibleArray>(std::move(array));
 }
 
-StatusOr<tsl::RCReference<Array>> PjRtClient::MakeArrayFromHostBuffer(
+absl::StatusOr<tsl::RCReference<Array>> PjRtClient::MakeArrayFromHostBuffer(
     const void* data, DType dtype, Shape shape,
     std::optional<absl::Span<const int64_t>> byte_strides,
     std::shared_ptr<const Sharding> sharding,
@@ -96,23 +135,24 @@ StatusOr<tsl::RCReference<Array>> PjRtClient::MakeArrayFromHostBuffer(
                         }));
     }
     TF_ASSIGN_OR_RETURN(
-        buffer, pjrt_client_->BufferFromHostBuffer(
-                    data, primitive_type, shape.dims(), byte_strides, semantics,
-                    std::move(on_done_with_host_buffer), memory_space,
-                    /*device_layout=*/nullptr));
-  } else {
-    TF_ASSIGN_OR_RETURN(
         buffer,
         pjrt_client_->BufferFromHostBuffer(
             data, primitive_type, shape.dims(), byte_strides, semantics,
-            std::move(on_done_with_host_buffer), sharding->devices().front()));
+            FromStdFunction(std::move(on_done_with_host_buffer)), memory_space,
+            /*device_layout=*/nullptr));
+  } else {
+    TF_ASSIGN_OR_RETURN(
+        buffer, pjrt_client_->BufferFromHostBuffer(
+                    data, primitive_type, shape.dims(), byte_strides, semantics,
+                    FromStdFunction(std::move(on_done_with_host_buffer)),
+                    sharding->devices().front()));
   }
   return PjRtArray::Create(
       this, dtype, std::move(shape), std::move(sharding),
       PjRtArray::PjRtBuffers({std::shared_ptr<PjRtBuffer>(buffer.release())}));
 }
 
-StatusOr<tsl::RCReference<Array>>
+absl::StatusOr<tsl::RCReference<Array>>
 PjRtClient::AssembleArrayFromSingleDeviceArrays(
     Shape shape, std::shared_ptr<const Sharding> sharding,
     absl::Span<tsl::RCReference<Array>> arrays, ArrayCopySemantics semantics) {
@@ -181,18 +221,28 @@ PjRtClient::AssembleArrayFromSingleDeviceArrays(
                            std::move(buffers));
 }
 
-StatusOr<tsl::RCReference<Tuple>> PjRtClient::MakeTuple(
+absl::StatusOr<tsl::RCReference<Tuple>> PjRtClient::MakeTuple(
     absl::Span<tsl::RCReference<Value>> values) {
   return PjRtTuple::Create(this, values);
 }
 
-StatusOr<std::shared_ptr<const xla::PjRtTopologyDescription>>
+absl::StatusOr<std::shared_ptr<const xla::PjRtTopologyDescription>>
 PjRtClient::GetTopologyForDevices(absl::Span<Device* const> devices) const {
   // TODO(parkers): Consider constructing a sub-slice topology based on the
   // provided devices.
   TF_ASSIGN_OR_RETURN(auto topology, pjrt_client_->GetTopologyDescription());
   return std::shared_ptr<const xla::PjRtTopologyDescription>(pjrt_client_,
                                                              topology);
+}
+
+absl::StatusOr<std::unique_ptr<PjRtLayout>>
+PjRtClient::GetDefaultLayoutForDevice(DType dtype,
+                                      absl::Span<const int64_t> dims,
+                                      Device* device) const {
+  TF_ASSIGN_OR_RETURN(PrimitiveType element_type, ToPrimitiveType(dtype));
+  TF_ASSIGN_OR_RETURN(xla::Layout layout,
+                      pjrt_client_->GetDefaultLayout(element_type, dims));
+  return std::make_unique<PjRtXlaLayout>(std::move(layout));
 }
 
 }  // namespace ifrt

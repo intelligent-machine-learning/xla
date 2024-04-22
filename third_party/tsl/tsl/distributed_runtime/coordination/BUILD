@@ -1,10 +1,10 @@
-load("//tsl/platform:rules_cc.bzl", "cc_library")
+load("//tsl:tsl.bzl", "if_oss", "internal_visibility", "tsl_gpu_library")
 load("//tsl/platform:build_config.bzl", "tf_proto_library", "tsl_cc_test")
-load("//tsl:tsl.bzl", "if_oss", "set_external_visibility", "tsl_gpu_library")
+load("//tsl/platform:rules_cc.bzl", "cc_library")
 
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
-    default_visibility = set_external_visibility([
+    default_visibility = internal_visibility([
         "//tsl:internal",
     ]),
     licenses = ["notice"],
@@ -78,13 +78,13 @@ tsl_gpu_library(
         "//tsl/platform:thread_annotations",
         "//tsl/protobuf:coordination_config_proto_cc",
         "//tsl/protobuf:coordination_service_proto_cc",
-        "//tsl/util:device_name_utils",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
-        "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/log",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/time",
+        "@xla//xla/tsl/util:device_name_utils",
     ],
     alwayslink = 1,
 )
@@ -140,7 +140,6 @@ tsl_gpu_library(
         "//tsl/framework:cancellation",
         "//tsl/lib/monitoring:gauge",
         "//tsl/platform:env",
-        "//tsl/platform:errors",
         "//tsl/platform:mutex",
         "//tsl/platform:random",
         "//tsl/platform:status",
@@ -149,6 +148,7 @@ tsl_gpu_library(
         "//tsl/protobuf:coordination_config_proto_cc",
         "//tsl/protobuf:coordination_service_proto_cc",
         "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/synchronization",
@@ -169,11 +169,15 @@ tsl_cc_test(
         "//tsl/platform:errors",
         "//tsl/platform:protobuf",
         "//tsl/platform:status",
+        "//tsl/platform:statusor",
         "//tsl/platform:test",
         "//tsl/platform:test_main",
         "//tsl/protobuf:coordination_config_proto_cc_impl",
         "//tsl/protobuf:coordination_service_proto_cc_impl",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/time",
     ],
 )

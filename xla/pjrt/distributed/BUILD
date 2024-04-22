@@ -1,7 +1,7 @@
-load("//xla:xla.bzl", "xla_cc_test")
 load("@tsl//tsl:tsl.default.bzl", "tsl_grpc_cc_dependencies")
 load("@tsl//tsl/platform:build_config.bzl", "tf_proto_library")
 load("@tsl//tsl/platform:rules_cc.bzl", "cc_library")
+load("//xla:xla.bzl", "xla_cc_test")
 
 licenses(["notice"])
 
@@ -47,13 +47,10 @@ xla_cc_test(
     name = "topology_util_test",
     srcs = ["topology_util_test.cc"],
     deps = [
+        ":in_memory_key_value_store",
         ":protocol_proto_cc",
         ":topology_util",
-        "//xla:status",
-        "//xla:statusor",
-        "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/status",
-        "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/time",
         "@tsl//tsl/lib/core:status_test_util",
         "@tsl//tsl/platform:env",
@@ -71,10 +68,14 @@ cc_library(
         "client.h",
     ],
     deps = [
+        ":key_value_store_interface",
         ":util",
         "//xla:statusor",
         "//xla:types",
         "//xla:util",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
         "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/time",
         "@tsl//tsl/distributed_runtime/coordination:coordination_client",
@@ -106,6 +107,7 @@ cc_library(
         ":client",
         ":service",
         "//xla:statusor",
+        "@tsl//tsl/platform:grpc_credentials",
     ] + tsl_grpc_cc_dependencies(),
 )
 
@@ -114,6 +116,7 @@ cc_library(
     srcs = ["topology_util.cc"],
     hdrs = ["topology_util.h"],
     deps = [
+        ":key_value_store_interface",
         ":protocol_proto_cc",
         "//xla:status",
         "//xla:statusor",
@@ -154,4 +157,29 @@ xla_cc_test(
         "@tsl//tsl/platform:test",
         "@tsl//tsl/platform:test_main",
     ] + tsl_grpc_cc_dependencies(),
+)
+
+cc_library(
+    name = "key_value_store_interface",
+    hdrs = ["key_value_store_interface.h"],
+    deps = [
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/time",
+    ],
+)
+
+cc_library(
+    name = "in_memory_key_value_store",
+    srcs = ["in_memory_key_value_store.cc"],
+    hdrs = ["in_memory_key_value_store.h"],
+    deps = [
+        ":key_value_store_interface",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/synchronization",
+        "@com_google_absl//absl/time",
+    ],
 )

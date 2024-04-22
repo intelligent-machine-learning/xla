@@ -1,9 +1,9 @@
 # Description:
 #   XLA client libraries.
 
-load("//xla:xla.bzl", "xla_cc_test")
 load("@tsl//tsl:tsl.default.bzl", "filegroup")
 load("@tsl//tsl/platform:rules_cc.bzl", "cc_library")
+load("//xla:xla.bzl", "xla_cc_test")
 
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
@@ -39,7 +39,6 @@ cc_library(
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/types:span",
         "@tsl//tsl/platform:logging",
-        "@tsl//tsl/platform:status",
     ],
 )
 
@@ -84,7 +83,6 @@ cc_library(
         "//xla:xla_data_proto_cc",
         "//xla:xla_proto_cc",
         "//xla/service:hlo_proto_cc",
-        "@com_google_absl//absl/memory",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:span",
         "@tsl//tsl/platform:errors",
@@ -101,14 +99,19 @@ cc_library(
         "//xla:debug_options_flags",
         "//xla:execution_options_util",
         "//xla:shape_util",
+        "//xla:statusor",
+        "//xla:util",
         "//xla:xla_proto_cc",
         "//xla/pjrt:compile_options_proto_cc",
         "//xla/service:compilation_environments",
         "//xla/service:computation_placer",
         "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/container:inlined_vector",
+        "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/strings:str_format",
         "@tsl//tsl/platform:env",
+        "@tsl//tsl/platform:errors",
+        "@tsl//tsl/platform:status",
         "@tsl//tsl/platform:statusor",
     ],
 )
@@ -179,7 +182,6 @@ cc_library(
         "//xla/stream_executor",
         "//xla/stream_executor:device_memory_allocator",
         "@com_google_absl//absl/container:flat_hash_map",
-        "@com_google_absl//absl/memory",
         "@tsl//tsl/platform:logging",
     ],
 )
@@ -209,7 +211,6 @@ cc_library(
         "//xla:util",
         "//xla:xla_data_proto_cc",
         "//xla/service:hlo_proto_cc",
-        "@com_google_absl//absl/memory",
     ],
 )
 
@@ -287,12 +288,15 @@ xla_cc_test(
     name = "xla_builder_test",
     srcs = ["xla_builder_test.cc"],
     deps = [
+        ":padding",
         ":sharding_builder",
         ":value_inference",
         ":xla_builder",
         ":xla_computation",
+        "//xla:comparison_util",
         "//xla:debug_options_flags",
         "//xla:shape_util",
+        "//xla:status",
         "//xla:statusor",
         "//xla:test",
         "//xla:test_helpers",
@@ -303,7 +307,13 @@ xla_cc_test(
         "//xla/service:pattern_matcher",
         "//xla/service:pattern_matcher_gmock",
         "//xla/tests:xla_internal_test_main",
+        "@com_google_absl//absl/algorithm:container",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/types:span",
         "@com_google_googletest//:gtest",
+        "@tsl//tsl/platform:status_matchers",
         "@tsl//tsl/platform:statusor",
     ],
 )

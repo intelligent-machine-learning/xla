@@ -1,4 +1,4 @@
-/* Copyright 2017 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2017 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -61,7 +61,7 @@ bool IsRemovableWhile(HloInstruction* instruction,
 
 }  // namespace
 
-/*static*/ StatusOr<bool> HloDCE::RunOnComputation(
+/*static*/ absl::StatusOr<bool> HloDCE::RunOnComputation(
     HloComputation* computation, bool remove_cross_partition_collective_ops) {
   bool changed = false;
   VLOG(3) << "Before dce:";
@@ -75,6 +75,7 @@ bool IsRemovableWhile(HloInstruction* instruction,
     if (instruction->IsDead() && computation->IsSafelyRemovable(instruction) &&
         (!instruction->IsCustomCall("Sharding") ||
          (!instruction->operand(0)->IsRoot() &&
+          instruction->operand(0)->opcode() != HloOpcode::kParameter &&
           instruction->operand(0)->user_count() == 1)) &&
         (!instruction->HasSideEffect() ||
          (remove_cross_partition_collective_ops && maybe_collective_op &&
@@ -127,7 +128,8 @@ Status HloDCE::RecursivelyRemoveDeadComputation(
   return module->RemoveEmbeddedComputation(computation);
 }
 
-StatusOr<bool> HloDCE::RecursivelyRemoveDeadComputations(HloModule* module) {
+absl::StatusOr<bool> HloDCE::RecursivelyRemoveDeadComputations(
+    HloModule* module) {
   // Tracks whether any dead code is eliminated by this pass.
   bool module_contains_dead_code = false;
 
@@ -150,7 +152,6 @@ StatusOr<bool> HloDCE::RecursivelyRemoveDeadComputations(HloModule* module) {
   }
 
   // Find dead computations.
-  absl::flat_hash_set<HloComputation*> dead_computations;
   for (auto* computation : module->MakeComputationPostOrder()) {
     // Finds all "top-level" dead computations not called by any instructions.
     // contains(comp) = true and live_computation_call_count[comp] = 0 also
@@ -166,7 +167,7 @@ StatusOr<bool> HloDCE::RecursivelyRemoveDeadComputations(HloModule* module) {
   return module_contains_dead_code;
 }
 
-StatusOr<bool> HloDCE::Run(
+absl::StatusOr<bool> HloDCE::Run(
     HloModule* module,
     const absl::flat_hash_set<absl::string_view>& execution_threads) {
   bool changed = false;

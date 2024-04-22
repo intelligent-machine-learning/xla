@@ -1,4 +1,4 @@
-/* Copyright 2017 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2017 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -59,13 +59,14 @@ bool ComputationLayout::AnyLayoutSet() const {
          result_layout_.LayoutIsSet();
 }
 
-StatusOr<std::vector<Layout>> ComputationLayout::FlattenedParameterLayouts()
-    const {
+absl::StatusOr<std::vector<Layout>>
+ComputationLayout::FlattenedParameterLayouts() const {
   std::vector<Layout> result;
   for (int i = 0; i < parameter_count(); ++i) {
     TF_RETURN_IF_ERROR(ShapeUtil::ForEachSubshapeWithStatus(
         parameter_shape(i),
-        [this, &result](const Shape& subshape, const ShapeIndex& index) {
+        [this, &result](const Shape& subshape,
+                        const ShapeIndex& index) -> absl::Status {
           if (subshape.IsTuple()) {
             return OkStatus();
           }
@@ -88,12 +89,13 @@ StatusOr<std::vector<Layout>> ComputationLayout::FlattenedParameterLayouts()
   return result;
 }
 
-StatusOr<std::vector<Layout>> ComputationLayout::FlattenedResultLayouts()
+absl::StatusOr<std::vector<Layout>> ComputationLayout::FlattenedResultLayouts()
     const {
   std::vector<Layout> result;
   TF_RETURN_IF_ERROR(ShapeUtil::ForEachSubshapeWithStatus(
       result_shape(),
-      [this, &result](const Shape& subshape, const ShapeIndex& index) {
+      [this, &result](const Shape& subshape,
+                      const ShapeIndex& index) -> absl::Status {
         if (subshape.IsTuple()) {
           return OkStatus();
         }

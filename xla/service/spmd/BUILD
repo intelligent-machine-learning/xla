@@ -34,28 +34,36 @@ cc_library(
         "spmd_partitioner_util.h",
     ],
     deps = [
+        "//xla:array",
         "//xla:comparison_util",
         "//xla:literal",
         "//xla:literal_util",
         "//xla:protobuf_util",
         "//xla:shape_util",
         "//xla:status",
+        "//xla:status_macros",
+        "//xla:statusor",
+        "//xla:types",
         "//xla:util",
         "//xla:window_util",
         "//xla:xla_data_proto_cc",
         "//xla/client:xla_builder",
+        "//xla/client:xla_computation",
         "//xla/client/lib:comparators",
         "//xla/hlo/ir:hlo",
         "//xla/hlo/ir:hlo_reachability",
         "//xla/hlo/utils:hlo_query",
         "//xla/hlo/utils:hlo_sharding_util",
         "//xla/service:call_graph",
+        "//xla/service:collective_ops_utils",
+        "//xla/service:computation_layout",
         "//xla/service:custom_call_sharding_helper",
         "//xla/service:dot_as_convolution_util",
         "//xla/service:flatten_call_graph",
         "//xla/service:hlo_cse",
         "//xla/service:hlo_dce",
         "//xla/service:hlo_lexer",
+        "//xla/service:hlo_module_config",
         "//xla/service:hlo_pass",
         "//xla/service:hlo_pass_pipeline",
         "//xla/service:pattern_matcher",
@@ -69,8 +77,13 @@ cc_library(
         "@com_google_absl//absl/container:inlined_vector",
         "@com_google_absl//absl/container:node_hash_map",
         "@com_google_absl//absl/functional:function_ref",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:span",
+        "@com_google_absl//absl/utility",
+        "@tsl//tsl/platform:errors",
         "@tsl//tsl/platform:numbers",
         "@tsl//tsl/platform:statusor",
     ],
@@ -111,7 +124,6 @@ xla_cc_test(
         "//xla/tests:hlo_test_base",
         "//xla/tests:xla_internal_test_main",
         "@tsl//tsl/lib/core:status_test_util",
-        "@tsl//tsl/platform:test",
     ],
 )
 
@@ -141,7 +153,6 @@ xla_cc_test(
         "//xla/tests:hlo_test_base",
         "//xla/tests:xla_internal_test_main",
         "@tsl//tsl/lib/core:status_test_util",
-        "@tsl//tsl/platform:test",
     ],
 )
 
@@ -179,7 +190,6 @@ cc_library(
     srcs = ["spmd_prepare.cc"],
     hdrs = ["spmd_prepare.h"],
     deps = [
-        ":spmd_partitioner",
         "//xla/hlo/ir:hlo",
         "//xla/hlo/utils:hlo_sharding_util",
         "//xla/service:hlo_pass",
@@ -196,7 +206,6 @@ cc_library(
         ":spmd_partitioner",
         "//xla/hlo/ir:hlo",
         "//xla/service:hlo_pass",
-        "@com_google_absl//absl/memory",
     ],
 )
 
@@ -217,7 +226,6 @@ xla_cc_test(
         "//xla/tests:hlo_test_base",
         "//xla/tests:xla_internal_test_main",
         "@tsl//tsl/lib/core:status_test_util",
-        "@tsl//tsl/platform:test",
     ],
 )
 
@@ -271,8 +279,6 @@ xla_cc_test(
         "//xla:xla_proto_cc",
         "//xla/tests:hlo_test_base",
         "//xla/tests:xla_internal_test_main",
-        "@tsl//tsl/lib/core:status_test_util",
-        "@tsl//tsl/platform:test",
     ],
 )
 
@@ -305,5 +311,16 @@ xla_cc_test(
         "//xla/tests:hlo_test_base",
         "//xla/tests:xla_internal_test_main",
         "@tsl//tsl/lib/core:status_test_util",
+    ],
+)
+
+xla_cc_test(
+    name = "spmd_partitioner_util_test",
+    srcs = ["spmd_partitioner_util_test.cc"],
+    deps = [
+        ":spmd_partitioner",
+        "//xla/hlo/ir:hlo",
+        "//xla/hlo/ir:tile_assignment",
+        "@com_google_googletest//:gtest_main",
     ],
 )

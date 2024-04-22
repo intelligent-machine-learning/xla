@@ -1,4 +1,4 @@
-/* Copyright 2017 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2017 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ limitations under the License.
 #include <string>
 #include <utility>
 #include <vector>
+#include <tuple>
 
 #include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_map.h"
@@ -36,6 +37,11 @@ limitations under the License.
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
+#include "xla/hlo/ir/hlo_casting_utils.h"
+
+
+#include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_input_output_alias_config.h"
 #include "xla/hlo/ir/hlo_instruction.h"
@@ -44,6 +50,7 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_schedule.h"
 #include "xla/hlo/utils/hlo_query.h"
 #include "xla/service/buffer_value.h"
+#include "xla/service/collective_ops_utils.h"
 #include "xla/hlo/experimental/auto_reorder/auto_reorder.h"
 #include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/service/gpu/cublas_cudnn.h"
@@ -58,26 +65,30 @@ limitations under the License.
 #include "xla/shape_util.h"
 #include "xla/status.h"
 #include "xla/statusor.h"
+#include "xla/hlo/ir/hlo_schedule.h"
+#include "xla/shape.h"
 #include "xla/stream_executor/device_description.h"
 #include "xla/util.h"
 #include "tsl/platform/env.h"
+#include "tsl/platform/path.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/protobuf.h"
-
+#include "tsl/platform/statusor.h"
 namespace xla {
 namespace gpu {
 
 int64_t GetSizeOfShape(const Shape& shape, int pointer_size);
 
-// Determines the schedule of HLO instructions for a module run on the GPU.
-Status ScheduleGpuModule(HloModule* module, int64_t pointer_size,
-                         int64_t memory_limit,
-                         const se::DeviceDescription& gpu_device_info);
-HloInstructionSequence PostProcessSchedule(const HloInstructionSequence& input);
+struct ScheduleMetadata {
+  int64_t scheduler_mem_limit;
+};
 
-int64_t GetSchedulerMemoryLimit(const HloModule* module,
-                                const se::DeviceDescription& gpu_device_info,
-                                int pointer_size);
+// Determines the schedule of HLO instructions for a module run on the GPU.
+absl::StatusOr<ScheduleMetadata> ScheduleGpuModule(
+    HloModule* module, int64_t pointer_size,
+    const se::DeviceDescription& gpu_device_info);
+
+HloInstructionSequence PostProcessSchedule(const HloInstructionSequence& input);
 
 constexpr absl::string_view kFingerprintBeforeLHS = "fingerprint_before_lhs";
 

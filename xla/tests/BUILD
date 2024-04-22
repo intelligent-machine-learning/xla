@@ -1,17 +1,11 @@
 # Description:
 #   Base testing infrastructure for XLA.
 
-load("//xla/tests:build_defs.bzl", "generate_backend_suites", "generate_backend_test_macros", "xla_test", "xla_test_library")
-load("//xla:xla.bzl", "xla_cc_binary", "xla_cc_test")
-load(
-    "//xla/stream_executor:build_defs.bzl",
-    "if_gpu_is_configured",
-)
 load(
     "@local_config_rocm//rocm:build_defs.bzl",
     "if_rocm_is_configured",
 )
-load("@tsl//tsl:tsl.bzl", "tsl_copts")
+load("@tsl//tsl:tsl.bzl", "internal_visibility", "tsl_copts")
 load("@tsl//tsl:tsl.default.bzl", "filegroup")
 load(
     "@tsl//tsl/platform:build_config_root.bzl",
@@ -22,10 +16,16 @@ load(
     "@tsl//tsl/platform/default:cuda_build_defs.bzl",
     "if_cuda_is_configured",
 )
+load("//xla:xla.bzl", "xla_cc_binary", "xla_cc_test")
+load(
+    "//xla/stream_executor:build_defs.bzl",
+    "if_gpu_is_configured",
+)
+load("//xla/tests:build_defs.bzl", "generate_backend_suites", "generate_backend_test_macros", "xla_test", "xla_test_library")
 
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
-    default_visibility = [":friends"],
+    default_visibility = internal_visibility([":friends"]),
     licenses = ["notice"],
 )
 
@@ -57,6 +57,7 @@ cc_library(
     srcs = ["xla_internal_test_main.cc"],
     deps = [
         "//xla:debug_options_flags",
+        "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/strings",
         "@tsl//tsl/platform:logging",
         "@tsl//tsl/platform:test",
@@ -184,6 +185,7 @@ cc_library(
     ],
     deps = [
         ":pjrt_client_registry",
+        "//xla/pjrt/gpu:gpu_helpers",
         "//xla/pjrt/gpu:se_gpu_pjrt_client",
     ],
 )
@@ -220,6 +222,7 @@ cc_library(
         "//xla/service:platform_util",
         "//xla/stream_executor",
         "@com_google_absl//absl/algorithm:container",
+        "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/types:span",
         "@tsl//tsl/lib/core:status_test_util",
         "@tsl//tsl/platform:logging",
@@ -273,6 +276,7 @@ cc_library(
         "//xla:status_macros",
         "//xla:statusor",
         "//xla:test_helpers",
+        "//xla:types",
         "//xla:xla_data_proto_cc",
         "//xla/client:client_library",
         "//xla/client:global_data",
@@ -285,8 +289,8 @@ cc_library(
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:span",
         "@tsl//tsl/lib/core:bitmap",
-        "@tsl//tsl/platform:float8",
         "@tsl//tsl/platform:logging",
+        "@tsl//tsl/platform:ml_dtypes",
         "@tsl//tsl/platform:test",
     ],
 )
@@ -327,6 +331,7 @@ cc_library(
     data = [
         "@llvm-project//llvm:FileCheck",
     ],
+    local_defines = if_cuda_is_configured(["GOOGLE_CUDA=1"]) + if_rocm_is_configured(["TENSORFLOW_USE_ROCM=1"]),
     deps = [
         "//xla:statusor",
         "//xla:types",
@@ -336,6 +341,7 @@ cc_library(
         "@tsl//tsl/platform:path",
         "@tsl//tsl/platform:resource_loader",
         "@tsl//tsl/platform:subprocess",
+        "@tsl//tsl/platform:test",
     ],
 )
 
@@ -695,6 +701,29 @@ xla_test(
 )
 
 xla_test(
+    name = "complex_unary_op_test",
+    srcs = [
+        "complex_unary_op_samples.h",
+        "complex_unary_op_test.cc",
+    ],
+    backends = [
+        "cpu",
+        "gpu",
+    ],
+    deps = [
+        ":client_library_test_base",
+        ":literal_test_util",
+        ":test_macros_header",
+        ":xla_internal_test_main",
+        "//xla:xla_data_proto_cc",
+        "//xla/client:global_data",
+        "//xla/client:local_client",
+        "//xla/client:xla_builder",
+        "@tsl//tsl/platform:test",
+    ],
+)
+
+xla_test(
     name = "scalar_computations_test",
     srcs = ["scalar_computations_test.cc"],
     shard_count = 32,
@@ -774,6 +803,7 @@ xla_test(
         "//xla:array2d",
         "//xla:array3d",
         "//xla:array4d",
+        "//xla:comparison_util",
         "//xla:literal",
         "//xla:shape_util",
         "//xla:statusor",
@@ -784,6 +814,8 @@ xla_test(
         "//xla/client:xla_builder",
         "@com_google_absl//absl/base",
         "@com_google_absl//absl/types:span",
+        "@ml_dtypes//:float8",
+        "@tsl//tsl/platform:ml_dtypes",
     ],
 )
 
@@ -992,10 +1024,13 @@ xla_test(
         ":hlo_test_base",
         ":test_macros_header",
         ":xla_internal_test_main",
+        "//xla:array2d",
         "//xla:error_spec",
         "//xla:literal",
+        "//xla:shape_util",
         "//xla:status_macros",
         "//xla:test",
+        "//xla:types",
         "@com_google_absl//absl/strings",
     ],
 )
@@ -1070,7 +1105,7 @@ xla_test(
         "//xla/client:xla_builder",
         "//xla/client/lib:constants",
         "@tsl//tsl/lib/core:status_test_util",
-        "@tsl//tsl/platform:float8",
+        "@tsl//tsl/platform:ml_dtypes",
         "@tsl//tsl/platform:test",
     ],
 )
@@ -1293,6 +1328,7 @@ xla_test(
         "requires-gpu-sm80",
     ]},
     backends = ["gpu"],
+    tags = ["no_rocm"],  # No int8
     deps = [
         ":hlo_test_base",
         ":xla_internal_test_main",
@@ -1689,10 +1725,15 @@ xla_test(
     srcs = ["token_hlo_test.cc"],
     deps = [
         ":hlo_test_base",
+        ":literal_test_util",
         ":test_macros_header",
         ":test_utils",
         ":xla_internal_test_main",
-        "//xla/service:hlo_verifier",
+        "//xla:literal",
+        "//xla:literal_util",
+        "//xla/hlo/ir:hlo",
+        "//xla/service:hlo_runner",
+        "@tsl//tsl/platform:statusor",
         "@tsl//tsl/platform:test",
     ],
 )
@@ -1727,17 +1768,24 @@ xla_test(
         ":test_macros_header",
         ":test_utils",
         ":xla_internal_test_main",  # fixdeps: keep
+        "//xla:literal",
         "//xla:literal_util",
         "//xla:shape_util",
         "//xla:xla_data_proto_cc",
         "//xla/client:xla_builder",
         "//xla/client/lib:constants",
+        "//xla/ffi",
+        "//xla/ffi:ffi_api",
         "//xla/hlo/ir:hlo",
-        "//xla/runtime/ffi:ffi_api",
         "//xla/service:custom_call_status",
         "//xla/service:custom_call_target_registry",
+        "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/base:dynamic_annotations",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/types:span",
+        "@tsl//tsl/platform:statusor",
         "@tsl//tsl/platform:test",
     ],
 )
@@ -1775,6 +1823,7 @@ xla_test(
         "//xla:test",
         "//xla/client:local_client",
         "//xla/client:xla_builder",
+        "@com_google_absl//absl/strings:string_view",
     ],
 )
 
@@ -1874,6 +1923,7 @@ xla_test(
         "//xla/client:local_client",
         "//xla/client:xla_builder",
         "@com_google_absl//absl/types:span",
+        "@eigen_archive//:eigen3",
         "@tsl//tsl/platform:protobuf",
         "@tsl//tsl/platform:test",
     ],
@@ -1972,10 +2022,6 @@ xla_test(
 xla_test(
     name = "convert_test",
     srcs = ["convert_test.cc"],
-    backend_tags = {
-        # TODO(b/305009066)
-        "ghostfish_grm": ["broken"],
-    },
     deps = [
         ":client_library_test_base",
         ":literal_test_util",
@@ -1989,7 +2035,7 @@ xla_test(
         "//xla/stream_executor",
         "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/base",
-        "@tsl//tsl/platform:float8",
+        "@tsl//tsl/platform:ml_dtypes",
         "@tsl//tsl/platform:test",
     ],
 )
@@ -2027,7 +2073,6 @@ xla_test(
             "multi_gpu",
             "no_oss",
             "notap",
-            "jitrt_executable",
         ],
         "cpu": [
             "notsan",
@@ -2066,7 +2111,6 @@ xla_test(
             "multi_gpu",
             "no_oss",
             "notap",
-            "jitrt_executable",
         ],
     },
     backends = [
@@ -2147,7 +2191,7 @@ xla_test(
         "//xla/client:local_client",
         "//xla/client:xla_builder",
         "//xla/stream_executor",
-        "@tsl//tsl/platform:float8",
+        "@tsl//tsl/platform:ml_dtypes",
         "@tsl//tsl/platform:test",
     ],
 )
@@ -2166,29 +2210,6 @@ xla_test(
         "//xla:shape_util",
         "//xla:test",
         "//xla:test_helpers",
-    ],
-)
-
-xla_test(
-    name = "compilation_cache_test",
-    srcs = ["compilation_cache_test.cc"],
-    deps = [
-        ":client_library_test_base",
-        ":literal_test_util",
-        ":test_macros_header",
-        ":test_utils",
-        ":xla_internal_test_main",
-        "//xla:literal",
-        "//xla:shape_util",
-        "//xla:statusor",
-        "//xla:xla_data_proto_cc",
-        "//xla:xla_proto_cc",
-        "//xla/client:global_data",
-        "//xla/client:local_client",
-        "//xla/client:xla_builder",
-        "//xla/client:xla_computation",
-        "@com_google_absl//absl/types:span",
-        "@tsl//tsl/platform:test",
     ],
 )
 
@@ -2349,7 +2370,7 @@ xla_test(
 
 xla_cc_test(
     name = "llvm_compiler_test",
-    srcs = if_gpu_is_configured(["llvm_compiler_test.cc"]),
+    srcs = ["llvm_compiler_test.cc"],
     local_defines = if_cuda_is_configured(["GOOGLE_CUDA=1"]) + if_rocm_is_configured([
         "TENSORFLOW_USE_ROCM",
     ]),
@@ -2510,6 +2531,7 @@ xla_test(
         "//xla/service:transfer_manager",
         "//xla/stream_executor",
         "//xla/stream_executor:device_memory_allocator",
+        "//xla/stream_executor:platform_manager",
         "//xla/stream_executor/host:host_platform",
         "//xla/stream_executor/host:host_platform_id",
         "@tsl//tsl/platform:env",
@@ -2727,6 +2749,7 @@ xla_cc_test(
         "//xla/client:client_library",
         "//xla/client:xla_builder",
         "//xla/service:cpu_plugin",
+        "//xla/stream_executor:platform_manager",
         "@com_google_absl//absl/synchronization",
         "@tsl//tsl/lib/core:status_test_util",
         "@tsl//tsl/platform:env",
@@ -2794,7 +2817,7 @@ xla_test(
 xla_test(
     name = "cholesky_test",
     srcs = ["cholesky_test.cc"],
-    real_hardware_only = True,
+    shard_count = 10,
     tags = [
         "optonly",
     ],
@@ -2847,6 +2870,7 @@ xla_test(
         "cpu",
     ],
     copts = tsl_copts(),
+    tags = ["no_oss"],
     deps = [
         ":hlo_test_base",
         ":test_macros_header",
@@ -2855,6 +2879,63 @@ xla_test(
         "//xla:shape_util",
         "//xla:test",
         "//xla:test_helpers",
+        "//xla/hlo/utils:hlo_matchers",
+        "//xla/service/cpu:onednn_util",
         "@tsl//tsl/platform:platform_port",
+    ],
+)
+
+xla_test(
+    name = "onednn_layer_norm_test",
+    srcs = ["onednn_layer_norm_test.cc"],
+    backends = [
+        "cpu",
+    ],
+    copts = tsl_copts(),
+    deps = [
+        ":hlo_test_base",
+        ":test_macros_header",
+        ":xla_internal_test_main",
+        "//xla:literal",
+        "//xla:shape_util",
+        "//xla:test",
+        "//xla:test_helpers",
+    ],
+)
+
+xla_test(
+    name = "onednn_softmax_test",
+    srcs = ["onednn_softmax_test.cc"],
+    backends = [
+        "cpu",
+    ],
+    copts = tsl_copts(),
+    shard_count = 4,
+    deps = [
+        ":hlo_test_base",
+        ":test_macros_header",
+        ":xla_internal_test_main",
+        "//xla:literal",
+        "//xla:shape_util",
+        "//xla:test",
+        "//xla:test_helpers",
+        "//xla/service/cpu:onednn_util",
+        "@tsl//tsl/platform:platform_port",
+    ],
+)
+
+xla_test(
+    name = "numerics_test",
+    srcs = ["numerics_test.cc"],
+    deps = [
+        ":hlo_test_base",
+        ":test_macros_header",
+        ":xla_internal_test_main",
+        "//xla:literal_util",
+        "//xla:statusor",
+        "//xla:test",
+        "//xla:types",
+        "//xla/hlo/ir:hlo",
+        "@tsl//tsl/platform:test",
     ],
 )

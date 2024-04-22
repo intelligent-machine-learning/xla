@@ -1,8 +1,8 @@
 # Description:
 #   XLA evaluator implementation.
 
-load("//xla:xla.bzl", "xla_cc_test")
 load("@tsl//tsl/platform:rules_cc.bzl", "cc_library")
+load("//xla:xla.bzl", "xla_cc_test")
 
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
@@ -82,8 +82,8 @@ cc_library(
         "@tsl//tsl/lib/core:bitmap",
         "@tsl//tsl/platform:env",
         "@tsl//tsl/platform:errors",
-        "@tsl//tsl/platform:float8",
         "@tsl//tsl/platform:logging",
+        "@tsl//tsl/platform:ml_dtypes",
         "@tsl//tsl/platform:platform_port",
         "@tsl//tsl/platform:status",
         "@tsl//tsl/platform:statusor",

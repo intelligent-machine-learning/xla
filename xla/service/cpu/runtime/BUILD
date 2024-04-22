@@ -31,7 +31,12 @@ cc_library(
         "//xla/runtime:custom_call",
         "//xla/runtime:custom_call_registry",
         "//xla/runtime:executable",
+        "//xla/runtime:memref_view",
         "//xla/service/cpu:cpu_runtime",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@llvm-project//llvm:Support",
         "@llvm-project//mlir:Support",
     ],
 )
@@ -42,12 +47,13 @@ cc_library(
     hdrs = ["convolution.h"],
     deps = [
         "//xla:executable_run_options",
+        "//xla:xla_data_proto_cc",
         "//xla/runtime:memref_view",
         "//xla/service/cpu:runtime_conv2d",
         "//xla/service/cpu:runtime_conv3d",
-        "//xla/service/cpu:runtime_fft",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/types:span",
+        "@eigen_archive//:eigen3",
     ],
 )
 
@@ -58,9 +64,14 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":convolution",
+        "//xla:xla_data_proto_cc",
         "//xla/runtime:aot_ffi",
         "//xla/runtime:aot_ffi_execution_context",
+        "//xla/runtime:memref_view",
         "//xla/runtime/ffi:ffi_api",
+        "//xla/runtime/ffi:ffi_c_api_hdrs",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/types:span",
     ],
 )
 
@@ -74,7 +85,9 @@ cc_library(
         "//xla/runtime:custom_call",
         "//xla/runtime:custom_call_registry",
         "//xla/runtime:executable",
+        "//xla/runtime:memref_view",
         "@com_google_absl//absl/types:span",
+        "@llvm-project//mlir:Support",
     ],
 )
 
@@ -88,9 +101,14 @@ cc_library(
         "//xla/runtime:custom_call",
         "//xla/runtime:custom_call_registry",
         "//xla/runtime:executable",
+        "//xla/runtime:memref_view",
         "//xla/service:custom_call_status_internal",
+        "//xla/service:custom_call_status_public_headers",
         "//xla/service:custom_call_target_registry",
         "//xla/service:hlo_proto_cc",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@llvm-project//llvm:Support",
         "@llvm-project//mlir:Support",
     ],
 )
@@ -101,6 +119,7 @@ cc_library(
     hdrs = ["fft_call.h"],
     deps = [
         "//xla:executable_run_options",
+        "//xla:xla_data_proto_cc",
         "//xla:xla_proto_cc",
         "//xla/runtime:custom_call",
         "//xla/runtime:custom_call_registry",
@@ -111,6 +130,8 @@ cc_library(
         "@com_google_absl//absl/container:inlined_vector",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/types:span",
+        "@llvm-project//mlir:Support",
     ],
 )
 
@@ -121,11 +142,15 @@ cc_library(
     deps = [
         "//xla:executable_run_options",
         "//xla:shape_util",
+        "//xla:xla_data_proto_cc",
         "//xla/runtime:custom_call",
         "//xla/runtime:custom_call_registry",
         "//xla/runtime:executable",
+        "//xla/runtime:memref_view",
         "//xla/service/cpu:cpu_runtime",
-        "@llvm-project//mlir:IR",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/types:span",
+        "@llvm-project//llvm:Support",
         "@llvm-project//mlir:Support",
     ],
 )
@@ -136,8 +161,10 @@ cc_library(
     hdrs = ["rng.h"],
     deps = [
         "//xla:executable_run_options",
+        "//xla:xla_data_proto_cc",
         "//xla/runtime:memref_view",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
     ],
 )
 
@@ -151,6 +178,8 @@ cc_library(
         "//xla/runtime:custom_call",
         "//xla/runtime:custom_call_registry",
         "//xla/runtime:executable",
+        "//xla/runtime:memref_view",
+        "@llvm-project//mlir:Support",
     ],
 )
 
@@ -161,8 +190,12 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":rng",
+        "//xla:xla_data_proto_cc",
         "//xla/runtime:aot_ffi",
         "//xla/runtime:aot_ffi_execution_context",
+        "//xla/runtime:memref_view",
         "//xla/runtime/ffi:ffi_api",
+        "//xla/runtime/ffi:ffi_c_api_hdrs",
+        "@com_google_absl//absl/status",
     ],
 )

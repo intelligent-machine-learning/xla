@@ -17,8 +17,11 @@ cc_library(
         "@com_google_absl//absl/base:dynamic_annotations",
         "@com_google_absl//absl/functional:any_invocable",
         "@llvm-project//llvm:OrcJIT",
+        "@llvm-project//llvm:OrcShared",
+        "@llvm-project//llvm:Support",
         "@llvm-project//mlir:mlir_async_runtime_api",
         "@tsl//tsl/concurrency:async_value",
+        "@tsl//tsl/concurrency:ref_count",
         "@tsl//tsl/platform:platform_port",
     ],
 )
@@ -40,12 +43,10 @@ cc_library(
     compatible_with = get_compatible_with_portable(),
     deps = [
         "//xla/runtime:constraints",
-        "//xla/runtime:errors",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@llvm-project//llvm:Support",
-        "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:FunctionInterfaces",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Support",
@@ -68,8 +69,5 @@ cc_library(
     name = "float_16bits",
     hdrs = ["float_16bits.h"],
     compatible_with = get_compatible_with_portable(),
-    deps = [
-        "@llvm-project//llvm:OrcJIT",
-        "@llvm-project//mlir:mlir_float16_utils",
-    ],
+    deps = ["@llvm-project//llvm:OrcJIT"],
 )

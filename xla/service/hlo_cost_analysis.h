@@ -1,4 +1,4 @@
-/* Copyright 2017 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2017 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -334,15 +334,15 @@ class HloCostAnalysis : public ConstDfsHloVisitor {
    private:
     // These must match GetOperandUtilizationKey(0, {}) etc.
     static inline constexpr absl::string_view kOperand0UtilizationKey =
-        "utilization operand 0 {}";
+        "utilization0{}";
     static inline constexpr absl::string_view kOperand1UtilizationKey =
-        "utilization operand 1 {}";
+        "utilization1{}";
     static inline constexpr absl::string_view kOperand0BytesAccessedKey =
-        "bytes accessed operand 0 {}";
+        "bytes accessed0{}";
     static inline constexpr absl::string_view kOperand1BytesAccessedKey =
-        "bytes accessed operand 1 {}";
+        "bytes accessed1{}";
     static inline constexpr absl::string_view kOutputRootBytesAccessedKey =
-        "bytes accessed output {}";
+        "bytes accessedout{}";
 
     float flops_;
     float transcendentals_;
@@ -399,7 +399,7 @@ class HloCostAnalysis : public ConstDfsHloVisitor {
     }
 
     // Returns the specified per-second rate used by cost analysis.
-    float per_second_rate(const std::string& key) const {
+    float per_second_rate(absl::string_view key) const {
       return per_second_rates[key];
     }
   };
@@ -445,6 +445,7 @@ class HloCostAnalysis : public ConstDfsHloVisitor {
   Status HandleAllReduceStart(const HloInstruction* hlo) override;
   Status HandleAllReduceDone(const HloInstruction* hlo) override;
   Status HandleAllToAll(const HloInstruction* hlo) override;
+  Status HandleCollectiveBroadcast(const HloInstruction* hlo) override;
   Status HandleCollectivePermute(const HloInstruction* hlo) override;
   Status HandleCollectivePermuteStart(const HloInstruction* hlo) override;
   Status HandleCollectivePermuteDone(const HloInstruction* hlo) override;
@@ -547,7 +548,7 @@ class HloCostAnalysis : public ConstDfsHloVisitor {
 
   // Returns the specified per-second rate used by cost analysis.
   float per_second_rate(absl::string_view key) const {
-    return options_.per_second_rates[key];
+    return options_.per_second_rate(key);
   }
 
   // Return the key that is used to index into Properties for the specified
@@ -620,7 +621,7 @@ class HloCostAnalysis : public ConstDfsHloVisitor {
   // given hlo. The cost of visited sub HLO instructions is saved to
   // hlo_properties_, which will be used by functions such as
   // flop_count(hlo_instruction) to return cost of a particular HLO instruction.
-  virtual StatusOr<Properties> ProcessSubcomputation(
+  virtual absl::StatusOr<Properties> ProcessSubcomputation(
       HloComputation* computation);
 
   // Utility function to handle all element-wise operations.

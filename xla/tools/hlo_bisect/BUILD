@@ -1,3 +1,6 @@
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@local_config_cuda//cuda:build_defs.bzl", "if_cuda")
+
 # Description:
 #   A tool for reducing a HLO module that produces incorrect results.
 load(
@@ -5,8 +8,6 @@ load(
     "xla_cc_binary",
     "xla_cc_test",
 )
-load("@local_config_cuda//cuda:build_defs.bzl", "if_cuda")
-load("@bazel_skylib//rules:build_test.bzl", "build_test")
 
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
@@ -31,8 +32,8 @@ xla_cc_binary(
         "//xla/service:cpu_plugin",
         "//xla/service:gpu_plugin",
         "//xla/service:interpreter_plugin",
+        "//xla/tsl/util:command_line_flags",
         "@tsl//tsl/platform:platform_port",
-        "@tsl//tsl/util:command_line_flags",
     ] + if_cuda(["//xla/stream_executor/cuda:cublas_plugin"]),
 )
 

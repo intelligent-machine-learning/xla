@@ -1,5 +1,7 @@
-load("//xla:xla.bzl", "xla_cc_test")
+load("@tsl//tsl:tsl.bzl", "internal_visibility")
+load("@tsl//tsl:tsl.default.bzl", "get_compatible_with_portable")
 load("@tsl//tsl/platform:build_config.bzl", "tf_proto_library")
+load("//xla:xla.bzl", "xla_cc_test")
 
 package_group(
     name = "friends",
@@ -20,10 +22,10 @@ package_group(
 
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
-    default_visibility = [
+    default_visibility = internal_visibility([
         ":friends",
         ":internal",
-    ],
+    ]),
 )
 
 exports_files([
@@ -41,8 +43,10 @@ cc_library(
         "xla_compiler.h",
         "xla_sharding.h",
     ],
+    compatible_with = get_compatible_with_portable(),
     deps = [
         ":xla_compiler_proto_cc",
+        "//xla:util",
         "//xla:xla_data_proto_cc",
         "//xla/pjrt:pjrt_executable",
         "//xla/python/ifrt",
@@ -75,20 +79,21 @@ tf_proto_library(
 cc_library(
     name = "xla_program_serdes",
     srcs = ["xla_program_serdes.cc"],
+    compatible_with = get_compatible_with_portable(),
     deps = [
         ":xla_ifrt",
         "//xla/mlir_hlo:mhlo_passes",
+        "//xla/pjrt:mlir_to_hlo",
         "//xla/python/ifrt:serdes",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@llvm-project//llvm:Support",
-        "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Pass",
-        "@llvm-project//mlir:ReconcileUnrealizedCasts",
         "@llvm-project//mlir:Support",
         "@stablehlo//:stablehlo_portable_api",
         "@stablehlo//:stablehlo_serialization",
+        "@tsl//tsl/platform:status",
     ],
     alwayslink = True,
 )
@@ -115,7 +120,7 @@ tf_proto_library(
     srcs = ["xla_sharding.proto"],
     protodeps = [
         "//xla:xla_data_proto",
-        "//xla/python/ifrt:types_proto",
+        "//xla/python/ifrt:device_proto",
     ],
 )
 
@@ -184,6 +189,7 @@ xla_cc_test(
         ":tfrt_cpu_client_test_lib",
         ":xla_ifrt",
         "//xla:xla_data_proto_cc",
+        "//xla/python/ifrt",
         "//xla/python/ifrt:sharding_test_util",
         "//xla/python/ifrt:tuple_impl_test_lib",
         "@com_google_googletest//:gtest_main",
@@ -210,6 +216,7 @@ cc_library(
         "pjrt_host_callback.h",
         "pjrt_tuple.h",
     ],
+    compatible_with = get_compatible_with_portable(),
     deps = [
         ":xla_ifrt",
         "//xla:literal",
@@ -220,20 +227,25 @@ cc_library(
         "//xla:xla_data_proto_cc",
         "//xla/hlo/ir:hlo",
         "//xla/pjrt:host_callback",
+        "//xla/pjrt:mlir_to_hlo",
         "//xla/pjrt:pjrt_client",
         "//xla/pjrt:pjrt_executable",
         "//xla/pjrt:pjrt_future",
+        "//xla/pjrt:pjrt_layout",
         "//xla/pjrt:utils",
         "//xla/python/ifrt",
         "//xla/service:hlo_proto_cc",
         "//xla/translate/mhlo_to_hlo:type_to_shape",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:inlined_vector",
+        "@com_google_absl//absl/functional:any_invocable",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/memory",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/types:span",
         "@llvm-project//llvm:Support",

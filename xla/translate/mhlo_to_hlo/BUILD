@@ -1,12 +1,16 @@
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library")
+load("@tsl//tsl:tsl.bzl", "internal_visibility")
+load("@tsl//tsl:tsl.default.bzl", "get_compatible_with_portable")
 load("@tsl//tsl/platform:rules_cc.bzl", "cc_binary", "cc_library")
 load("//xla:xla.bzl", "xla_cc_test")
-load("@tsl//tsl:tsl.default.bzl", "get_compatible_with_portable")
-load("@bazel_skylib//rules:build_test.bzl", "build_test")
 
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
-    default_visibility = ["//visibility:public"],
+    default_visibility = internal_visibility([
+        "//learning/brain/mlir:tensorflow_friends",
+        "//learning/brain/mlir:xla_friends",
+    ]),
     licenses = ["notice"],
 )
 
@@ -21,7 +25,6 @@ cc_library(
         "//xla:util",
         "//xla:xla_data_proto_cc",
         "//xla/mlir_hlo",
-        "//xla/mlir_hlo:lhlo_gpu",
         "//xla/service:hlo_parser",
         "//xla/service:hlo_proto_cc",
         "//xla/stream_executor:dnn",
@@ -49,8 +52,10 @@ cc_library(
     deps = [
         ":stack_frame_index_builder",
         "//xla:xla_data_proto_cc",
+        "@com_google_absl//absl/log",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
     ],
 )
 
@@ -60,7 +65,6 @@ cc_library(
     hdrs = ["stack_frame_index_builder.h"],
     deps = [
         "//xla/service:hlo_proto_cc",
-        "@com_google_absl//absl/container:flat_hash_map",
         "@llvm-project//mlir:IR",
     ],
 )
@@ -96,6 +100,7 @@ cc_library(
         "//xla/client/lib:slicing",
         "//xla/hlo/ir:hlo",
         "//xla/mlir/utils:error_util",
+        "//xla/mlir/utils:type_util",
         "//xla/mlir_hlo",
         "//xla/mlir_hlo:mhlo_passes",
         "//xla/service:hlo_parser",
@@ -113,7 +118,7 @@ cc_library(
         "@llvm-project//mlir:TensorDialect",
         "@llvm-project//mlir:TransformUtils",
         "@stablehlo//:stablehlo_ops",
-        "@tsl//tsl/platform:float8",
+        "@tsl//tsl/platform:ml_dtypes",
         "@tsl//tsl/platform:statusor",
     ],
 )
@@ -187,8 +192,8 @@ cc_library(
         "//xla:shape_util",
         "//xla:statusor",
         "//xla:xla_data_proto_cc",
+        "//xla/mlir/utils:type_util",
         "//xla/mlir_hlo",
-        "//xla/translate/hlo_to_mhlo:hlo_utils",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:SparseTensorDialect",

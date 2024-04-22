@@ -1,10 +1,10 @@
+load("@tsl//tsl:tsl.bzl", "internal_visibility")
 load("@tsl//tsl/platform:rules_cc.bzl", "cc_library")
 load("//xla:xla.bzl", "xla_cc_test")
-load("@tsl//tsl:tsl.bzl", "set_external_visibility")
 
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
-    default_visibility = set_external_visibility([
+    default_visibility = internal_visibility([
         "//tensorflow/compiler:__subpackages__",
     ]),
     licenses = ["notice"],
@@ -41,6 +41,7 @@ xla_cc_test(
     deps = [
         ":graphcycles",
         "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/random",
         "@tsl//tsl/platform:logging",
         "@tsl//tsl/platform:test",
         "@tsl//tsl/platform:test_benchmark",
@@ -53,9 +54,7 @@ xla_cc_test(
     srcs = ["ordered_set_test.cc"],
     deps = [
         ":ordered_set",
-        "@tsl//tsl/platform:logging",
         "@tsl//tsl/platform:test",
-        "@tsl//tsl/platform:test_benchmark",
         "@tsl//tsl/platform:test_main",
     ],
 )

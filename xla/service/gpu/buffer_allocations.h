@@ -1,4 +1,4 @@
-/* Copyright 2017 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2017 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,10 +26,8 @@ limitations under the License.
 #include "absl/types/span.h"
 #include "xla/service/buffer_assignment.h"
 #include "xla/status.h"
-#include "xla/statusor.h"
 #include "xla/stream_executor/device_memory.h"
 #include "xla/stream_executor/device_memory_allocator.h"
-#include "xla/stream_executor/stream_executor.h"
 
 namespace xla {
 namespace gpu {
@@ -54,18 +52,29 @@ class BufferAllocations {
    public:
     virtual ~ExternalAllocations() = default;
 
-    // Return a device address for a given buffer slice. Returns error if
+    // Return a device address for a given buffer allocation. Returns error if
     // corresponding allocation is not yet allocated.
-    virtual StatusOr<se::DeviceMemoryBase> GetDeviceAddress(
-        BufferAllocation::Slice buffer_slice) const = 0;
+    virtual absl::StatusOr<se::DeviceMemoryBase> GetDeviceAddress(
+        BufferAllocation::Index index) const = 0;
+
+    // Adds an external allocation for a given buffer index. Returns error if
+    // allocation already exists.
+    virtual absl::Status AddAllocation(BufferAllocation::Index index,
+                                       se::DeviceMemoryBase memory) = 0;
+
+    // Erases an external allocation for a given buffer index. Returns error if
+    // allocation does not exists.
+    virtual absl::Status EraseAllocation(BufferAllocation::Index index) = 0;
   };
 
   BufferAllocations(absl::Span<se::DeviceMemoryBase const> buffers,
                     int device_ordinal,
-                    se::DeviceMemoryAllocator* memory_allocator)
+                    se::DeviceMemoryAllocator* memory_allocator,
+                    ExternalAllocations* external_allocations = nullptr)
       : buffers_(buffers.begin(), buffers.end()),
         device_ordinal_(device_ordinal),
-        memory_allocator_(memory_allocator) {}
+        memory_allocator_(memory_allocator),
+        external_allocations_(external_allocations) {}
 
   BufferAllocations(BufferAllocations&& other) = default;
   BufferAllocations& operator=(BufferAllocations&& other) = default;
@@ -74,6 +83,9 @@ class BufferAllocations {
 
   se::DeviceMemoryAllocator* memory_allocator() const {
     return memory_allocator_;
+  }
+  ExternalAllocations* external_allocations() const {
+    return external_allocations_;
   }
   int device_ordinal() const { return device_ordinal_; }
 
@@ -92,17 +104,17 @@ class BufferAllocations {
   se::DeviceMemoryBase GetDeviceAddress(
       const BufferAllocation::Slice& buffer_slice) const;
 
-  // Finds an allocation for a given buffer slice, and if it happens to be an
-  // external allocation resolves it using user-provided external allocations.
-  // Returns error if external allocations do not have an address for a slice.
-  StatusOr<se::DeviceMemoryBase> GetDeviceAddress(
-      const BufferAllocation::Slice& buffer_slice,
-      const ExternalAllocations& external_allocations) const;
+  // Add new allocation allocated by external allocator.
+  absl::Status AddExternalAllocation(BufferAllocation::Index index,
+                                     se::DeviceMemoryBase memory) const;
+
+  // Remove allocation freed by external allocator.
+  absl::Status EraseExternalAllocation(BufferAllocation::Index index) const;
 
   // Tears down all buffers allocated by this object that are not in
   // `live_addresses`.
-  Status TearDown(const std::set<se::DeviceMemoryBase>& live_addresses,
-                  absl::Span<const BufferAllocation> allocations);
+  absl::Status TearDown(const std::set<se::DeviceMemoryBase>& live_addresses,
+                        absl::Span<const BufferAllocation> allocations);
 
   std::string ToString() const {
     std::string out;
@@ -121,12 +133,16 @@ class BufferAllocations {
   // indexed by Index. Each element can point to a temporary buffer, an
   // input buffer, or nullptr if no buffer is needed for that Index.
 
-  // a nullptr buffer with non-zero size buffer is assumed to be lazily
-  // allocated buffer, and will be allocated through command buffer Allocate
-  // command during runtime.
+  // a special address (se::kExternalAllocationMarker) with non-zero size buffer
+  // is assumed to be lazily allocated buffer, and will be allocated through
+  // command buffer Allocate command during runtime.
   std::vector<se::DeviceMemoryBase> buffers_;
   int device_ordinal_;
   se::DeviceMemoryAllocator* memory_allocator_;
+
+  // For buffer address that marked as ExternalAllocations, tracks its real
+  // address here.
+  ExternalAllocations* external_allocations_;
 };
 
 }  // namespace gpu

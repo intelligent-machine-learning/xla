@@ -1,4 +1,4 @@
-/* Copyright 2022 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2022 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -40,12 +40,14 @@ limitations under the License.
 #include "xla/literal.h"
 #include "xla/pjrt/c/pjrt_c_api.h"
 #include "xla/pjrt/c/pjrt_c_api_helpers.h"
+#include "xla/pjrt/distributed/key_value_store_interface.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/pjrt_common.h"
 #include "xla/pjrt/pjrt_compiler.h"
 #include "xla/pjrt/pjrt_device_description.h"
 #include "xla/pjrt/pjrt_executable.h"
 #include "xla/pjrt/pjrt_future.h"
+#include "xla/pjrt/pjrt_layout.h"
 #include "xla/service/computation_placer.h"
 #include "xla/service/hlo_cost_analysis.h"
 #include "xla/shape.h"
@@ -126,6 +128,7 @@ class PjRtCApiDevice : public PjRtDevice {
   bool IsAddressable() const override;
 
   int local_hardware_id() const override;
+  PjRtLocalHardwareId local_hardware_id_typed() const override;
 
   Status TransferToInfeed(const LiteralSlice& literal) override {
     return Unimplemented("PJRT C API does not support TransferToInfeed");
@@ -215,6 +218,12 @@ class PjRtCApiTopologyDescription : public PjRtTopologyDescription {
     return attributes_;
   }
 
+  StatusOr<Layout> GetDefaultLayout(
+      PrimitiveType element_type,
+      absl::Span<const int64_t> dims) const override {
+    return Unimplemented("PJRT C API does not support GetDefaultLayout");
+  }
+
  private:
   std::unique_ptr<PjRtCApiCompiler> compiler_;
   const PJRT_Api* c_api_;
@@ -246,9 +255,13 @@ class PjRtCApiClient : public PjRtClient {
   absl::Span<PjRtDevice* const> addressable_devices() const override;
 
   StatusOr<PjRtDevice*> LookupDevice(int device_id) const override;
+  StatusOr<PjRtDevice*> LookupDevice(
+      PjRtGlobalDeviceId global_device_id) const override;
 
   StatusOr<PjRtDevice*> LookupAddressableDevice(
       int local_hardware_id) const override;
+  StatusOr<PjRtDevice*> LookupAddressableDevice(
+      PjRtLocalDeviceId local_device_id) const override;
 
   absl::Span<PjRtMemorySpace* const> memory_spaces() const override;
 
@@ -258,10 +271,7 @@ class PjRtCApiClient : public PjRtClient {
 
   absl::string_view platform_version() const override;
 
-  std::optional<PjRtPluginAttributes> plugin_attributes() const override {
-    return PjRtPluginAttributes{c_api_->pjrt_api_version.major_version,
-                                c_api_->pjrt_api_version.minor_version};
-  }
+  std::optional<PjRtPluginAttributes> plugin_attributes() const override;
 
   // TODO(b/244756954): Rethink this function altogether
   PjRtRuntimeType runtime_type() const override {
@@ -274,6 +284,12 @@ class PjRtCApiClient : public PjRtClient {
   StatusOr<std::unique_ptr<HloCostAnalysis>> GetHloCostAnalysis()
       const override {
     return Unimplemented("PJRT C API does not support GetHloCostAnalysis");
+  }
+
+  StatusOr<Layout> GetDefaultLayout(PrimitiveType element_type,
+                                    absl::Span<const int64_t> dims) override {
+    // TODO(skyewm): implement
+    return Unimplemented("PJRT C API does not support GetDefaultLayout");
   }
 
   StatusOr<std::unique_ptr<PjRtLoadedExecutable>> Compile(
@@ -314,21 +330,21 @@ class PjRtCApiClient : public PjRtClient {
       const void* data, PrimitiveType type, absl::Span<int64_t const> dims,
       std::optional<absl::Span<int64_t const>> byte_strides,
       HostBufferSemantics host_buffer_semantics,
-      std::function<void()> on_done_with_host_buffer,
+      absl::AnyInvocable<void() &&> on_done_with_host_buffer,
       PjRtDevice* device) override;
 
   StatusOr<std::unique_ptr<PjRtBuffer>> BufferFromHostBuffer(
       const void* data, PrimitiveType type, absl::Span<int64_t const> dims,
       std::optional<absl::Span<int64_t const>> byte_strides,
       HostBufferSemantics host_buffer_semantics,
-      std::function<void()> on_done_with_host_buffer, PjRtDevice* device,
-      const Layout* device_layout) override;
+      absl::AnyInvocable<void() &&> on_done_with_host_buffer,
+      PjRtDevice* device, const Layout* device_layout) override;
 
   StatusOr<std::unique_ptr<PjRtBuffer>> BufferFromHostBuffer(
       const void* data, PrimitiveType type, absl::Span<int64_t const> dims,
       std::optional<absl::Span<int64_t const>> byte_strides,
       HostBufferSemantics host_buffer_semantics,
-      std::function<void()> on_done_with_host_buffer,
+      absl::AnyInvocable<void() &&> on_done_with_host_buffer,
       PjRtMemorySpace* memory_space, const Layout* device_layout) override;
 
   StatusOr<std::unique_ptr<PjRtBuffer>> BufferFromHostLiteral(
@@ -402,12 +418,13 @@ class PjRtCApiClient : public PjRtClient {
 
  private:
   void InitDevicesAndMemorySpaces();
+  void InitAttributes();
 
   StatusOr<std::unique_ptr<PjRtBuffer>> BufferFromHostBufferInternalImpl(
       const void* data, PrimitiveType type, absl::Span<int64_t const> dims,
       std::optional<absl::Span<int64_t const>> byte_strides,
       HostBufferSemantics host_buffer_semantics,
-      std::function<void()> on_done_with_host_buffer,
+      absl::AnyInvocable<void() &&> on_done_with_host_buffer,
       std::variant<PjRtDevice*, PjRtMemorySpace*> device_or_memory,
       const Layout* device_layout);
 
@@ -431,6 +448,7 @@ class PjRtCApiClient : public PjRtClient {
   const std::string platform_version_;
   const std::string platform_name_;
   const PjRtPlatformId platform_id_;
+  absl::flat_hash_map<std::string, xla::PjRtValueType> attributes_;
 };
 
 class PjRtCApiBuffer : public PjRtBuffer {
@@ -441,7 +459,7 @@ class PjRtCApiBuffer : public PjRtBuffer {
 
   absl::Span<const int64_t> dimensions() const override;
 
-  const Layout& layout() const override;
+  std::unique_ptr<PjRtLayout> layout() const override;
 
   // PJRT C API doesn't support tuple buffers.
   bool IsTuple() const override { return false; }
@@ -470,7 +488,10 @@ class PjRtCApiBuffer : public PjRtBuffer {
   StatusOr<std::unique_ptr<ExternalReference>> AcquireExternalReference()
       override;
 
-  PjRtFuture<Status> ToLiteral(MutableLiteralBase* literal) override;
+  PjRtFuture<absl::Status> ToLiteral(MutableLiteralBase* literal) override;
+  PjRtFuture<absl::Status> LazyToLiteral(
+      absl::AnyInvocable<absl::StatusOr<MutableLiteralBase*>() &&> generator)
+      override;
 
   StatusOr<size_t> GetOnDeviceSizeInBytes() const override;
 
@@ -535,7 +556,7 @@ class PjRtCApiBuffer : public PjRtBuffer {
   // we set on `readiness_event` modifies `readiness_promise_`.
   std::shared_ptr<PjRtFuture<Status>::Promise> readiness_promise_;
   // Set and cached the first time layout() is called.
-  mutable std::optional<xla::Layout> layout_;
+  mutable std::optional<PjRtXlaLayout> layout_;
   // Set and cached the first time is_dynamic_dimension() is called.
   mutable std::optional<absl::InlinedVector<bool, InlineRank()>>
       is_dynamic_dimension_;
@@ -728,7 +749,7 @@ class PjRtCApiLoadedExecutable : public PjRtLoadedExecutable {
   // Gets common Execute_Args between Execute, ExecuteSharded and
   // ExecutePortable. device_complete_events in the return is set if the input
   // device_complete_events has value.
-  xla::StatusOr<PJRT_LoadedExecutable_Execute_Args> GetCommonExecuteArgs(
+  absl::StatusOr<PJRT_LoadedExecutable_Execute_Args> GetCommonExecuteArgs(
       absl::Span<const std::vector<PjRtBuffer*>> argument_handles,
       const ExecuteOptions& options, PJRT_ExecuteOptions& c_options,
       std::vector<std::vector<PJRT_Buffer*>>& c_argument_lists_storage,
@@ -769,9 +790,16 @@ class CApiCopyToDeviceStream : public CopyToDeviceStream {
 StatusOr<std::unique_ptr<PjRtClient>> GetCApiClient(
     absl::string_view device_type,
     const absl::flat_hash_map<std::string, PjRtValueType>& create_options = {},
-    PjRtClient::KeyValueGetCallback kv_get = nullptr,
-    PjRtClient::KeyValuePutCallback kv_put = nullptr);
+    std::shared_ptr<KeyValueStoreInterface> kv_store = nullptr);
 
+absl::StatusOr<std::unique_ptr<PjRtTopologyDescription>> GetCApiTopology(
+    const PJRT_Api* c_api, absl::string_view topology_name,
+    const absl::flat_hash_map<std::string, PjRtValueType>& create_options);
+
+// A variant that takes `device_type` as an input, used for plugins that are not
+// registered with standard way (xla_bridge.register_plugin).
+// TODO(b/322357665): Delete this method after TPU plugin changes to use the
+// standard registration.
 StatusOr<std::unique_ptr<PjRtTopologyDescription>> GetCApiTopology(
     absl::string_view device_type, absl::string_view topology_name,
     const absl::flat_hash_map<std::string, PjRtValueType>& create_options = {});

@@ -1,14 +1,14 @@
 # Description:
 #   RPC communication interfaces and implementations for TensorFlow.
 
-load("//tsl/platform:rules_cc.bzl", "cc_library")
-load("//tsl/platform:build_config.bzl", "tf_proto_library", "tsl_cc_test")
+load("//tsl:tsl.bzl", "internal_visibility")
 load("//tsl:tsl.default.bzl", "tsl_grpc_cc_dependencies")
-load("//tsl:tsl.bzl", "set_external_visibility")
+load("//tsl/platform:build_config.bzl", "tf_proto_library", "tsl_cc_test")
+load("//tsl/platform:rules_cc.bzl", "cc_library")
 
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
-    default_visibility = set_external_visibility([
+    default_visibility = internal_visibility([
         "//tsl:internal",
     ]),
     licenses = ["notice"],
@@ -37,7 +37,6 @@ cc_library(
     hdrs = ["grpc_util.h"],
     deps = [
         "//tsl/platform:protobuf",
-        "//tsl/platform:random",
         "//tsl/platform:status",
         "//tsl/platform:stringpiece",
         "//tsl/platform:stringprintf",
@@ -57,6 +56,7 @@ tsl_cc_test(
     deps = [
         ":grpc_util",
         ":test_request_proto_cc_impl",
+        "//tsl/platform:env_impl",
         "//tsl/platform:errors",
         "//tsl/platform:test",
         "//tsl/platform:test_benchmark",
@@ -95,8 +95,8 @@ cc_library(
         "//tsl/platform:thread_annotations",
         "//tsl/platform:types",
         "//tsl/protobuf:rpc_options_proto_cc",
-        "//tsl/util:device_name_utils",
         "@com_google_absl//absl/strings",
+        "@xla//xla/tsl/util:device_name_utils",
     ] + tsl_grpc_cc_dependencies(),
 )
 
@@ -109,11 +109,12 @@ tsl_cc_test(
     deps = [
         ":grpc_channel",
         "//tsl/lib/core:status_test_util",
+        "//tsl/platform:env_impl",
         "//tsl/platform:strcat",
         "//tsl/platform:test",
         "//tsl/platform:test_main",
         "//tsl/protobuf:rpc_options_proto_cc_impl",
-        "//tsl/util:device_name_utils",
+        "@xla//xla/tsl/util:device_name_utils",
     ],
 )
 
@@ -128,8 +129,8 @@ cc_library(
         "//tsl/platform:errors",
         "//tsl/platform:status",
         "//tsl/platform:strcat",
-        "//tsl/util:env_var",
         "@com_google_absl//absl/status",
+        "@xla//xla/tsl/util:env_var",
     ] + tsl_grpc_cc_dependencies(),
 )
 

@@ -1,4 +1,4 @@
-/* Copyright 2023 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2023 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,12 +20,18 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
+#include "llvm/Support/Casting.h"
+#include "llvm/Support/ExtensibleRTTI.h"
 #include "xla/python/ifrt/device.h"
 #include "xla/python/ifrt/memory.h"
 #include "xla/python/ifrt/serdes.h"
 #include "xla/python/ifrt/shape.h"
 #include "xla/python/ifrt/sharding.h"
-#include "xla/python/ifrt/sharding.pb.h"
+#include "xla/python/ifrt/sharding_serdes.pb.h"
+#include "xla/util.h"
 #include "tsl/platform/statusor.h"
 
 namespace xla {
@@ -34,6 +40,9 @@ namespace ifrt {
 char DeserializeShardingOptions::ID = 0;
 
 namespace {
+
+// TODO(hyeontaek): Move SerDes for the subclasses of `Sharding` to a separate
+// file, making this sharding_serdes.{h,cc} only define common functions.
 
 // Serialization/deserialization for `SingleDeviceSharding`.
 class SingleDeviceShardingSerDes
@@ -136,9 +145,17 @@ class ConcreteShardingSerDes
     if (sharding.memory_kind().memory_kind().has_value()) {
       proto.set_memory_kind(std::string(*sharding.memory_kind().memory_kind()));
     }
-    *proto.mutable_shape() = sharding.shape().ToProto();
-    for (const Shape& shape : sharding.shard_shapes()) {
-      *proto.add_shard_shapes() = shape.ToProto();
+    if (sharding.has_static_shape()) {
+      *proto.mutable_shape() = sharding.shape().ToProto();
+      for (const Shape& shape : sharding.shard_shapes()) {
+        *proto.add_shard_shapes() = shape.ToProto();
+      }
+    } else {
+      *proto.mutable_dynamic_shape() = sharding.dynamic_shape().ToProto();
+      for (const DynamicShape& dynamic_shape :
+           sharding.shard_dynamic_shapes()) {
+        *proto.add_shard_dynamic_shapes() = dynamic_shape.ToProto();
+      }
     }
     return proto.SerializeAsString();
   }
@@ -162,16 +179,35 @@ class ConcreteShardingSerDes
     if (proto.has_memory_kind()) {
       memory_kind = MemoryKind(proto.memory_kind());
     }
-    TF_ASSIGN_OR_RETURN(auto shape, Shape::FromProto(proto.shape()));
-    std::vector<Shape> shard_shapes;
-    shard_shapes.reserve(proto.shard_shapes_size());
-    for (const auto& shard_shape_proto : proto.shard_shapes()) {
-      TF_ASSIGN_OR_RETURN(auto shard_shape,
-                          Shape::FromProto(shard_shape_proto));
-      shard_shapes.push_back(std::move(shard_shape));
+    if (proto.has_shape()) {
+      TF_ASSIGN_OR_RETURN(auto shape, Shape::FromProto(proto.shape()));
+      std::vector<Shape> shard_shapes;
+      shard_shapes.reserve(proto.shard_shapes_size());
+      for (const auto& shard_shape_proto : proto.shard_shapes()) {
+        TF_ASSIGN_OR_RETURN(auto shard_shape,
+                            Shape::FromProto(shard_shape_proto));
+        shard_shapes.push_back(std::move(shard_shape));
+      }
+      return ConcreteSharding::Create(std::move(devices), memory_kind,
+                                      std::move(shape),
+                                      std::move(shard_shapes));
+    }
+    if (!proto.has_dynamic_shape()) {
+      return absl::InvalidArgumentError(
+          "ConcreteSharding must have Shape or DynamicShape.");
+    }
+    TF_ASSIGN_OR_RETURN(auto dynamic_shape,
+                        DynamicShape::FromProto(proto.dynamic_shape()));
+    std::vector<DynamicShape> shard_dynamic_shapes;
+    shard_dynamic_shapes.reserve(proto.shard_dynamic_shapes_size());
+    for (const auto& shard_dynamic_shape_proto : proto.shard_dynamic_shapes()) {
+      TF_ASSIGN_OR_RETURN(auto dynamic_shape,
+                          DynamicShape::FromProto(shard_dynamic_shape_proto));
+      shard_dynamic_shapes.push_back(std::move(dynamic_shape));
     }
     return ConcreteSharding::Create(std::move(devices), memory_kind,
-                                    std::move(shape), std::move(shard_shapes));
+                                    std::move(dynamic_shape),
+                                    std::move(shard_dynamic_shapes));
   }
 
   static char ID;  // NOLINT
@@ -259,13 +295,33 @@ bool register_concrete_even_sharding_serdes = ([]{
 
 }  // namespace
 
-StatusOr<std::unique_ptr<DeserializeShardingOptions>>
+absl::StatusOr<std::unique_ptr<DeserializeShardingOptions>>
 GetDeserializeShardingOptions(std::unique_ptr<DeserializeOptions> options) {
   if (!llvm::isa<DeserializeShardingOptions>(options.get())) {
     return xla::InvalidArgument("options must be DeserializeShardingOptions");
   }
   return std::unique_ptr<DeserializeShardingOptions>(
       static_cast<DeserializeShardingOptions*>(options.release()));
+}
+
+// TODO(hyeontaek): Move this common logic into Sharding::FromProto() and
+// Sharding::ToProto().
+
+absl::StatusOr<std::unique_ptr<Sharding>> FromShardingProto(
+    DeviceList::LookupDeviceFunc lookup_device,
+    const ShardingProto& sharding_proto) {
+  TF_ASSIGN_OR_RETURN(std::unique_ptr<Serializable> sharding,
+                      Deserialize(sharding_proto.serialized_sharding(),
+                                  std::make_unique<DeserializeShardingOptions>(
+                                      std::move(lookup_device))));
+  return std::unique_ptr<Sharding>(llvm::cast<Sharding>(sharding.release()));
+}
+
+absl::StatusOr<ShardingProto> ToShardingProto(const Sharding& sharding) {
+  ShardingProto sharding_proto;
+  TF_ASSIGN_OR_RETURN(*sharding_proto.mutable_serialized_sharding(),
+                      Serialize(const_cast<Sharding&>(sharding)));
+  return sharding_proto;
 }
 
 }  // namespace ifrt
