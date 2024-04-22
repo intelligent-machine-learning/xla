@@ -307,6 +307,7 @@ tsl::StatusOr<std::vector<uint8_t>> CompileGpuAsm(int cc_major, int cc_minor,
 
   ptxas_info_dumper.SetProgram(ptxas_path, ptxas_args);
   ptxas_info_dumper.SetChannelAction(tsl::CHAN_STDERR, tsl::ACTION_PIPE);
+  VLOG(5)<<"subprocess running:"<<ptxas_path<<"args: "<< absl::StrJoin(ptxas_args, " ");
   if (!ptxas_info_dumper.Start()) {
     return tsl::errors::Internal("Failed to launch ptxas");
   }
@@ -418,6 +419,7 @@ tsl::StatusOr<std::vector<uint8_t>> BundleGpuAsm(
   }
   fatbinary.SetProgram(fatbinary_path, fatbinary_args);
   fatbinary.SetChannelAction(tsl::CHAN_STDERR, tsl::ACTION_PIPE);
+  VLOG(5)<<"subprocess running:"<<fatbinary_path<<"args: "<< absl::StrJoin(fatbinary_args, " ");
   if (!fatbinary.Start()) {
     return tsl::errors::Internal("Failed to launch fatbinary.");
   }

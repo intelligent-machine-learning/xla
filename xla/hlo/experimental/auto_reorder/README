@@ -1,0 +1,8 @@
+# Auto Reorder
+
+run tests
+```
+export TF_CPP_MIN_LOG_LEVEL=0
+export TF_CPP_VMODULE="auto_reorder=5,auto_reorder_solver=5"
+bazel run --compilation_mode=dbg xla/hlo/experimental/auto_reorder:auto_reorder_test --incompatible_strict_action_env --action_env=USE_CUDA --action_env=XLA_CUDA
+```

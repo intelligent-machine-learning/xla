@@ -3560,6 +3560,7 @@ cc_library(
         "//xla:status",
         "//xla:statusor",
         "//xla:util",
+        "//xla/hlo/experimental/auto_reorder:auto_reorder",
         "//xla/hlo/ir:hlo",
         "//xla/hlo/utils:hlo_query",
         "//xla/service:buffer_value",

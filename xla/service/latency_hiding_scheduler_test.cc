@@ -2977,4 +2977,196 @@ ENTRY main {
   // not create a failure of scheduling by the async done checks.
   EXPECT_TRUE(RunScheduler(hlo_module.get(), sched_config).ok());
 }
+TEST_F(LatencyHidingSchedulerTest, RunRandomComputation) {
+  absl::string_view hlo_string = R"(
+    HloModule ReorderPassWithRandom, is_scheduled=true, entry_computation_layout={(f32[4,256,256]{2,1,0}, f32[4,256,256]{2,1,0})->(f32[4,256,256]{2,1,0}, f32[4,256,256]{2,1,0}, f32[4,256,256]{2,1,0}, f32[4,256,256]{2,1,0})}
+
+%add (x: f32[4,256,256], y: f32[4,256,256]) -> f32[4,256,256] {
+  %y = f32[4,256,256] parameter(1)
+  %x = f32[4,256,256] parameter(0)
+  ROOT %add = f32[4,256,256] add(f32[4,256,256] %x, f32[4,256,256] %y)
+}
+
+%add.1 (x.1: f32[4,256,256], y.1: f32[4,256,256]) -> f32[4,256,256] {
+  %y.1 = f32[4,256,256] parameter(1)
+  %x.1 = f32[4,256,256] parameter(0)
+  ROOT %add.1 = f32[4,256,256] add(f32[4,256,256] %x.1, f32[4,256,256] %y.1)
+}
+
+%add.2 (x.2: f32[4,256,256], y.2: f32[4,256,256]) -> f32[4,256,256] {
+  %y.2 = f32[4,256,256] parameter(1)
+  %x.2 = f32[4,256,256] parameter(0)
+  ROOT %add.2 = f32[4,256,256] add(f32[4,256,256] %x.2, f32[4,256,256] %y.2)
+}
+
+%add.3 (x.3: f32[4,256,256], y.3: f32[4,256,256]) -> f32[4,256,256] {
+  %y.3 = f32[4,256,256] parameter(1)
+  %x.3 = f32[4,256,256] parameter(0)
+  ROOT %add.3 = f32[4,256,256] add(f32[4,256,256] %x.3, f32[4,256,256] %y.3)
+}
+
+%add.4 (x.4: f32[4,256,256], y.4: f32[4,256,256]) -> f32[4,256,256] {
+  %y.4 = f32[4,256,256] parameter(1)
+  %x.4 = f32[4,256,256] parameter(0)
+  ROOT %add.4 = f32[4,256,256] add(f32[4,256,256] %x.4, f32[4,256,256] %y.4)
+}
+
+%add.5 (x.5: f32[4,256,256], y.5: f32[4,256,256]) -> f32[4,256,256] {
+  %y.5 = f32[4,256,256] parameter(1)
+  %x.5 = f32[4,256,256] parameter(0)
+  ROOT %add.5 = f32[4,256,256] add(f32[4,256,256] %x.5, f32[4,256,256] %y.5)
+}
+
+%add.6 (x.6: f32[4,256,256], y.6: f32[4,256,256]) -> f32[4,256,256] {
+  %y.6 = f32[4,256,256] parameter(1)
+  %x.6 = f32[4,256,256] parameter(0)
+  ROOT %add.6 = f32[4,256,256] add(f32[4,256,256] %x.6, f32[4,256,256] %y.6)
+}
+
+%add.7 (x.7: f32[4,256,256], y.7: f32[4,256,256]) -> f32[4,256,256] {
+  %y.7 = f32[4,256,256] parameter(1)
+  %x.7 = f32[4,256,256] parameter(0)
+  ROOT %add.7 = f32[4,256,256] add(f32[4,256,256] %x.7, f32[4,256,256] %y.7)
+}
+
+%add.8 (x.8: f32[4,256,256], y.8: f32[4,256,256]) -> f32[4,256,256] {
+  %y.8 = f32[4,256,256] parameter(1)
+  %x.8 = f32[4,256,256] parameter(0)
+  ROOT %add.8 = f32[4,256,256] add(f32[4,256,256] %x.8, f32[4,256,256] %y.8)
+}
+
+%add.9 (x.9: f32[4,256,256], y.9: f32[4,256,256]) -> f32[4,256,256] {
+  %y.9 = f32[4,256,256] parameter(1)
+  %x.9 = f32[4,256,256] parameter(0)
+  ROOT %add.9 = f32[4,256,256] add(f32[4,256,256] %x.9, f32[4,256,256] %y.9)
+}
+
+%add.10 (x.10: f32[4,256,256], y.10: f32[4,256,256]) -> f32[4,256,256] {
+  %y.10 = f32[4,256,256] parameter(1)
+  %x.10 = f32[4,256,256] parameter(0)
+  ROOT %add.10 = f32[4,256,256] add(f32[4,256,256] %x.10, f32[4,256,256] %y.10)
+}
+
+%add.11 (x.11: f32[4,256,256], y.11: f32[4,256,256]) -> f32[4,256,256] {
+  %y.11 = f32[4,256,256] parameter(1)
+  %x.11 = f32[4,256,256] parameter(0)
+  ROOT %add.11 = f32[4,256,256] add(f32[4,256,256] %x.11, f32[4,256,256] %y.11)
+}
+
+%add.12 (x.12: f32[4,256,256], y.12: f32[4,256,256]) -> f32[4,256,256] {
+  %y.12 = f32[4,256,256] parameter(1)
+  %x.12 = f32[4,256,256] parameter(0)
+  ROOT %add.12 = f32[4,256,256] add(f32[4,256,256] %x.12, f32[4,256,256] %y.12)
+}
+
+%add.13 (x.13: f32[4,256,256], y.13: f32[4,256,256]) -> f32[4,256,256] {
+  %y.13 = f32[4,256,256] parameter(1)
+  %x.13 = f32[4,256,256] parameter(0)
+  ROOT %add.13 = f32[4,256,256] add(f32[4,256,256] %x.13, f32[4,256,256] %y.13)
+}
+
+%add.14 (x.14: f32[4,256,256], y.14: f32[4,256,256]) -> f32[4,256,256] {
+  %y.14 = f32[4,256,256] parameter(1)
+  %x.14 = f32[4,256,256] parameter(0)
+  ROOT %add.14 = f32[4,256,256] add(f32[4,256,256] %x.14, f32[4,256,256] %y.14)
+}
+
+%add.15 (x.15: f32[4,256,256], y.15: f32[4,256,256]) -> f32[4,256,256] {
+  %y.15 = f32[4,256,256] parameter(1)
+  %x.15 = f32[4,256,256] parameter(0)
+  ROOT %add.15 = f32[4,256,256] add(f32[4,256,256] %x.15, f32[4,256,256] %y.15)
+}
+
+ENTRY %ReorderPassWithRandom (p0: f32[4,256,256], p1: f32[4,256,256]) -> (f32[4,256,256], f32[4,256,256], f32[4,256,256], f32[4,256,256]) {
+  %p1 = f32[4,256,256]{2,1,0} parameter(1)
+  %p0 = f32[4,256,256]{2,1,0} parameter(0)
+  %add.16 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %p0, f32[4,256,256]{2,1,0} %p1)
+  %add.17 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %p1, f32[4,256,256]{2,1,0} %add.16)
+  %add.19 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %add.16, f32[4,256,256]{2,1,0} %add.17)
+  %add.18 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %add.16, f32[4,256,256]{2,1,0} %add.17)
+  %add.21 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %add.17, f32[4,256,256]{2,1,0} %add.19)
+  %all-reduce-start.3 = f32[4,256,256]{2,1,0} all-reduce-start(f32[4,256,256]{2,1,0} %add.21), replica_groups={{0,1}}, to_apply=%add.3
+  %all-reduce-done.3 = f32[4,256,256]{2,1,0} all-reduce-done(f32[4,256,256]{2,1,0} %all-reduce-start.3)
+  %all-reduce-start.1 = f32[4,256,256]{2,1,0} all-reduce-start(f32[4,256,256]{2,1,0} %add.18), replica_groups={{0,1}}, to_apply=%add.1
+  %all-reduce-done.1 = f32[4,256,256]{2,1,0} all-reduce-done(f32[4,256,256]{2,1,0} %all-reduce-start.1)
+  %all-reduce-start = f32[4,256,256]{2,1,0} all-reduce-start(f32[4,256,256]{2,1,0} %add.19), replica_groups={{0,1}}, to_apply=%add
+  %all-reduce-done = f32[4,256,256]{2,1,0} all-reduce-done(f32[4,256,256]{2,1,0} %all-reduce-start)
+  %add.20 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %all-reduce-done, f32[4,256,256]{2,1,0} %all-reduce-done.1)
+  %add.23 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %add.17, f32[4,256,256]{2,1,0} %add.20)
+  %add.22 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %add.20, f32[4,256,256]{2,1,0} %add.21)
+  %add.24 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %add.22, f32[4,256,256]{2,1,0} %add.23)
+  %all-reduce-start.6 = f32[4,256,256]{2,1,0} all-reduce-start(f32[4,256,256]{2,1,0} %add.22), replica_groups={{0,1}}, to_apply=%add.6
+  %all-reduce-done.6 = f32[4,256,256]{2,1,0} all-reduce-done(f32[4,256,256]{2,1,0} %all-reduce-start.6)
+  %all-reduce-start.14 = f32[4,256,256]{2,1,0} all-reduce-start(f32[4,256,256]{2,1,0} %p0), replica_groups={{0,1}}, to_apply=%add.14
+  %all-reduce-done.14 = f32[4,256,256]{2,1,0} all-reduce-done(f32[4,256,256]{2,1,0} %all-reduce-start.14)
+  %all-reduce-start.2 = f32[4,256,256]{2,1,0} all-reduce-start(f32[4,256,256]{2,1,0} %p0), replica_groups={{0,1}}, to_apply=%add.2
+  %all-reduce-done.2 = f32[4,256,256]{2,1,0} all-reduce-done(f32[4,256,256]{2,1,0} %all-reduce-start.2)
+  %add.25 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %all-reduce-done.3, f32[4,256,256]{2,1,0} %all-reduce-done.2)
+  %add.31 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %p1, f32[4,256,256]{2,1,0} %add.25)
+  %add.26 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %add.25, f32[4,256,256]{2,1,0} %add.24)
+  %all-reduce-start.7 = f32[4,256,256]{2,1,0} all-reduce-start(f32[4,256,256]{2,1,0} %add.31), replica_groups={{0,1}}, to_apply=%add.7
+  %all-reduce-done.7 = f32[4,256,256]{2,1,0} all-reduce-done(f32[4,256,256]{2,1,0} %all-reduce-start.7)
+  %add.29 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %p0, f32[4,256,256]{2,1,0} %all-reduce-done.2)
+  %all-reduce-start.5 = f32[4,256,256]{2,1,0} all-reduce-start(f32[4,256,256]{2,1,0} %add.29), replica_groups={{0,1}}, to_apply=%add.5
+  %all-reduce-done.5 = f32[4,256,256]{2,1,0} all-reduce-done(f32[4,256,256]{2,1,0} %all-reduce-start.5)
+  %add.27 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %all-reduce-done.1, f32[4,256,256]{2,1,0} %all-reduce-done.2)
+  %add.28 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %add.26, f32[4,256,256]{2,1,0} %add.27)
+  %add.43 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %add.18, f32[4,256,256]{2,1,0} %add.28)
+  %all-reduce-start.4 = f32[4,256,256]{2,1,0} all-reduce-start(f32[4,256,256]{2,1,0} %add.28), replica_groups={{0,1}}, to_apply=%add.4
+  %all-reduce-done.4 = f32[4,256,256]{2,1,0} all-reduce-done(f32[4,256,256]{2,1,0} %all-reduce-start.4)
+  %add.30 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %all-reduce-done.4, f32[4,256,256]{2,1,0} %all-reduce-done.5)
+  %add.32 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %add.30, f32[4,256,256]{2,1,0} %add.31)
+  %add.33 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %p1, f32[4,256,256]{2,1,0} %all-reduce-done.4)
+  %add.34 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %add.32, f32[4,256,256]{2,1,0} %add.33)
+  %add.35 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %all-reduce-done.7, f32[4,256,256]{2,1,0} %add.34)
+  %add.41 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %add.28, f32[4,256,256]{2,1,0} %add.35)
+  %add.36 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %all-reduce-done.6, f32[4,256,256]{2,1,0} %add.35)
+  %add.37 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %all-reduce-done.1, f32[4,256,256]{2,1,0} %add.36)
+  %add.38 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %add.36, f32[4,256,256]{2,1,0} %add.37)
+  %add.39 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %all-reduce-done.2, f32[4,256,256]{2,1,0} %add.38)
+  %all-reduce-start.8 = f32[4,256,256]{2,1,0} all-reduce-start(f32[4,256,256]{2,1,0} %add.38), replica_groups={{0,1}}, to_apply=%add.8
+  %all-reduce-done.8 = f32[4,256,256]{2,1,0} all-reduce-done(f32[4,256,256]{2,1,0} %all-reduce-start.8)
+  %all-reduce-start.9 = f32[4,256,256]{2,1,0} all-reduce-start(f32[4,256,256]{2,1,0} %add.39), replica_groups={{0,1}}, to_apply=%add.9
+  %all-reduce-done.9 = f32[4,256,256]{2,1,0} all-reduce-done(f32[4,256,256]{2,1,0} %all-reduce-start.9)
+  %add.40 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %all-reduce-done.8, f32[4,256,256]{2,1,0} %all-reduce-done.9)
+  %add.51 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %add.21, f32[4,256,256]{2,1,0} %add.40)
+  %add.47 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %add.19, f32[4,256,256]{2,1,0} %add.40)
+  %add.42 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %add.40, f32[4,256,256]{2,1,0} %add.41)
+  %add.44 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %add.42, f32[4,256,256]{2,1,0} %add.43)
+  %add.57 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %all-reduce-done.4, f32[4,256,256]{2,1,0} %add.44)
+  %all-reduce-start.15 = f32[4,256,256]{2,1,0} all-reduce-start(f32[4,256,256]{2,1,0} %add.41), replica_groups={{0,1}}, to_apply=%add.15
+  %all-reduce-done.15 = f32[4,256,256]{2,1,0} all-reduce-done(f32[4,256,256]{2,1,0} %all-reduce-start.15)
+  %all-reduce-start.10 = f32[4,256,256]{2,1,0} all-reduce-start(f32[4,256,256]{2,1,0} %add.34), replica_groups={{0,1}}, to_apply=%add.10
+  %all-reduce-done.10 = f32[4,256,256]{2,1,0} all-reduce-done(f32[4,256,256]{2,1,0} %all-reduce-start.10)
+  %add.49 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %add.24, f32[4,256,256]{2,1,0} %all-reduce-done.10)
+  %all-reduce-start.13 = f32[4,256,256]{2,1,0} all-reduce-start(f32[4,256,256]{2,1,0} %add.49), replica_groups={{0,1}}, to_apply=%add.13
+  %all-reduce-done.13 = f32[4,256,256]{2,1,0} all-reduce-done(f32[4,256,256]{2,1,0} %all-reduce-start.13)
+  %all-reduce-start.11 = f32[4,256,256]{2,1,0} all-reduce-start(f32[4,256,256]{2,1,0} %add.44), replica_groups={{0,1}}, to_apply=%add.11
+  %all-reduce-done.11 = f32[4,256,256]{2,1,0} all-reduce-done(f32[4,256,256]{2,1,0} %all-reduce-start.11)
+  %add.45 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %add.44, f32[4,256,256]{2,1,0} %all-reduce-done.11)
+  %add.46 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %all-reduce-done.10, f32[4,256,256]{2,1,0} %add.45)
+  %add.48 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %add.46, f32[4,256,256]{2,1,0} %add.47)
+  %all-reduce-start.12 = f32[4,256,256]{2,1,0} all-reduce-start(f32[4,256,256]{2,1,0} %add.48), replica_groups={{0,1}}, to_apply=%add.12
+  %all-reduce-done.12 = f32[4,256,256]{2,1,0} all-reduce-done(f32[4,256,256]{2,1,0} %all-reduce-start.12)
+  %add.50 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %all-reduce-done.12, f32[4,256,256]{2,1,0} %all-reduce-done.13)
+  %add.52 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %add.51, f32[4,256,256]{2,1,0} %add.50)
+  %add.53 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %add.45, f32[4,256,256]{2,1,0} %add.50)
+  %add.54 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %add.52, f32[4,256,256]{2,1,0} %add.53)
+  %add.55 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %add.54, f32[4,256,256]{2,1,0} %all-reduce-done.15)
+  %add.56 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %all-reduce-done.14, f32[4,256,256]{2,1,0} %add.55)
+  %add.58 = f32[4,256,256]{2,1,0} add(f32[4,256,256]{2,1,0} %add.56, f32[4,256,256]{2,1,0} %add.57)
+  ROOT %tuple = (f32[4,256,256]{2,1,0}, f32[4,256,256]{2,1,0}, f32[4,256,256]{2,1,0}, f32[4,256,256]{2,1,0}) tuple(f32[4,256,256]{2,1,0} %add.46, f32[4,256,256]{2,1,0} %add.45, f32[4,256,256]{2,1,0} %all-reduce-done.11, f32[4,256,256]{2,1,0} %add.58)
+}
+
+)";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto hlo_module, ParseHloText(hlo_string));
+  HloSchedule& module_schedule = hlo_module->schedule();
+  EXPECT_TRUE(hlo_module->has_entry_computation());
+  HloComputation* entry_computation = hlo_module->entry_computation();
+  std::vector<HloInstruction*> original_instruction_sequence =
+      module_schedule.sequence(entry_computation).instructions();
+  auto sched_config = GetDefaultSchedConfig();
+  EXPECT_TRUE(RunScheduler(hlo_module.get(), sched_config).ok());
+}
 }  // namespace xla

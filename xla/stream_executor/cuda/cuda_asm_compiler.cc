@@ -101,7 +101,7 @@ tsl::StatusOr<std::vector<uint8_t>> LinkUsingNvlink(
   tsl::SubProcess process;
   process.SetProgram(bin_path, args);
   process.SetChannelAction(tsl::CHAN_STDERR, tsl::ACTION_PIPE);
-
+  VLOG(5)<<"subprocess running:"<<bin_path<<"args: "<< absl::StrJoin(args, " ");
   TF_RET_CHECK(process.Start());
   std::string stderr_output;
   int exit_status = process.Communicate(
