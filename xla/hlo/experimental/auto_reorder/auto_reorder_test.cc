@@ -218,8 +218,25 @@ ENTRY %elementwise {
     HloInstruction* param = async_builder.AddInstruction(
         HloInstruction::CreateParameter(0, input_shape, "pasync"));
     async_builder.AddInstruction(HloInstruction::CreateReduceScatter(
-        output_shape, {param}, MakeReduction(type, module), {}, false,
+        output_shape, {param}, MakeReduction(type, module), CreateReplicaGroups({{0, 1}}), false,
         std::nullopt, false, 0));
+    HloComputation* reduction =
+        module->AddEmbeddedComputation(async_builder.Build());
+
+    return reduction;
+  }
+  HloComputation* MakeAll2All(Shape input_shape,HloModule* module){
+    HloComputation::Builder async_builder("AsyncOp");
+    HloInstruction* param = async_builder.AddInstruction(
+        HloInstruction::CreateParameter(0, input_shape, "pasync"));
+    HloInstruction* param1 = async_builder.AddInstruction(
+        HloInstruction::CreateParameter(0, input_shape, "pasync"));
+    async_builder.AddInstruction(HloInstruction::CreateAllToAll(
+          input_shape, {param,param1},
+          /*replica_groups=*/CreateReplicaGroups({{0, 1}}),
+          /*constrain_layout=*/false, /*channel_id=*/std::nullopt,
+          /*split_dimension*/ 0
+      ));
     HloComputation* reduction =
         module->AddEmbeddedComputation(async_builder.Build());
 
@@ -511,10 +528,26 @@ ENTRY %elementwise {
 
     auto add_reduce_scatter =
         builder.AddInstruction(HloInstruction::CreateBinary(
-            shape, HloOpcode::kAdd, reducescater_ret1, reducescater_ret0));
-    // root:  d01_dot_p0,d23_dot_p1
+            reduce_shape, HloOpcode::kAdd, reducescater_ret1, reducescater_ret0));
+    auto all2all_ret = builder.AddInstruction(HloInstruction::CreateAllToAll(
+          reduce_shape, {add_reduce_scatter},
+          /*replica_groups=*/CreateReplicaGroups({{0, 1}}),
+          /*constrain_layout=*/false, /*channel_id=*/std::nullopt,
+          /*split_dimension*/ 0
+      ));
+    // auto all2all_op = MakeAll2All(shape,module);
+    // HloInstruction* all2all_start =
+    //     builder.AddInstruction(HloInstruction::CreateAsyncStart(
+    //         reduce_shape, {add_reduce_scatter,add_reduce_scatter}, all2all_op,
+    //         /*async_group_id=*/std::nullopt,
+    //         /*async_execution_thread=*/"parallel_thread"));
+    // auto all2all_ret =
+    //     builder.AddInstruction(HloInstruction::CreateAsyncDone(
+    //         reduce_shape, all2all_start, all2all_op,
+    //         /*async_group_id=*/std::nullopt,
+    //         /*async_execution_thread=*/"parallel_thread"));
     auto ret = builder.AddInstruction(HloInstruction::CreateTuple(
-        {d01_dot_p0_add_p2, d23_dot_p1_add_p3, add_reduce_scatter}));
+        {d01_dot_p0_add_p2, d23_dot_p1_add_p3,all2all_ret}));
     auto computation = builder.Build();
     computation->set_root_instruction(ret);
     auto entry_computation =
