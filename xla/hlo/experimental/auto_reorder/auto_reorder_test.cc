@@ -472,8 +472,8 @@ ENTRY %elementwise {
         builder.AddInstruction(HloInstruction::CreateAllReduceStart(
             shape, {d01}, add_reducer,
             /*replica_groups=*/CreateReplicaGroups({{0, 1}}),
-            /*constrain_layout=*/false, /*channel_id=*/std::nullopt,
-            /*use_global_device_ids=*/false), "all_reduce_start");
+            /*constrain_layout=*/false, /*channel_id=*/1,
+            /*use_global_device_ids=*/true), "all_reduce_start");
     HloInstruction* ar_done0 =
         builder.AddInstruction(HloInstruction::CreateUnary(
             shape, HloOpcode::kAllReduceDone, all_reduce_start),"ar_done0");

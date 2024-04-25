@@ -189,6 +189,11 @@ GpuPerformanceWithCollectiveModel::CheckIfNvlinkSupportsP2P() {
   nvmlReturn_t nvlink_cap_result = xla_nvmlDeviceGetNvLinkCapability(
       nvml_device, /*nvlink link number*/ 0, NVML_NVLINK_CAP_P2P_SUPPORTED,
       &supported_p2p);
+  if(nvlink_cap_result==NVML_ERROR_NOT_SUPPORTED)
+  {
+    VLOG(8) << "nvmlDeviceGetNvLinkCapability is not supported.";
+    return 0;
+  }
   CHECK(nvlink_cap_result == NVML_SUCCESS);
   CHECK(ShutdownNvml()) << "NVML shutdown failed.";
   return supported_p2p;
@@ -373,6 +378,7 @@ GpuPerformanceWithCollectiveModel::ComputeAllgatherTime(
   auto numel_bytes = cost_analysis->bytes_accessed(instr);
 
   int64_t total_gpu = cost_analysis->NumOfDevices(instr);
+  //TODO: total_gpu is uncorrect
 
   int64_t intra_nodes = (total_gpu - kInnerNodeGpu) / kInnerNodeGpu;
   //
@@ -438,7 +444,7 @@ GpuPerformanceWithCollectiveModel::ComputeReducescatterTime(
 GpuPerformanceWithCollectiveModel::ComputeCollectiveTime(
     const HloInstruction& instr, const GpuHloCostAnalysis* cost_analysis,
     const se::DeviceDescription& gpu_device_info) {
-  if (cost_analysis->NumOfDevices(instr) <= 1) {
+  if (cost_analysis->NumOfDevices(instr) == 1) {
     VLOG(8) << "Returning only kernel launch overhead for a single partition.";
     return kKernelLaunchOverhead;
   }
