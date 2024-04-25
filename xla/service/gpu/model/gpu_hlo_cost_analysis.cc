@@ -345,15 +345,14 @@ int64_t GetFlopsForElementwiseOp(const se::DeviceDescription* gpu_device_info,
   return GetFlopsForElementwiseOp(gpu_device_info, instr->opcode(),
                                   instr->shape());
 }
-
-absl::Status GpuHloCostAnalysis::HandleAllReduce(
-    const HloInstruction* allreduce) {
-  const HloModuleConfig& config = allreduce->GetModule()->config();
+template <typename T>
+absl::Status GpuHloCostAnalysis::HandleCommOp(const HloInstruction* hlo){
+  const HloModuleConfig& config = hlo->GetModule()->config();
   TF_ASSIGN_OR_RETURN(
       CollectiveOpGroupMode group_mode,
       GetCollectiveOpGroupMode(
-          allreduce->channel_id().has_value(),
-          Cast<HloAllReduceInstruction>(allreduce)->use_global_device_ids()));
+          hlo->channel_id().has_value(),
+          Cast<T>(hlo)->use_global_device_ids()));
 
   // Get number of ranks for this instruction based on replica groups and mode.
   int64_t num_devices = config.num_partitions();
@@ -361,28 +360,30 @@ absl::Status GpuHloCostAnalysis::HandleAllReduce(
   TF_ASSIGN_OR_RETURN(
       std::vector<int64_t> participant_counts,
       GetPariticipantCountsForReplicaGroups(
-          num_replicas, num_devices, allreduce->replica_groups(), group_mode));
+          num_replicas, num_devices, hlo->replica_groups(), group_mode));
   int64_t num_ranks = 1;
 
   for (auto count : participant_counts) {
+    VLOG(5) << "Computing cost for " << num_ranks << " ranks participant_counts:"<<count;
     num_ranks = std::max(num_ranks, count);
+    
   }
 
   VLOG(5) << "Computing cost for " << num_ranks << " ranks in "
-          << allreduce->ToString();
+          << hlo->ToString();
 
   int64_t output_bytes_accessed = 0;
   // Since for allreduces, the input shape is the same as output shape and can
   // be done in-place, we calculate output_bytes_accessed based on just the
   // output size.
   ShapeUtil::ForEachSubshape(
-      allreduce->shape(), [&](const Shape& subshape, const ShapeIndex&) {
+      hlo->shape(), [&](const Shape& subshape, const ShapeIndex&) {
         if (subshape.IsArray()) {
           output_bytes_accessed += GetShapeSize(subshape);
         }
       });
   int64_t bytes_accessed = output_bytes_accessed;
-  for (const HloInstruction* operand : allreduce->operands()) {
+  for (const HloInstruction* operand : hlo->operands()) {
     bytes_accessed += GetShapeSize(operand->shape());
   }
   current_properties_.set_output_bytes_accessed(output_bytes_accessed);
@@ -390,9 +391,12 @@ absl::Status GpuHloCostAnalysis::HandleAllReduce(
   current_properties_[kCollNumDevicesKey] = num_ranks;
   // Since allreduce has compute, we need to get flops for the compute
   // part which is an elementwise op.
-  current_properties_[kFlopsKey] = GetFlopsForElementwiseOp(
-      device_info_, allreduce->to_apply()->root_instruction()->opcode(),
-      allreduce->shape());
+  
+  if(std::is_same<T, HloAllReduceInstruction>()){
+    current_properties_[kFlopsKey] = GetFlopsForElementwiseOp(
+      device_info_, hlo->to_apply()->root_instruction()->opcode(),
+      hlo->shape());
+  }
 
   // TODO TJ support multi-node case, we need to know how many nodes there are.
   int num_intra_steps = 2 * (num_ranks - 1);
@@ -405,6 +409,18 @@ absl::Status GpuHloCostAnalysis::HandleAllReduce(
   current_properties_[kCollAlgoScaleRatioKey] = scaling_ratio;
 
   return absl::OkStatus();
+}
+absl::Status GpuHloCostAnalysis::HandleAllReduce(
+    const HloInstruction* allreduce) {
+  return HandleCommOp<HloAllReduceInstruction>(allreduce);
+  
+}
+
+absl::Status GpuHloCostAnalysis::HandleAllGather(const HloInstruction* hlo){
+  return HandleCommOp<HloAllGatherInstruction>(hlo);
+}
+absl::Status GpuHloCostAnalysis::HandleReduceScatter(const HloInstruction* hlo){
+  return HandleCommOp<HloReduceScatterInstruction>(hlo);
 }
 
 absl::Status GpuHloCostAnalysis::HandleConcatenate(const HloInstruction* hlo) {

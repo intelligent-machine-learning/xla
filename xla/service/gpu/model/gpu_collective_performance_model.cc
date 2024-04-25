@@ -266,16 +266,37 @@ GpuPerformanceWithCollectiveModel::ComputeAllreduceTime(
 
   bus_bandwidth = std::min(bus_bandwidth * kRingAlgorithmDiscountFactor,
                            num_channels * per_channel_ring_ll128_Bw);
-  double actual_bandwidth = bus_bandwidth * cost_analysis->ScalingRatio(instr);
+  auto bandswidth_vector =
+      GetInterInnerBandwidths(instr, cost_analysis, gpu_device_info);
+  double intra_node_bus_bandwidth = bandswidth_vector[0];
+  double inner_node_bus_bandwidth = bandswidth_vector[1];
+  // allreduce send(single direction) inter nodes: instr_bytes*(num_devices-kInnerNodeGpu)
+  auto instr_bytes =cost_analysis->bytes_accessed(instr);
+  auto intra_nodes_numel_bytes=instr_bytes*(num_devices-kInnerNodeGpu);
 
+  auto local_gpu = std::min(kInnerNodeGpu, num_devices);
+  // allreduce send(single direction) inter nodes: instr_bytes*(local_gpu-1)
+  auto inner_node_numel_bytes=instr_bytes*(local_gpu-1);
+
+  double actual_bandwidth = bus_bandwidth * cost_analysis->ScalingRatio(instr);
   absl::Duration communication_time = absl::Milliseconds(
-      cost_analysis->bytes_accessed(instr) / (1e6 * actual_bandwidth));
+      std::max(intra_nodes_numel_bytes / (intra_node_bus_bandwidth * 1e6),
+               inner_node_numel_bytes / (inner_node_bus_bandwidth * 1e6)));
   total_time += communication_time;
   return total_time;
 }
 std::vector<double> GpuPerformanceWithCollectiveModel::GetInterInnerBandwidths(
     const HloInstruction& instr, const GpuHloCostAnalysis* cost_analysis,
     const se::DeviceDescription& gpu_device_info) {
+  const char* XLA_INTERNODE_BW = std::getenv("XLA_INTERNODE_BW");
+  const char* XLA_INNERNODE_BW = std::getenv("XLA_INNERNODE_BW");
+  if (XLA_INTERNODE_BW != nullptr&& XLA_INNERNODE_BW!=nullptr)
+  {
+    double intra_node_bus_bandwidth = std::stod(XLA_INNERNODE_BW);
+    double inner_node_bus_bandwidth = std::stod(XLA_INTERNODE_BW);
+    return std::vector<double>(
+        {intra_node_bus_bandwidth, inner_node_bus_bandwidth});
+  }
   stream_executor::CudaComputeCapability compute_cap =
       gpu_device_info.cuda_compute_capability();
 
@@ -367,7 +388,7 @@ GpuPerformanceWithCollectiveModel::ComputeAllgatherTime(
   absl::Duration communication_time = absl::Milliseconds(
       std::max(intra_nodes_numel_bytes / (intra_node_bus_bandwidth * 1e6),
                inner_node_numel_bytes / (inner_node_bus_bandwidth * 1e6)));
-  VLOG(5) << instr.ToString() << " numel_bytes:" << numel_bytes
+  std::cout << instr.ToString() << " numel_bytes:" << numel_bytes
           << " intra_nodes_numel_bytes: " << intra_nodes_numel_bytes
           << " inner_node_numel_bytes: " << inner_node_numel_bytes
           << " intra_node_bus_bandwidth: " << intra_node_bus_bandwidth

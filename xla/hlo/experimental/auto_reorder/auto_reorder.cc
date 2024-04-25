@@ -169,7 +169,10 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
       operand_lp_node->SetHintStart(start_at);
     }
   }
-
+  if (reorder::solve_debug) {
+    // save to pid related file
+    solver_->RenderGraphviz(absl::StrCat("gantt_before_", computation->name()));
+  }
   auto status = solver_->Solve();
   if (reorder::solve_debug) {
     // save to pid related file

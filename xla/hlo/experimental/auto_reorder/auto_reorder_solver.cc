@@ -155,8 +155,8 @@ LPSchedulerFunc(tsl::Status)::Solve() {
         auto dep_task = std::get<1>(node_to_task_.at(dep_node->UUID()));
         // interval
         IntervalVar interval = cp_model_.NewIntervalVar(
-            dep_task.start, dep_node->GetCost() + cost + node->GetCost(),
-            node_task.end);
+            dep_task.end, cost,
+            node_task.start);
         no_overlap_edges.push_back(interval);
       }
     }

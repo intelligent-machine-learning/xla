@@ -56,9 +56,14 @@ class GpuHloCostAnalysis : public HloCostAnalysis {
   absl::Status HandleElementwiseOp(const HloInstruction* hlo);
   absl::Status HandleElementwiseUnary(const HloInstruction* hlo) override;
   absl::Status HandleElementwiseBinary(const HloInstruction* hlo) override;
+ 
+  template <typename T>
+  absl::Status HandleCommOp(const HloInstruction* hlo);
 
   absl::Status HandleConcatenate(const HloInstruction* hlo) override;
   absl::Status HandleAllReduce(const HloInstruction* allreduce) override;
+  absl::Status HandleAllGather(const HloInstruction* hlo) override;
+  absl::Status HandleReduceScatter(const HloInstruction* hlo) override;
   absl::Status HandleReduce(const HloInstruction* hlo) override;
 
   // Estimate the total size of IR accounting for both duplication

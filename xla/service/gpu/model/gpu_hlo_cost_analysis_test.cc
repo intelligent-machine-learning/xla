@@ -121,6 +121,31 @@ ENTRY entry {
             sizeof(float) * n_output_elements);
 }
 
+
+
+TEST_F(GpuHloCostAnalysisTest, AllGatherDevice) {
+  absl::string_view hlo_string = R"(
+HloModule m
+ENTRY e {
+  %p0 = f32[400,12800]{1,0} parameter(0)
+  %ag-start = (f32[400,12800], f32[1600,12800]) all-gather-start(
+    f32[400,12800] %p0), replica_groups={{0,1,2,3}}, dimensions={0},
+    metadata={op_type="AllGather" op_name="ag0"}
+  %ag-done = f32[1600,12800] all-gather-done(
+    (f32[400,12800], f32[1600,12800]) %ag-start),
+    metadata={op_type="AllGather" op_name="ag0.done"}
+  ROOT tuple = (f32[1600,12800]{0,1}) tuple(%ag-done )
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(hlo_string,/*replica_count*/ 4));
+  HloInstruction* root = module->entry_computation()->root_instruction();
+  ASSERT_IS_OK(module->entry_computation()->Accept(&analysis_));
+  auto computation = module->entry_computation();
+  const HloInstruction* all_reduce_start = computation->GetInstructionWithName("ag0");
+
+  EXPECT_EQ(analysis_.NumOfDevices(*all_reduce_start), 4);
+}
 TEST_F(GpuHloCostAnalysisTest, BroadcastWithRepeats) {
   absl::string_view hlo_string = R"(
 HloModule m

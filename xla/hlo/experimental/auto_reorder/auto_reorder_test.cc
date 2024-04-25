@@ -473,10 +473,10 @@ ENTRY %elementwise {
             shape, {d01}, add_reducer,
             /*replica_groups=*/CreateReplicaGroups({{0, 1}}),
             /*constrain_layout=*/false, /*channel_id=*/std::nullopt,
-            /*use_global_device_ids=*/false));
+            /*use_global_device_ids=*/false), "all_reduce_start");
     HloInstruction* ar_done0 =
         builder.AddInstruction(HloInstruction::CreateUnary(
-            shape, HloOpcode::kAllReduceDone, all_reduce_start));
+            shape, HloOpcode::kAllReduceDone, all_reduce_start),"ar_done0");
 
     HloInstruction* all_reduce_start1 =
         builder.AddInstruction(HloInstruction::CreateAllReduceStart(
@@ -508,23 +508,22 @@ ENTRY %elementwise {
     HloInstruction* async_start0 =
         builder.AddInstruction(HloInstruction::CreateAsyncStart(
             async_start_shape, {d01_dot_p0_add_p2}, rs_computation,
-            /*async_group_id=*/std::nullopt,
             /*async_execution_thread=*/"parallel_thread"));
-    auto reducescater_ret0 =
-        builder.AddInstruction(HloInstruction::CreateAsyncDone(
-            reduce_shape, async_start0, rs_computation,
-            /*async_group_id=*/std::nullopt,
-            /*async_execution_thread=*/"parallel_thread"));
+    HloInstruction* async_update = builder.AddInstruction(
+      HloInstruction::CreateAsyncUpdate(async_start_shape, async_start0));
+    auto reducescater_ret0 = builder.AddInstruction(
+        HloInstruction::CreateAsyncDone(reduce_shape, async_update));
+    //new version:need create other computation
+     auto rs_computation2 =
+        MakeReduceScatter(HloOpcode::kAdd, shape, reduce_shape, module);
     HloInstruction* async_start1 =
         builder.AddInstruction(HloInstruction::CreateAsyncStart(
-            async_start_shape, {d23_dot_p1_add_p3}, rs_computation,
-            /*async_group_id=*/std::nullopt,
+            async_start_shape, {d23_dot_p1_add_p3}, rs_computation2,
             /*async_execution_thread=*/"parallel_thread"));
-    auto reducescater_ret1 =
-        builder.AddInstruction(HloInstruction::CreateAsyncDone(
-            reduce_shape, async_start1, rs_computation,
-            /*async_group_id=*/std::nullopt,
-            /*async_execution_thread=*/"parallel_thread"));
+    HloInstruction* async_update1 = builder.AddInstruction(
+      HloInstruction::CreateAsyncUpdate(async_start_shape, async_start1));
+    auto reducescater_ret1 = builder.AddInstruction(
+        HloInstruction::CreateAsyncDone(reduce_shape, async_update1));
 
     auto add_reduce_scatter =
         builder.AddInstruction(HloInstruction::CreateBinary(
@@ -535,19 +534,9 @@ ENTRY %elementwise {
           /*constrain_layout=*/false, /*channel_id=*/std::nullopt,
           /*split_dimension*/ 0
       ));
-    // auto all2all_op = MakeAll2All(shape,module);
-    // HloInstruction* all2all_start =
-    //     builder.AddInstruction(HloInstruction::CreateAsyncStart(
-    //         reduce_shape, {add_reduce_scatter,add_reduce_scatter}, all2all_op,
-    //         /*async_group_id=*/std::nullopt,
-    //         /*async_execution_thread=*/"parallel_thread"));
-    // auto all2all_ret =
-    //     builder.AddInstruction(HloInstruction::CreateAsyncDone(
-    //         reduce_shape, all2all_start, all2all_op,
-    //         /*async_group_id=*/std::nullopt,
-    //         /*async_execution_thread=*/"parallel_thread"));
+    std::vector<HloInstruction*> compute_vec = {d01_dot_p0_add_p2, d23_dot_p1_add_p3, all2all_ret};
     auto ret = builder.AddInstruction(HloInstruction::CreateTuple(
-        {d01_dot_p0_add_p2, d23_dot_p1_add_p3,all2all_ret}));
+        compute_vec));
     auto computation = builder.Build();
     computation->set_root_instruction(ret);
     auto entry_computation =
@@ -968,52 +957,80 @@ ENTRY %elementwise {
     }
   }
 };
+TEST_F(AutoReorderingTest, CommOpCostTest){
+  HloCostAnalysis::ShapeSizeFunction ShapeSizeBytesFunction = [&](const Shape& shape) {
+    constexpr int64_t kPointerSize = 8;
+    return ShapeUtil::ByteSizeOf(shape, kPointerSize);
+  };
+  
+
+  HloCostAnalysis::Options options_{ShapeSizeBytesFunction,
+                                    /*per_second_rates=*/{},
+                                    /*count_multiple_input_accesses=*/true};
+  GpuHloCostAnalysis analysis_(options_);
+
+  auto hlo_module = CreateNewVerifiedModule(TestName(),/*replica_count*/2);
+  auto st = MakeTestComputation(hlo_module.get());
+  HloComputation* comp = st.value();
+  ASSERT_IS_OK(hlo_module->entry_computation()->Accept(&analysis_));
+  
+  const HloModuleConfig& config = hlo_module->config();
+  int64_t num_devices = config.num_partitions();
+  int64_t num_replicas = config.replica_count();
+  const HloInstruction* all_reduce_start = comp->GetInstructionWithName("all_reduce_start");
+
+  // CollectiveOpGroupMode group_mode = 
+  //     analysis_.GetCollectiveOpGroupMode(
+  //         all_reduce_start->channel_id().has_value(),
+  //         Cast<HloAllReduceInstruction>(all_reduce_start)->use_global_device_ids()));
+
+  EXPECT_EQ(analysis_.NumOfDevices(*all_reduce_start),2);
+};
 TEST_F(AutoReorderingTest, SPMDAutoReorder) {
+  // GTEST_SKIP()<<"new version xla can'parse this old hlo";
   absl::string_view hlo_string = R"(
-HloModule spmd_module, is_scheduled=true
+HloModule SyncTensorsGraph.23, is_scheduled=true, entry_computation_layout={(f32[9600]{0}, f32[2400,12800]{1,0}, f32[400,12800]{1,0}, f32[320,9600]{1,0}, f32[1280]{0})->(f32[400,9600]{1,0}, f32[9600,320]{1,0}, f32[400,1280]{1,0})}, allow_spmd_sharding_propagation_to_output={true}, num_partitions=4, frontend_attributes={fingerprint_before_lhs="45ccf07b9a0d113ede565121a6790508"}
 
-%add {
-  %p0 = f32[] parameter(0)
-  %p1 = f32[] parameter(1)
-  ROOT %a = f32[] add(p0, p1)
-}
-%fused_computation {
-  param_1 = f32[400,1280]{1,0} parameter(0)
-  param_1.1 = f32[1280]{0} parameter(1)
-  broadcast.6 = f32[400,1280]{1,0} broadcast(param_1.1), dimensions={1}, metadata={op_type="aten__addmm" op_name="aten__addmm"}
-  ROOT add.4 = f32[400,1280]{1,0} add(param_1, broadcast.6), metadata={op_type="aten__addmm" op_name="aten__addmm"}
+fused_add {
+  param_0 = f32[400,9600]{1,0} parameter(0)
+  param_1.1 = f32[9600]{0} parameter(1)
+  broadcast.6.1 = f32[400,9600]{1,0} broadcast(param_1.1), dimensions={1}, metadata={op_type="aten__addmm" op_name="aten__addmm"}
+  ROOT add.4.1 = f32[400,9600]{1,0} add(param_0, broadcast.6.1), metadata={op_type="aten__addmm" op_name="aten__addmm"}
 }
 
-%fused_computation.1 {
-  param_0.1 = f32[400,9600]{1,0} parameter(0)
-  param_1.3 = f32[9600]{0} parameter(1)
-  broadcast.7 = f32[400,9600]{1,0} broadcast(param_1.3), dimensions={1}, metadata={op_type="aten__addmm" op_name="aten__addmm"}
-  ROOT add.5 = f32[400,9600]{1,0} add(param_0.1, broadcast.7), metadata={op_type="aten__addmm" op_name="aten__addmm"}
+fused_add.1 {
+  param_0.1 = f32[400,1280]{1,0} parameter(0)
+  param_1.3 = f32[1280]{0} parameter(1)
+  broadcast.8.1 = f32[400,1280]{1,0} broadcast(param_1.3), dimensions={1}, metadata={op_type="aten__addmm" op_name="aten__addmm"}
+  ROOT add.5.1 = f32[400,1280]{1,0} add(param_0.1, broadcast.8.1), metadata={op_type="aten__addmm" op_name="aten__addmm"}
 }
 
-ENTRY %spmd_module (param: f32[9600], param.1: f32[1280], param.3: f32[2400,12800], param.2: f32[400,12800], param.4: f32[320,9600]) -> (f32[9600], f32[1280], f32[400,9600], f32[9600,320], f32[400,1280]) {
-  %param = f32[9600]{0} parameter(0), sharding={replicated}, metadata={op_type="xla__device_data" op_name="xla__device_data"}
-  %copy.5 = f32[9600]{0} copy(f32[9600]{0} %param)
-  %param.1 = f32[1280]{0} parameter(1), sharding={replicated}, metadata={op_type="xla__device_data" op_name="xla__device_data"}
-  %copy.6 = f32[1280]{0} copy(f32[1280]{0} %param.1)
-  %param.2 = f32[400,12800]{1,0} parameter(3), sharding={devices=[4,1]0,1,2,3}, metadata={op_type="xla__device_data" op_name="xla__device_data"}
-  %param.3 = f32[2400,12800]{1,0} parameter(2), sharding={devices=[4,1]0,1,2,3}, metadata={op_type="xla__device_data" op_name="xla__device_data"}
-  %bitcast.11 = f32[12800,2400]{0,1} bitcast(f32[2400,12800]{1,0} %param.3)
-  %all-gather-start = (f32[12800,2400]{0,1}, f32[12800,9600]{0,1}) all-gather-start(f32[12800,2400]{0,1} %bitcast.11), channel_id=1, replica_groups={{0,1,2,3}}, dimensions={1}, use_global_device_ids=true, metadata={op_type="aten__addmm" op_name="aten__addmm"}, backend_config={"is_sync":false,"no_parallel_custom_call":false}
-  %all-gather-done = f32[12800,9600]{0,1} all-gather-done((f32[12800,2400]{0,1}, f32[12800,9600]{0,1}) %all-gather-start), metadata={op_type="aten__addmm" op_name="aten__addmm"}
-  %custom-call.2 = (f32[400,9600]{1,0}, s8[4194304]{0}) custom-call(f32[400,12800]{1,0} %param.2, f32[12800,9600]{0,1} %all-gather-done), custom_call_target="__cublas$gemm", metadata={op_type="aten__addmm" op_name="aten__addmm"}, backend_config={"alpha_real":1,"alpha_imag":0,"beta":0,"dot_dimension_numbers":{"lhs_contracting_dimensions":["1"],"rhs_contracting_dimensions":["0"],"lhs_batch_dimensions":[],"rhs_batch_dimensions":[]},"precision_config":{"operand_precision":["DEFAULT","DEFAULT"]},"epilogue":"DEFAULT","lhs_stride":"5120000","rhs_stride":"122880000","grad_x":false,"grad_y":false}
-  %get-tuple-element.5 = f32[400,9600]{1,0} get-tuple-element((f32[400,9600]{1,0}, s8[4194304]{0}) %custom-call.2), index=0, metadata={op_type="aten__addmm" op_name="aten__addmm"}
-  %fusion.1 = f32[400,9600]{1,0} fusion(f32[400,9600]{1,0} %get-tuple-element.5, f32[9600]{0} %param), kind=kLoop, calls=%fused_computation.1, metadata={op_type="aten__addmm" op_name="aten__addmm"}
-  %param.4 = f32[320,9600]{1,0} parameter(4), sharding={devices=[4,1]0,1,2,3}, metadata={op_type="xla__device_data" op_name="xla__device_data"}
-  %transpose.2 = f32[9600,320]{1,0} transpose(f32[320,9600]{1,0} %param.4), dimensions={1,0}
-  %bitcast.28 = f32[9600,320]{0,1} bitcast(f32[320,9600]{1,0} %param.4)
-  %all-gather-start.1 = (f32[9600,320]{0,1}, f32[9600,1280]{0,1}) all-gather-start(f32[9600,320]{0,1} %bitcast.28), channel_id=2, replica_groups={{0,1,2,3}}, dimensions={1}, use_global_device_ids=true, metadata={op_type="aten__addmm" op_name="aten__addmm"}, backend_config={"is_sync":false,"no_parallel_custom_call":false}
-  %all-gather-done.1 = f32[9600,1280]{0,1} all-gather-done((f32[9600,320]{0,1}, f32[9600,1280]{0,1}) %all-gather-start.1), metadata={op_type="aten__addmm" op_name="aten__addmm"}
-  %custom-call.3 = (f32[400,1280]{1,0}, s8[4194304]{0}) custom-call(f32[400,9600]{1,0} %fusion.1, f32[9600,1280]{0,1} %all-gather-done.1), custom_call_target="__cublas$gemm", metadata={op_type="aten__addmm" op_name="aten__addmm"}, backend_config={"alpha_real":1,"alpha_imag":0,"beta":0,"dot_dimension_numbers":{"lhs_contracting_dimensions":["1"],"rhs_contracting_dimensions":["0"],"lhs_batch_dimensions":[],"rhs_batch_dimensions":[]},"precision_config":{"operand_precision":["DEFAULT","DEFAULT"]},"epilogue":"DEFAULT","lhs_stride":"3840000","rhs_stride":"12288000","grad_x":false,"grad_y":false}
-  %get-tuple-element.6 = f32[400,1280]{1,0} get-tuple-element((f32[400,1280]{1,0}, s8[4194304]{0}) %custom-call.3), index=0, metadata={op_type="aten__addmm" op_name="aten__addmm"}
-  %fusion = f32[400,1280]{1,0} fusion(f32[400,1280]{1,0} %get-tuple-element.6, f32[1280]{0} %param.1), kind=kLoop, calls=%fused_computation, metadata={op_type="aten__addmm" op_name="aten__addmm"}
-  ROOT %tuple.2 = (f32[9600]{0}, f32[1280]{0}, f32[400,9600]{1,0}, f32[9600,320]{1,0}, f32[400,1280]{1,0}) tuple(f32[9600]{0} %copy.5, f32[1280]{0} %copy.6, f32[400,9600]{1,0} %fusion.1, f32[9600,320]{1,0} %transpose.2, f32[400,1280]{1,0} %fusion)
+wrapped_transpose_computation {
+  param_0.2 = f32[320,9600]{1,0} parameter(0)
+  ROOT transpose.4.1 = f32[9600,320]{1,0} transpose(param_0.2), dimensions={1,0}
 }
+
+ENTRY SyncTensorsGraph.23_spmd {
+  param.5 = f32[400,12800]{1,0} parameter(2), sharding={devices=[4,1]0,1,2,3}, metadata={op_type="xla__device_data" op_name="xla__device_data"}
+  param.1.0 = f32[2400,12800]{1,0} parameter(1), sharding={devices=[4,1]0,1,2,3}, metadata={op_type="xla__device_data" op_name="xla__device_data"}
+  param.2.0 = f32[9600]{0} parameter(0), sharding={replicated}, metadata={op_type="xla__device_data" op_name="xla__device_data"}
+  param.3.0 = f32[320,9600]{1,0} parameter(3), sharding={devices=[4,1]0,1,2,3}, metadata={op_type="xla__device_data" op_name="xla__device_data"}
+  param.4.0 = f32[1280]{0} parameter(4), sharding={replicated}, metadata={op_type="xla__device_data" op_name="xla__device_data"}
+  bitcast.44.0 = f32[12800,2400]{0,1} bitcast(param.1.0)
+  wrapped_transpose = f32[9600,320]{1,0} fusion(param.3.0), kind=kInput, calls=wrapped_transpose_computation
+  bitcast.61.0 = f32[9600,320]{0,1} bitcast(param.3.0)
+  all-gather-start = (f32[12800,2400]{0,1}, f32[12800,9600]{0,1}) all-gather-start(bitcast.44.0), channel_id=1, replica_groups={{0,1,2,3}}, dimensions={1}, use_global_device_ids=true, metadata={op_type="aten__addmm" op_name="aten__addmm"}, backend_config={"operation_queue_id":"0","wait_on_operation_queues":[],"collective_backend_config":{"is_sync":false,"no_parallel_custom_call":false},"force_earliest_schedule":false}
+  all-gather-done = f32[12800,9600]{0,1} all-gather-done(all-gather-start), metadata={op_type="aten__addmm" op_name="aten__addmm"}
+  all-gather-start.1 = (f32[9600,320]{0,1}, f32[9600,1280]{0,1}) all-gather-start(bitcast.61.0), channel_id=2, replica_groups={{0,1,2,3}}, dimensions={1}, use_global_device_ids=true, metadata={op_type="aten__addmm" op_name="aten__addmm"}, backend_config={"operation_queue_id":"0","wait_on_operation_queues":[],"collective_backend_config":{"is_sync":false,"no_parallel_custom_call":false},"force_earliest_schedule":false}
+  all-gather-done.1 = f32[9600,1280]{0,1} all-gather-done(all-gather-start.1), metadata={op_type="aten__addmm" op_name="aten__addmm"}
+  custom-call.2.0 = (f32[400,9600]{1,0}, s8[4194304]{0}) custom-call(param.5, all-gather-done), custom_call_target="__cublas$gemm", metadata={op_type="aten__addmm" op_name="aten__addmm"}, backend_config={"operation_queue_id":"0","wait_on_operation_queues":[],"gemm_backend_config":{"alpha_real":1,"alpha_imag":0,"beta":0,"dot_dimension_numbers":{"lhs_contracting_dimensions":["1"],"rhs_contracting_dimensions":["0"],"lhs_batch_dimensions":[],"rhs_batch_dimensions":[]},"precision_config":{"operand_precision":["DEFAULT","DEFAULT"],"algorithm":"ALG_UNSET"},"epilogue":"DEFAULT","lhs_stride":"5120000","rhs_stride":"122880000","grad_x":false,"grad_y":false},"force_earliest_schedule":false}
+  get-tuple-element.3.0 = f32[400,9600]{1,0} get-tuple-element(custom-call.2.0), index=0, metadata={op_type="aten__addmm" op_name="aten__addmm"}
+  loop_add_fusion = f32[400,9600]{1,0} fusion(get-tuple-element.3.0, param.2.0), kind=kLoop, calls=fused_add, metadata={op_type="aten__addmm" op_name="aten__addmm"}
+  custom-call.3.0 = (f32[400,1280]{1,0}, s8[4194304]{0}) custom-call(loop_add_fusion, all-gather-done.1), custom_call_target="__cublas$gemm", metadata={op_type="aten__addmm" op_name="aten__addmm"}, backend_config={"operation_queue_id":"0","wait_on_operation_queues":[],"gemm_backend_config":{"alpha_real":1,"alpha_imag":0,"beta":0,"dot_dimension_numbers":{"lhs_contracting_dimensions":["1"],"rhs_contracting_dimensions":["0"],"lhs_batch_dimensions":[],"rhs_batch_dimensions":[]},"precision_config":{"operand_precision":["DEFAULT","DEFAULT"],"algorithm":"ALG_UNSET"},"epilogue":"DEFAULT","lhs_stride":"3840000","rhs_stride":"12288000","grad_x":false,"grad_y":false},"force_earliest_schedule":false}
+  get-tuple-element.4.0 = f32[400,1280]{1,0} get-tuple-element(custom-call.3.0), index=0, metadata={op_type="aten__addmm" op_name="aten__addmm"}
+  loop_add_fusion.1 = f32[400,1280]{1,0} fusion(get-tuple-element.4.0, param.4.0), kind=kLoop, calls=fused_add.1, metadata={op_type="aten__addmm" op_name="aten__addmm"}
+  ROOT tuple.1.0 = (f32[400,9600]{1,0}, f32[9600,320]{1,0}, f32[400,1280]{1,0}) tuple(loop_add_fusion, wrapped_transpose, loop_add_fusion.1)
+} // SyncTensorsGraph.23_spmd
 )";
   TF_ASSERT_OK_AND_ASSIGN(auto hlo_module, ParseHloText(hlo_string));
   auto gpu_latency_estimator = std::make_unique<GpuLatencyEstimator>();
