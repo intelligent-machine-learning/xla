@@ -417,7 +417,26 @@ absl::Status GpuHloCostAnalysis::HandleAllReduce(
 }
 
 absl::Status GpuHloCostAnalysis::HandleAllGather(const HloInstruction* hlo){
-  return HandleCommOp<HloAllGatherInstruction>(hlo);
+  auto st = HandleCommOp<HloAllGatherInstruction>(hlo);
+  if(!st.ok()){
+    return st;
+  }
+  //Overwrite bytes
+  int64_t output_bytes_accessed = 0;
+  ShapeUtil::ForEachSubshape(
+      hlo->shape(), [&](const Shape& subshape, const ShapeIndex&) {
+        if (subshape.IsArray()) {
+          output_bytes_accessed += GetShapeSize(subshape);
+        }
+      });
+  // set allgather bytes_accessed equal input operator size
+  int64_t bytes_accessed = 0;
+  for (const HloInstruction* operand : hlo->operands()) {
+    bytes_accessed += GetShapeSize(operand->shape());
+  }
+  current_properties_.set_output_bytes_accessed(output_bytes_accessed);
+  current_properties_[kBytesAccessedKey] = bytes_accessed;
+  return absl::OkStatus();
 }
 absl::Status GpuHloCostAnalysis::HandleReduceScatter(const HloInstruction* hlo){
   return HandleCommOp<HloReduceScatterInstruction>(hlo);
