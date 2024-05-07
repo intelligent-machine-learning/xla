@@ -184,7 +184,7 @@ LPSchedulerFunc(tsl::Status)::Solve() {
   // breaking during search.(default=2)
   parameters.set_symmetry_level(1);
   if (reorder::solve_debug) {
-    // parameters.set_log_to_stdout(true);
+    parameters.set_log_to_stdout(true);
     // parameters.set_log_search_progress(true);
   }
   parameters.set_num_search_workers(1);
@@ -224,8 +224,22 @@ std::string ReplaceUnusedChar(const std::string str,
   }
   return result;
 }
-
-LPSchedulerFunc(void)::RenderGraphviz(std::string filename) const {
+LPSchedulerFunc(std::vector<ContainerType*>)::GetSortedNodes() const{
+  std::vector<ContainerType*> sorted_nodes;
+  sorted_nodes.reserve(nodes_.size());
+  for (auto node : nodes_) {
+    sorted_nodes.push_back(node);
+  }
+  // we need stable_sort,let same graph on diffence device have same computation
+  std::stable_sort(
+      // std::sort(
+      sorted_nodes.begin(), sorted_nodes.end(),
+      [this](ContainerType* a, ContainerType* b) {
+        return a->GetStart() < b->GetStart();
+      });
+  return sorted_nodes;
+}
+LPSchedulerFunc(void)::RenderGraphviz(std::string filename) const{
   // write a dot file
   std::string dot_file = absl::StrCat("/tmp/", filename, ".dot");
   std::ofstream out(dot_file);
@@ -273,7 +287,7 @@ LPSchedulerFunc(void)::RenderGraphviz(std::string filename) const {
   auto status = system(cmd.c_str());
   VLOG(4) << cmd << " execute status:" << status << std::endl;
 }
-LPSchedulerFunc(void)::RenderGantt(std::string filename) const {
+LPSchedulerFunc(void)::RenderGantt(std::string filename) const{
   // https://g2.antv.antgroup.com/en/examples/storytelling/storytelling/#gantt
   // { name: 'compute',label:'kernel name1', startTime: 1, endTime: 4 },
   VLOG(4) << "write node number:" << nodes_.size() << " to /tmp/" << filename
@@ -286,7 +300,7 @@ LPSchedulerFunc(void)::RenderGantt(std::string filename) const {
   std::ofstream csv_out(csv_file);
   csv_out << R"(import { Chart } from '@antv/g2'; 
   const events = [ )";
-  for (auto node : nodes_) {
+  for (auto node : this->GetSortedNodes()) {
     std::string name;
     if (node->IsCommunication()) {
       name = "communication";
@@ -331,21 +345,7 @@ LPSchedulerFunc(void)::RenderGantt(std::string filename) const {
 
   chart.render();)";
 }
-LPSchedulerFunc(std::vector<ContainerType*>)::GetSortedNodes() {
-  std::vector<ContainerType*> sorted_nodes;
-  sorted_nodes.reserve(nodes_.size());
-  for (auto node : nodes_) {
-    sorted_nodes.push_back(node);
-  }
-  // we need stable_sort,let same graph on diffence device have same computation
-  std::stable_sort(
-      // std::sort(
-      sorted_nodes.begin(), sorted_nodes.end(),
-      [this](ContainerType* a, ContainerType* b) {
-        return a->GetStart() < b->GetStart();
-      });
-  return sorted_nodes;
-}
+
 
 LPContainerDAGFunc(bool)::IsIn(LPContainer<ElementType>* a) {
   return operands_.find(a) != operands_.end();

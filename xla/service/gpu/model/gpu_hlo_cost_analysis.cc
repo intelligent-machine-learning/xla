@@ -436,10 +436,32 @@ absl::Status GpuHloCostAnalysis::HandleAllGather(const HloInstruction* hlo){
   }
   current_properties_.set_output_bytes_accessed(output_bytes_accessed);
   current_properties_[kBytesAccessedKey] = bytes_accessed;
+  // Compute algorithmic scaling ratio
+  // link: https://github.com/NVIDIA/nccl-tests/blob/master/doc/PERFORMANCE.md
+  // algbw = Buswidth*n/(n-1)
+  int64_t num_ranks = current_properties_[kCollNumDevicesKey];
+  float scaling_ratio = 1.0;
+  if(num_ranks>1){
+    scaling_ratio = (1.0 * num_ranks) / (num_ranks-1);
+  }
+  current_properties_[kCollAlgoScaleRatioKey] = scaling_ratio;
   return absl::OkStatus();
 }
 absl::Status GpuHloCostAnalysis::HandleReduceScatter(const HloInstruction* hlo){
-  return HandleCommOp<HloReduceScatterInstruction>(hlo);
+  auto st = HandleCommOp<HloReduceScatterInstruction>(hlo);
+  if(!st.ok()){
+    return st;
+  }
+  int64_t num_ranks = current_properties_[kCollNumDevicesKey];
+  // Compute algorithmic scaling ratio
+  // link: https://github.com/NVIDIA/nccl-tests/blob/master/doc/PERFORMANCE.md
+  // algbw = Buswidth*n/(n-1)
+  float scaling_ratio = 1.0;
+  if(num_ranks>1){
+    scaling_ratio = (1.0 * num_ranks) / (num_ranks-1);
+  }
+  current_properties_[kCollAlgoScaleRatioKey] = scaling_ratio;
+  return absl::OkStatus();
 }
 
 absl::Status GpuHloCostAnalysis::HandleConcatenate(const HloInstruction* hlo) {

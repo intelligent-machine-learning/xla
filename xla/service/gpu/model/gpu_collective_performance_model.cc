@@ -59,7 +59,9 @@ int64_t GetNcclMaxNumChannels(
   }
   return max_nchannels;
 }
-
+// CostModelKind GetCostModelKind(){
+//     const char* env = std::getenv("XLA_COLLECTIVE_COST_MODEL_KIND");
+// }
 int64_t GetMinNumberOfChannels(
     GpuPerformanceWithCollectiveModel::CollectiveAlgo algorithm) {
   int64_t min_nchannels = 0;
@@ -297,8 +299,8 @@ std::vector<double> GpuPerformanceWithCollectiveModel::GetInterInnerBandwidths(
   const char* XLA_INNERNODE_BW = std::getenv("XLA_INNERNODE_BW");
   if (XLA_INTERNODE_BW != nullptr&& XLA_INNERNODE_BW!=nullptr)
   {
-    double intra_node_bus_bandwidth = std::stod(XLA_INNERNODE_BW);
-    double inner_node_bus_bandwidth = std::stod(XLA_INTERNODE_BW);
+    double inner_node_bus_bandwidth = std::stod(XLA_INNERNODE_BW);
+    double intra_node_bus_bandwidth = std::stod(XLA_INTERNODE_BW);
     return std::vector<double>(
         {intra_node_bus_bandwidth, inner_node_bus_bandwidth});
   }
@@ -387,13 +389,10 @@ GpuPerformanceWithCollectiveModel::ComputeAllgatherTime(
       ((total_gpu - kInnerNodeGpu) > 0 ? (total_gpu - kInnerNodeGpu) : 0);
   auto inner_node_numel_bytes =
       numel_bytes * (std::min(kInnerNodeGpu, total_gpu) - 1);
-
-  //  all-gather-start(f32[12800,2400]{0,1} replica_groups={{0,1,2,3}})
-  //  local size=12800*2400/2*4= 61.44MB;
-  //  inner_node_numel_bytes=61.44*(4-1)=184.32MB;
+  double actual_bandwidth_ratio = cost_analysis->ScalingRatio(instr);
   absl::Duration communication_time = absl::Milliseconds(
-      std::max(intra_nodes_numel_bytes / (intra_node_bus_bandwidth * 1e6),
-               inner_node_numel_bytes / (inner_node_bus_bandwidth * 1e6)));
+      std::max(intra_nodes_numel_bytes / (actual_bandwidth_ratio*intra_node_bus_bandwidth * 1e6),
+               inner_node_numel_bytes / (actual_bandwidth_ratio*inner_node_bus_bandwidth * 1e6)));
   std::cout << instr.ToString() << " numel_bytes:" << numel_bytes
           << " intra_nodes_numel_bytes: " << intra_nodes_numel_bytes
           << " inner_node_numel_bytes: " << inner_node_numel_bytes
@@ -427,10 +426,10 @@ GpuPerformanceWithCollectiveModel::ComputeReducescatterTime(
   auto intra_nodes_numel_bytes =
       numel_bytes * (num_devices - kInnerNodeGpu) / num_devices;
   auto inner_node_numel_bytes = numel_bytes * (local_gpu - 1) / num_devices;
-
+  double actual_bandwidth_ratio = cost_analysis->ScalingRatio(instr);
   absl::Duration communication_time = absl::Milliseconds(
-      std::max(intra_nodes_numel_bytes / (intra_node_bus_bandwidth * 1e6),
-               inner_node_numel_bytes / (inner_node_bus_bandwidth * 1e6)));
+      std::max(intra_nodes_numel_bytes / (actual_bandwidth_ratio*intra_node_bus_bandwidth * 1e6),
+               inner_node_numel_bytes / (actual_bandwidth_ratio*inner_node_bus_bandwidth * 1e6)));
   VLOG(5) << instr.ToString() << " numel_bytes:" << numel_bytes
           << " intra_nodes_numel_bytes: " << intra_nodes_numel_bytes
           << " inner_node_numel_bytes: " << inner_node_numel_bytes

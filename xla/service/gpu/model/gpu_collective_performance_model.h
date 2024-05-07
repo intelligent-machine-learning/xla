@@ -54,6 +54,11 @@ class GpuPerformanceWithCollectiveModel : public GpuPerformanceModelBase {
     RING = 0,
     TREE,
   };
+  // nccl can't reach bandwidth when below 32M, kind=MEATURE,we fit a linear model
+  enum CostModelKind{
+    THEORY=0, 
+    MEATURE=1,
+  };
 
   // Table for max system bandwidths GB/s for using NCCL's low latency
   // algorithm. This is used for intra-node estimate.
@@ -95,6 +100,9 @@ class GpuPerformanceWithCollectiveModel : public GpuPerformanceModelBase {
   // ll128 is by default enabled for Volta, Ampere and Hopper, ll128 by default
   // launches 640 threads.
   static constexpr int64_t kLL128NumThreads = 640;
+  // baseon meature, when below 32M,it can't reach bandwidth
+  static constexpr int64_t kLinearThreshold = 33554432;
+
   // TODO: hard code, inner_node_gpu=8,we can't load this attr from instr
   static constexpr int64_t kInnerNodeGpu = 8;
   static constexpr absl::Duration kNcclKernelLaunchOverhead =
@@ -103,6 +111,14 @@ class GpuPerformanceWithCollectiveModel : public GpuPerformanceModelBase {
   static absl::Duration ComputeCollectiveTime(
       const HloInstruction& instr, const GpuHloCostAnalysis* cost_analysis,
       const se::DeviceDescription& gpu_device_info);
+ // x = log2(byteaccessed); busbw(GB) = 3.12*x^2 - 65.14*x + 338.66
+  static constexpr std::array<double, 3> allreduce_bandwidth_curve = {
+      3.12,-65.14,338.66
+  };
+  static constexpr std::array<double, 3> allgather_bandwidth_curve = {
+      3.12,-65.14,338.66
+  };
+  
 
   // Returns NVLink bw in GB/s
   static float GetNvlinkBw(se::CudaComputeCapability compute_capability);
@@ -116,6 +132,7 @@ class GpuPerformanceWithCollectiveModel : public GpuPerformanceModelBase {
   // This checks if the nvlink supports direct P2P communication,
   // If not, we will use PCIE bandwidth to estimate latency.
   static uint32_t CheckIfNvlinkSupportsP2P();
+  
 
  private:
   static absl::Duration ComputeAllreduceTime(

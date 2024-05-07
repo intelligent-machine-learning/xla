@@ -314,7 +314,7 @@ class LinearProgramScheduler {
   ContainerType* FindLPNodeOrCreate(ElementType instruction, CostType cost,
                                     NodeType type);
   // ContainerType*
-  std::vector<ContainerType*> GetSortedNodes();
+  std::vector<ContainerType*> GetSortedNodes() const;
   // for debug: render graph viz
   void RenderGraphviz(std::string filename) const;
   // for debug: render gantt chart
