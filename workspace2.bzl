@@ -9,6 +9,7 @@ load("//third_party:repo.bzl", "tf_http_archive", "tf_mirror_urls")
 
 # Import third party repository rules. See go/tfbr-thirdparty.
 load("//third_party/dlpack:workspace.bzl", dlpack = "repo")
+load("//third_party/flash_attn:workspace.bzl", flash_attn = "repo")
 load("//third_party/gloo:workspace.bzl", gloo = "repo")
 load("//third_party/mpitrampoline:workspace.bzl", mpitrampoline = "repo")
 load("//third_party/nanobind:workspace.bzl", nanobind = "repo")
@@ -19,6 +20,7 @@ load("//third_party/triton:workspace.bzl", triton = "repo")
 def _initialize_third_party():
     """ Load third party repositories.  See above load() statements. """
     dlpack()
+    flash_attn()
     gloo()
     mpitrampoline()
     nanobind()
@@ -105,6 +107,15 @@ def _tf_repositories():
         urls = tf_mirror_urls("https://github.com/pybind/pybind11_protobuf/archive/80f3440cd8fee124e077e2e47a8a17b78b451363.zip"),
         sha256 = "c7ab64b1ccf9a678694a89035a8c865a693e4e872803778f91f0965c2f281d78",
         strip_prefix = "pybind11_protobuf-80f3440cd8fee124e077e2e47a8a17b78b451363",
+    )
+
+    # v3.4.1
+    tf_http_archive(
+        name = "cutlass_for_flash_attn",
+        build_file = "//third_party:cutlass.BUILD",
+        sha256 = "9fa1da6be3d2d9207b801d5768cbced59c202444a8c84b82325b0670f47f9d48",
+        strip_prefix = "cutlass-bbe579a9e3beb6ea6626d9227ec32d0dae119a49",
+        urls = tf_mirror_urls("https://github.com/NVIDIA/cutlass/archive/bbe579a9e3beb6ea6626d9227ec32d0dae119a49.tar.gz"),
     )
 
 # buildifier: disable=function-docstring

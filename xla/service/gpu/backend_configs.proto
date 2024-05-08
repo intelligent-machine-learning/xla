@@ -230,6 +230,28 @@ message CudnnfMHABackendConfig {
   bool is_causal_mask = 21;
 }
 
+message FlashAttnBackendConfig {
+  float dropout_rate = 2;
+
+  float scale = 3;
+
+  bool is_causal = 4;
+
+  bool deterministic = 5;
+
+  // Whether there is 'alibi_slopes' in the input arguments
+  bool has_alibi_slopes = 6;
+
+  // Max sequence length of query in variable-length flash-attention
+  optional int32 max_seqlen_q = 7;
+
+  // Max sequence length of key in variable-length flash-attention
+  optional int32 max_seqlen_k = 8;
+
+  // Whether to return softmax in forward flash-attention
+  optional bool return_softmax = 9; 
+}
+
 // Generic backend config for XLA:GPU
 message GpuBackendConfig {
   // Specifies which operation queue the current instruction will run on.
@@ -258,6 +280,8 @@ message GpuBackendConfig {
     CudnnNormBackendConfig cudnn_norm_backend_config = 8;
 
     CudnnfMHABackendConfig cudnn_fmha_backend_config = 9;
+
+    FlashAttnBackendConfig flash_attn_backend_config = 10;
   }
 
   // This attribute instructs the latency-hiding scheduler to
@@ -270,5 +294,5 @@ message GpuBackendConfig {
   // depending on the cost, but it'd be more beneficial if the collective
   // is always scheduled first as it's not SM-heavy.
   // In this case we can use this flag to enforce the ordering.
-  bool force_earliest_schedule = 10;
+  bool force_earliest_schedule = 11;
 }
