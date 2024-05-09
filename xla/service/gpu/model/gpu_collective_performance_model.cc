@@ -393,12 +393,12 @@ GpuPerformanceWithCollectiveModel::ComputeAllgatherTime(
   absl::Duration communication_time = absl::Milliseconds(
       std::max(intra_nodes_numel_bytes / (actual_bandwidth_ratio*intra_node_bus_bandwidth * 1e6),
                inner_node_numel_bytes / (actual_bandwidth_ratio*inner_node_bus_bandwidth * 1e6)));
-  std::cout << instr.ToString() << " numel_bytes:" << numel_bytes
+  VLOG(5) << instr.ToString() << " numel_bytes:" << numel_bytes
           << " intra_nodes_numel_bytes: " << intra_nodes_numel_bytes
           << " inner_node_numel_bytes: " << inner_node_numel_bytes
           << " intra_node_bus_bandwidth: " << intra_node_bus_bandwidth
-          << "Gbps,inner_node_bus_bandwidth: " << inner_node_bus_bandwidth
-          << "Gbps  communication_time: " << communication_time;
+          << "GBps,inner_node_bus_bandwidth: " << inner_node_bus_bandwidth
+          << "GBps  communication_time: " << communication_time;
   total_time += communication_time;
   return total_time;
 }
@@ -434,8 +434,8 @@ GpuPerformanceWithCollectiveModel::ComputeReducescatterTime(
           << " intra_nodes_numel_bytes: " << intra_nodes_numel_bytes
           << " inner_node_numel_bytes: " << inner_node_numel_bytes
           << " intra_node_bus_bandwidth: " << intra_node_bus_bandwidth
-          << "Gbps,inner_node_bus_bandwidth: " << inner_node_bus_bandwidth
-          << "Gbps  communication_time: " << communication_time;
+          << "GBps,inner_node_bus_bandwidth: " << inner_node_bus_bandwidth
+          << "GBps  communication_time: " << communication_time;
   total_time += communication_time;
   return total_time;
 }
