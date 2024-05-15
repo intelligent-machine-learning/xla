@@ -15,7 +15,6 @@ limitations under the License.
 
 #include "xla/service/gpu/gpu_hlo_schedule.h"
 
-
 namespace xla {
 namespace gpu {
 
@@ -208,7 +207,6 @@ absl::StatusOr<HloSchedule> ScheduleGpuModuleWithMemoryScheduler(
                                             PostProcessSchedule));
 }
 
-
 SchedulerConfig GetSchedulerConfig(int64_t memory_limit) {
   SchedulerConfig config;
   config.all_reduce_overlap_limit = 1;
@@ -228,12 +226,12 @@ SchedulerConfig GetSchedulerConfig(int64_t memory_limit) {
 // the fact that the runtime use a stream to run asynchronous collective
 // operations and two other streams to run P2P Send and Recv operations.
 enum class GpuResourceType {
-  kGpuAsyncStreamSend0 = 0,        // A resource for P2P Send operation.
-  kGpuAsyncStreamSend1 = 1,        // Another resource for P2P Send operation.
-  kGpuAsyncStreamRecv0 = 2,        // A resource for P2P Recv operation.
-  kGpuAsyncStreamRecv1 = 3,        // Another resource for P2P Recv operation.
+  kGpuAsyncStreamSend0 = 0,  // A resource for P2P Send operation.
+  kGpuAsyncStreamSend1 = 1,  // Another resource for P2P Send operation.
+  kGpuAsyncStreamRecv0 = 2,  // A resource for P2P Recv operation.
+  kGpuAsyncStreamRecv1 = 3,  // Another resource for P2P Recv operation.
   kGpuAsyncStreamCollectives = 4,  // The resource for collective operations.
-  kGpuAsyncStreamComputes = 5,     // The resource for async compute operations.
+  kGpuAsyncStreamComputes = 5,  // The resource for async compute operations.
   kNumTargetResources = 6,
 };
 
@@ -720,8 +718,6 @@ int64_t GetSizeOfShape(const Shape& shape, int pointer_size) {
   return size + metadata_size;
 }
 
-
-
 absl::StatusOr<ScheduleMetadata> ScheduleGpuModule(
     HloModule* module, int64_t pointer_size,
     const se::DeviceDescription& gpu_device_info) {
@@ -771,8 +767,23 @@ absl::StatusOr<ScheduleMetadata> ScheduleGpuModule(
           .debug_options()
           .xla_gpu_enable_analytical_latency_estimator();
   if (profile.has_value()) {
-    latency_estimator = std::make_unique<ProfileGuidedLatencyEstimator>(
-        config, std::move(gpu_latency_estimator), profile.value());
+    if (enable_analytical_latency_estimator) {
+      auto backup_latency_estimator =
+          std::make_unique<AnalyticalLatencyEstimator>(
+              config, std::move(gpu_latency_estimator), gpu_device_info,
+              [input_pointer_size = pointer_size](const Shape& shape) {
+                return GetSizeOfShape(shape, input_pointer_size);
+              },
+              module->entry_computation());
+      LOG(INFO) << "Using analytical latency estimator as PGLE backup";
+      latency_estimator = std::make_unique<ProfileGuidedLatencyEstimator>(
+          config, std::move(backup_latency_estimator), profile.value());
+    } else {
+      LOG(INFO) << "Using gpu_latency_estimator as PGLE backup";
+      latency_estimator = std::make_unique<ProfileGuidedLatencyEstimator>(
+          config, std::move(gpu_latency_estimator), profile.value());
+    }
+
     LOG(INFO) << "Found profile, using profile guided latency estimator";
     absl::Status s = IsProfileApplicable(module, profile.value());
     if (!s.ok()) {
@@ -809,21 +820,19 @@ absl::StatusOr<ScheduleMetadata> ScheduleGpuModule(
           .xla_gpu_enable_linear_program_scheduler();
 
   HloPassPipeline pipeline("latency-hiding-scheduler");
-  
+
   auto scheduler_core = std::make_unique<DefaultSchedulerCore>(
       shape_size_in_bytes, async_tracker.get(), latency_estimator.get(),
       config);
-  
 
-  if (enable_linear_program_scheduler){
+  if (enable_linear_program_scheduler) {
     pipeline.AddPass<AutoReorderPass>(
-      std::move(latency_estimator), std::move(async_tracker),
-      std::move(scheduler_core),shape_size_in_bytes
-    );
-  }else{
-      pipeline.AddPass<LatencyHidingScheduler>(
-      std::move(latency_estimator), std::move(async_tracker),
-      std::move(scheduler_core), shape_size_in_bytes);
+        std::move(latency_estimator), std::move(async_tracker),
+        std::move(scheduler_core), shape_size_in_bytes);
+  } else {
+    pipeline.AddPass<LatencyHidingScheduler>(
+        std::move(latency_estimator), std::move(async_tracker),
+        std::move(scheduler_core), shape_size_in_bytes);
   }
   TF_RETURN_IF_ERROR(pipeline.Run(module).status());
 
@@ -842,9 +851,9 @@ HloInstructionSequence PostProcessSchedule(
 
 // Compute the device memory limit to be used by passes like scheduler and
 // HLO rematerialization.
-int64_t GetSchedulerMemoryLimit(
-    const HloModule* module, const se::DeviceDescription& gpu_device_info,
-    int pointer_size) {
+int64_t GetSchedulerMemoryLimit(const HloModule* module,
+                                const se::DeviceDescription& gpu_device_info,
+                                int pointer_size) {
   // There is a "base" value which is either specified in HloModuleConfig (this
   // value should take into account the fact that we need to leave some memory
   // free for allocations that happen outside of XLA's allocator) or
@@ -889,5 +898,5 @@ int64_t GetSchedulerMemoryLimit(
   return limit;
 }
 
-}
+}  // namespace gpu
 }  // namespace xla

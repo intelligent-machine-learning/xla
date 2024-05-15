@@ -1,5 +1,16 @@
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@rules_proto//proto:defs.bzl", "proto_library")
 load("//xla:xla.bzl",  "xla_cc_test","xla_cc_binary")
+load("@tsl//tsl:tsl.default.bzl", "get_compatible_with_libtpu_portable")
+load("@tsl//tsl:tsl.bzl", "internal_visibility")
+load(
+    "@local_config_cuda//cuda:build_defs.bzl",
+    "if_cuda",
+)
+load(
+    "@tsl//tsl/platform:build_config.bzl",
+    "tf_proto_library",
+)
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = [":friends"],
@@ -77,12 +88,37 @@ cc_library(
         ":auto_reorder_solver"
     ],
 )
-
+cc_library(
+    name="convert_xplane",
+    srcs=["convert_xplane.cc"],
+    hdrs=["convert_xplane.h"],
+    deps=[
+        "//xla:status",
+        "//xla:xla_proto_cc",
+        "//xla/hlo/ir:hlo",
+        "//xla/service:hlo_proto_cc",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/types:optional",
+        "@tsl//tsl/platform:env",
+        "@tsl//tsl/platform:types",
+        "@tsl//tsl/profiler/convert:xla_op_utils",
+        "@tsl//tsl/profiler/protobuf:profiled_instructions_proto_cc",
+        "@tsl//tsl/profiler/protobuf:xplane_proto_cc",
+        "@tsl//tsl/profiler/utils:file_system_utils",
+        "@tsl//tsl/profiler/utils:tf_xplane_visitor",
+        "@tsl//tsl/profiler/utils:xplane_schema",
+        "@tsl//tsl/profiler/utils:xplane_utils",
+        "@tsl//tsl/profiler/utils:xplane_visitor",
+    ]
+)
 xla_cc_test(
     name = "auto_reorder_test",
     srcs = ["auto_reorder_test.cc"],
     deps = [
         ":auto_reorder",
+        ":convert_xplane",
         "//xla/hlo/ir:hlo",
         "//xla/hlo/utils:hlo_matchers",
         "//xla/service:hlo_parser",
@@ -98,3 +134,42 @@ xla_cc_test(
         "@tsl//tsl/platform:statusor",
     ],
 )
+
+cc_binary(
+    name="convert_xplane_tools",
+    srcs=["convert_xplane_bin.cc"],
+    deps=[
+        ":convert_xplane",
+        "//xla/hlo/ir:hlo",
+        "//xla/service:hlo_parser",
+        "//xla/service:latency_hiding_scheduler",
+        "//xla/service/gpu:gpu_hlo_schedule",
+        "//xla/service:gpu_plugin",
+        "@com_google_absl//absl/log",
+        "@tsl//tsl/platform:statusor",
+
+    ]
+)
+#     # compatible_with = get_compatible_with_libtpu_portable(),
+#     deps=[
+#         "//xla:status",
+#         "//xla:xla_proto_cc",
+#         "//xla/hlo/ir:hlo",
+#         "//xla/service:hlo_proto_cc",
+#         "@com_google_absl//absl/container:flat_hash_map",
+#         "@com_google_absl//absl/status",
+#         "@com_google_absl//absl/strings",
+#         "@com_google_absl//absl/types:optional",
+#         "@tsl//tsl/platform:env",
+#         "@tsl//tsl/platform:types",
+#         "@tsl//tsl/profiler/convert:xla_op_utils",
+#         "@tsl//tsl/profiler/protobuf:profiled_instructions_proto_cc",
+#         "@tsl//tsl/profiler/protobuf:xplane_proto_cc",
+#         "@tsl//tsl/profiler/utils:file_system_utils",
+#         "@tsl//tsl/profiler/utils:tf_xplane_visitor",
+#         "@tsl//tsl/profiler/utils:xplane_schema",
+#         "@tsl//tsl/profiler/utils:xplane_utils",
+#         "@tsl//tsl/profiler/utils:xplane_visitor",
+#         "@tsl//tsl/platform:platform_port",
+#     ]
+# )

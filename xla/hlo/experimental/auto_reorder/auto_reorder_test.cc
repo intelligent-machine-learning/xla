@@ -21,6 +21,7 @@
 
 #include "absl/algorithm/container.h"
 #include "xla/hlo/experimental/auto_reorder/auto_reorder.h"
+#include "xla/hlo/experimental/auto_reorder/convert_xplane.h"
 #include "xla/service/async_collective_creator.h"
 #include "xla/service/gpu/gpu_device_info_for_tests.h"
 #include "xla/service/gpu/gpu_hlo_schedule.h"
@@ -218,25 +219,24 @@ ENTRY %elementwise {
     HloInstruction* param = async_builder.AddInstruction(
         HloInstruction::CreateParameter(0, input_shape, "pasync"));
     async_builder.AddInstruction(HloInstruction::CreateReduceScatter(
-        output_shape, {param}, MakeReduction(type, module), CreateReplicaGroups({{0, 1}}), false,
-        std::nullopt, false, 0));
+        output_shape, {param}, MakeReduction(type, module),
+        CreateReplicaGroups({{0, 1}}), false, std::nullopt, false, 0));
     HloComputation* reduction =
         module->AddEmbeddedComputation(async_builder.Build());
 
     return reduction;
   }
-  HloComputation* MakeAll2All(Shape input_shape,HloModule* module){
+  HloComputation* MakeAll2All(Shape input_shape, HloModule* module) {
     HloComputation::Builder async_builder("AsyncOp");
     HloInstruction* param = async_builder.AddInstruction(
         HloInstruction::CreateParameter(0, input_shape, "pasync"));
     HloInstruction* param1 = async_builder.AddInstruction(
         HloInstruction::CreateParameter(0, input_shape, "pasync"));
     async_builder.AddInstruction(HloInstruction::CreateAllToAll(
-          input_shape, {param,param1},
-          /*replica_groups=*/CreateReplicaGroups({{0, 1}}),
-          /*constrain_layout=*/false, /*channel_id=*/std::nullopt,
-          /*split_dimension*/ 0
-      ));
+        input_shape, {param, param1},
+        /*replica_groups=*/CreateReplicaGroups({{0, 1}}),
+        /*constrain_layout=*/false, /*channel_id=*/std::nullopt,
+        /*split_dimension*/ 0));
     HloComputation* reduction =
         module->AddEmbeddedComputation(async_builder.Build());
 
@@ -468,15 +468,17 @@ ENTRY %elementwise {
         HloInstruction::CreateDot(shape, p0, p1, dot_dnums, precision_config));
     auto d23 = builder.AddInstruction(
         HloInstruction::CreateDot(shape, p2, p3, dot_dnums, precision_config));
-    HloInstruction* all_reduce_start =
-        builder.AddInstruction(HloInstruction::CreateAllReduceStart(
+    HloInstruction* all_reduce_start = builder.AddInstruction(
+        HloInstruction::CreateAllReduceStart(
             shape, {d01}, add_reducer,
             /*replica_groups=*/CreateReplicaGroups({{0, 1}}),
             /*constrain_layout=*/false, /*channel_id=*/1,
-            /*use_global_device_ids=*/true), "all_reduce_start");
-    HloInstruction* ar_done0 =
-        builder.AddInstruction(HloInstruction::CreateUnary(
-            shape, HloOpcode::kAllReduceDone, all_reduce_start),"ar_done0");
+            /*use_global_device_ids=*/true),
+        "all_reduce_start");
+    HloInstruction* ar_done0 = builder.AddInstruction(
+        HloInstruction::CreateUnary(shape, HloOpcode::kAllReduceDone,
+                                    all_reduce_start),
+        "ar_done0");
 
     HloInstruction* all_reduce_start1 =
         builder.AddInstruction(HloInstruction::CreateAllReduceStart(
@@ -510,33 +512,32 @@ ENTRY %elementwise {
             async_start_shape, {d01_dot_p0_add_p2}, rs_computation,
             /*async_execution_thread=*/"parallel_thread"));
     HloInstruction* async_update = builder.AddInstruction(
-      HloInstruction::CreateAsyncUpdate(async_start_shape, async_start0));
+        HloInstruction::CreateAsyncUpdate(async_start_shape, async_start0));
     auto reducescater_ret0 = builder.AddInstruction(
         HloInstruction::CreateAsyncDone(reduce_shape, async_update));
-    //new version:need create other computation
-     auto rs_computation2 =
+    // new version:need create other computation
+    auto rs_computation2 =
         MakeReduceScatter(HloOpcode::kAdd, shape, reduce_shape, module);
     HloInstruction* async_start1 =
         builder.AddInstruction(HloInstruction::CreateAsyncStart(
             async_start_shape, {d23_dot_p1_add_p3}, rs_computation2,
             /*async_execution_thread=*/"parallel_thread"));
     HloInstruction* async_update1 = builder.AddInstruction(
-      HloInstruction::CreateAsyncUpdate(async_start_shape, async_start1));
+        HloInstruction::CreateAsyncUpdate(async_start_shape, async_start1));
     auto reducescater_ret1 = builder.AddInstruction(
         HloInstruction::CreateAsyncDone(reduce_shape, async_update1));
 
-    auto add_reduce_scatter =
-        builder.AddInstruction(HloInstruction::CreateBinary(
-            reduce_shape, HloOpcode::kAdd, reducescater_ret1, reducescater_ret0));
+    auto add_reduce_scatter = builder.AddInstruction(
+        HloInstruction::CreateBinary(reduce_shape, HloOpcode::kAdd,
+                                     reducescater_ret1, reducescater_ret0));
     auto all2all_ret = builder.AddInstruction(HloInstruction::CreateAllToAll(
-          reduce_shape, {add_reduce_scatter},
-          /*replica_groups=*/CreateReplicaGroups({{0, 1}}),
-          /*constrain_layout=*/true, /*channel_id=*/1,
-          /*split_dimension*/ 0
-      ));
-    std::vector<HloInstruction*> compute_vec = {d01_dot_p0_add_p2, d23_dot_p1_add_p3, all2all_ret};
-    auto ret = builder.AddInstruction(HloInstruction::CreateTuple(
-        compute_vec));
+        reduce_shape, {add_reduce_scatter},
+        /*replica_groups=*/CreateReplicaGroups({{0, 1}}),
+        /*constrain_layout=*/true, /*channel_id=*/1,
+        /*split_dimension*/ 0));
+    std::vector<HloInstruction*> compute_vec = {d01_dot_p0_add_p2,
+                                                d23_dot_p1_add_p3, all2all_ret};
+    auto ret = builder.AddInstruction(HloInstruction::CreateTuple(compute_vec));
     auto computation = builder.Build();
     computation->set_root_instruction(ret);
     auto entry_computation =
@@ -957,31 +958,40 @@ ENTRY %elementwise {
     }
   }
 };
-TEST_F(AutoReorderingTest, CommOpCostTest){
-  HloCostAnalysis::ShapeSizeFunction ShapeSizeBytesFunction = [&](const Shape& shape) {
-    constexpr int64_t kPointerSize = 8;
-    return ShapeUtil::ByteSizeOf(shape, kPointerSize);
-  };
-  
+TEST_F(AutoReorderingTest, ConvertPDO) {
+  GTEST_SKIP() << "using convert here;";
+
+  auto status = ConvertXplaneToFile(
+      "/root/tb/llama_xla_trace/plugins/profile/2024_05_10_17_05_39/",
+      "/root/tb/llama_xla_trace/llama_fdo.pbtxt");
+  EXPECT_TRUE(status.ok());
+}
+
+TEST_F(AutoReorderingTest, CommOpCostTest) {
+  HloCostAnalysis::ShapeSizeFunction ShapeSizeBytesFunction =
+      [&](const Shape& shape) {
+        constexpr int64_t kPointerSize = 8;
+        return ShapeUtil::ByteSizeOf(shape, kPointerSize);
+      };
 
   HloCostAnalysis::Options options_{ShapeSizeBytesFunction,
                                     /*per_second_rates=*/{},
                                     /*count_multiple_input_accesses=*/true};
   GpuHloCostAnalysis analysis_(options_);
 
-  auto hlo_module = CreateNewVerifiedModule(TestName(),/*replica_count*/2);
+  auto hlo_module = CreateNewVerifiedModule(TestName(), /*replica_count*/ 2);
   auto st = MakeTestComputation(hlo_module.get());
   HloComputation* comp = st.value();
   ASSERT_IS_OK(hlo_module->entry_computation()->Accept(&analysis_));
-  
+
   const HloModuleConfig& config = hlo_module->config();
   int64_t num_devices = config.num_partitions();
   int64_t num_replicas = config.replica_count();
-  const HloInstruction* all_reduce_start = comp->GetInstructionWithName("all_reduce_start");
+  const HloInstruction* all_reduce_start =
+      comp->GetInstructionWithName("all_reduce_start");
 
-  EXPECT_EQ(analysis_.NumOfDevices(*all_reduce_start),2);
+  EXPECT_EQ(analysis_.NumOfDevices(*all_reduce_start), 2);
   // auto numel_bytes = analysis_.bytes_accessed(*all_reduce_start);
-
 };
 TEST_F(AutoReorderingTest, AllReduceDeviceNumber) {
   absl::string_view hlo_string = R"(
@@ -1003,14 +1013,14 @@ ENTRY e {
   ROOT tuple = (bf16[8192,4096],bf16[8192,4096]) tuple(%ag-done, %ar-done)
 }
 )";
-  TF_ASSERT_OK_AND_ASSIGN(auto module,
-                          ParseAndReturnVerifiedModule(hlo_string, /*replica_count*/ 8));
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(
+                                           hlo_string, /*replica_count*/ 8));
   HloInstruction* root = module->entry_computation()->root_instruction();
-  HloCostAnalysis::ShapeSizeFunction ShapeSizeBytesFunction = [&](const Shape& shape) {
-    constexpr int64_t kPointerSize = 8;
-    return ShapeUtil::ByteSizeOf(shape, kPointerSize);
-  };
-  
+  HloCostAnalysis::ShapeSizeFunction ShapeSizeBytesFunction =
+      [&](const Shape& shape) {
+        constexpr int64_t kPointerSize = 8;
+        return ShapeUtil::ByteSizeOf(shape, kPointerSize);
+      };
 
   HloCostAnalysis::Options options_{ShapeSizeBytesFunction,
                                     /*per_second_rates=*/{},
@@ -1019,25 +1029,26 @@ ENTRY e {
 
   ASSERT_IS_OK(module->entry_computation()->Accept(&analysis_));
   auto computation = module->entry_computation();
-  const HloInstruction* ag_start = computation->GetInstructionWithName("ag-start");
+  const HloInstruction* ag_start =
+      computation->GetInstructionWithName("ag-start");
 
   EXPECT_EQ(analysis_.NumOfDevices(*ag_start), 8);
   auto numel_bytes = analysis_.bytes_accessed(*ag_start);
-  //numel_bytes should be 1024*4096*4=16777216
+  // numel_bytes should be 1024*4096*4=16777216
   EXPECT_EQ(numel_bytes, 16777216);
 
-  const HloInstruction* ar_start = computation->GetInstructionWithName("ar-start");
+  const HloInstruction* ar_start =
+      computation->GetInstructionWithName("ar-start");
 
   EXPECT_EQ(analysis_.NumOfDevices(*ar_start), 8);
   numel_bytes = analysis_.bytes_accessed(*ar_start);
-  //numel_bytes should be 1024*4096*4=16777216
-  EXPECT_EQ(numel_bytes, 16777216*2);
-  const HloInstruction* add_ret = computation->GetInstructionWithName("add-ret ");
+  // numel_bytes should be 1024*4096*4=16777216
+  EXPECT_EQ(numel_bytes, 16777216 * 2);
+  const HloInstruction* add_ret =
+      computation->GetInstructionWithName("add-ret ");
   auto flops = analysis_.flop_count(*add_ret);
-  std::cout<<"called flops:"<<flops<<std::endl;
+  std::cout << "called flops:" << flops << std::endl;
 }
-
-
 
 TEST_F(AutoReorderingTest, SPMDAutoReorder) {
   // GTEST_SKIP()<<"new version xla can'parse this old hlo";
@@ -1487,7 +1498,7 @@ TEST_F(AutoReorderingTest, ReorderPassWithRandom) {
 }
 // skip this test
 TEST_F(AutoReorderingTest, ReorderPassDataAnalyse) {
-  GTEST_SKIP() << "Skipping single test";
+  GTEST_SKIP() << "Skipping single test because longtime";
   std::srand(kRandomSeed);
   auto gen = std::mt19937{kRandomSeed};
   int repeat_time = 1;
