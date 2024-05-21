@@ -88,6 +88,11 @@ cc_library(
         ":auto_reorder_solver"
     ],
 )
+tf_proto_library(
+    name = "instr_profile_info_proto",
+    srcs = ["instr_profile_info.proto"],
+)
+
 cc_library(
     name="convert_xplane",
     srcs=["convert_xplane.cc"],
@@ -97,6 +102,7 @@ cc_library(
         "//xla:xla_proto_cc",
         "//xla/hlo/ir:hlo",
         "//xla/service:hlo_proto_cc",
+        "//xla:shape_util",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
@@ -111,6 +117,8 @@ cc_library(
         "@tsl//tsl/profiler/utils:xplane_schema",
         "@tsl//tsl/profiler/utils:xplane_utils",
         "@tsl//tsl/profiler/utils:xplane_visitor",
+        "@com_google_protobuf//:protobuf",
+        ":instr_profile_info_proto_cc"
     ]
 )
 xla_cc_test(
@@ -135,16 +143,22 @@ xla_cc_test(
     ],
 )
 
-cc_binary(
+xla_cc_binary(
     name="convert_xplane_tools",
+    linkopts = [
+        "-Wl,--allow-multiple-definition",
+        "-lstdc++fs",  # For std::filesystem
+    ],
     srcs=["convert_xplane_bin.cc"],
     deps=[
         ":convert_xplane",
+        ":auto_reorder",
         "//xla/hlo/ir:hlo",
         "//xla/service:hlo_parser",
         "//xla/service:latency_hiding_scheduler",
         "//xla/service/gpu:gpu_hlo_schedule",
         "//xla/service:gpu_plugin",
+        "//xla:device_util",
         "@com_google_absl//absl/log",
         "@tsl//tsl/platform:statusor",
 

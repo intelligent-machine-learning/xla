@@ -171,13 +171,15 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
   }
   if (reorder::solve_debug) {
     // save to pid related file
-    solver_->RenderGraphviz(absl::StrCat("gantt_before_", computation->name()));
+    solver_->SaveGraphviz(absl::StrCat("gantt_before_", computation->name()));
+    solver_->SaveJSON(absl::StrCat("gantt_before_", computation->name()));
   }
-  auto status = solver_->Solve();
+  auto status =
+      solver_->Solve(absl::StrCat("mps_file_of_", computation->name()));
   if (reorder::solve_debug) {
     // save to pid related file
-    solver_->RenderGantt(absl::StrCat("gantt_", computation->name()));
-    solver_->RenderGraphviz(absl::StrCat("gantt_", computation->name()));
+    solver_->SaveGantt(absl::StrCat("gantt_", computation->name()));
+    solver_->SaveGraphviz(absl::StrCat("gantt_", computation->name()));
   }
 
   if (status.ok()) {

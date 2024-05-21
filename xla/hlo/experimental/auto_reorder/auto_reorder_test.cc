@@ -18,6 +18,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <stdlib.h>
 
 #include "absl/algorithm/container.h"
 #include "xla/hlo/experimental/auto_reorder/auto_reorder.h"
@@ -186,6 +187,8 @@ SchedulerConfig GetDefaultSchedConfig() {
 
 class AutoReorderingTest : public HloTestBase {
  protected:
+  void SetUp() override { setenv("XLA_AUTOREORDER_TIMEOUT", "60", 1); }
+  void TearDown() override { unsetenv("XLA_AUTOREORDER_TIMEOUT"); }
   const char* const add_hlo_string_ = R"(
 HloModule module
 ENTRY %elementwise {
@@ -220,7 +223,7 @@ ENTRY %elementwise {
         HloInstruction::CreateParameter(0, input_shape, "pasync"));
     async_builder.AddInstruction(HloInstruction::CreateReduceScatter(
         output_shape, {param}, MakeReduction(type, module),
-        CreateReplicaGroups({{0, 1}}), false, std::nullopt, false, 0));
+        CreateReplicaGroups({{0, 1}}), false, /*channel_id*/ 3, false, 0));
     HloComputation* reduction =
         module->AddEmbeddedComputation(async_builder.Build());
 
@@ -533,7 +536,7 @@ ENTRY %elementwise {
     auto all2all_ret = builder.AddInstruction(HloInstruction::CreateAllToAll(
         reduce_shape, {add_reduce_scatter},
         /*replica_groups=*/CreateReplicaGroups({{0, 1}}),
-        /*constrain_layout=*/true, /*channel_id=*/1,
+        /*constrain_layout=*/true, /*channel_id=*/2,
         /*split_dimension*/ 0));
     std::vector<HloInstruction*> compute_vec = {d01_dot_p0_add_p2,
                                                 d23_dot_p1_add_p3, all2all_ret};
@@ -569,7 +572,8 @@ ENTRY %elementwise {
     VLOG(2) << "create computation begin,test name: " << TestName()
             << ",inst_nums=" << inst_nums << ",max_deps=" << max_deps
             << ",communication_rate=" << communication_rate;
-    HloComputation::Builder builder(TestName());
+    HloComputation::Builder builder(
+        absl::StrCat(TestName(), "N", inst_nums, "R", communication_rate));
     Shape shape = ShapeUtil::MakeShape(F32, {4, 256, 256});
 
     // insts_list: store instruction list,which have one result
@@ -959,11 +963,15 @@ ENTRY %elementwise {
   }
 };
 TEST_F(AutoReorderingTest, ConvertPDO) {
-  GTEST_SKIP() << "using convert here;";
-
+  // GTEST_SKIP() << "using convert here;";
+  // get filepath from env
+  const char* env = std::getenv("XLA_AUTOREORDER_XPLANE_DIR");
+  if (env == nullptr) {
+    GTEST_SKIP() << "have no set XLA_AUTOREORDER_XPLANE_DIR env skip";
+  }
   auto status = ConvertXplaneToFile(
-      "/root/tb/llama_xla_trace/plugins/profile/2024_05_10_17_05_39/",
-      "/root/tb/llama_xla_trace/llama_fdo.pbtxt");
+      env, "/root/tb/llama_xla_trace_2n16g/llama_fdo.jsonl");
+  std::cout << status.message() << std::endl;
   EXPECT_TRUE(status.ok());
 }
 
@@ -1448,7 +1456,7 @@ TEST_F(AutoReorderingTest, ReorderPassWithRandom) {
   auto gpu_latency_estimator = std::make_unique<SavedInstLatencyEstimator>();
   SchedulerConfig sched_config = GetDefaultSchedConfig();
   auto st = MakeRandomComputation(hlo_module.get(), gpu_latency_estimator.get(),
-                                  /*inst num*/ 100,
+                                  /*inst num*/ 200,
                                   /*max deps*/ 5,
                                   /*communication rate*/ 0.2);
   // std::cout<<hlo_module->ToString()<<std::endl;

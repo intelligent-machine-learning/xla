@@ -685,11 +685,15 @@ absl::Status IsProfileApplicable(
       instruction_names.insert(instr->name());
     }
   }
-
+  int64_t total_instruction_count = instruction_names.size();
+  int64_t cost_miss_count;
+  int64_t cost_hit_count;
   for (const auto& cost : profile.costs()) {
     if (!instruction_names.contains(cost.name())) {
+      cost_miss_count++;  // profile inst name not in this module
       return absl::InvalidArgumentError(absl::StrFormat(
           "cost name %s not in module %s", cost.name(), module->name()));
+    } else {
     }
   }
   for (const auto& latency : profile.latencies()) {

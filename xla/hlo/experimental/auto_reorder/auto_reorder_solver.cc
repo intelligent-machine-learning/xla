@@ -23,7 +23,31 @@ using Task =
     std::tuple<int8_t, CostType>;  // (channel, processing_time), we have two
                                    // channel now:communication and computation
 using Job = std::vector<Task>;
+namespace reorder {
+uint32_t get_autoreorder_timeout() {
+  const char* env = std::getenv("XLA_AUTOREORDER_TIMEOUT");
+  if (env == nullptr) {
+    return ksolveTimeout;
+  }
+  return std::atoi(env);
+};
+int get_horizon(int max_time) {
+  // scale should be fit with module?
+  return max_time * 2;
+}
+const bool is_keep_communicate_order() {
+  const char* env = std::getenv("XLA_KEEP_COMMUNICATE_ORDER");
+  if (env == nullptr) {
+    return false;
+  }
+  return std::strcmp(env, "true") == 0;
+};
+int get_cpu_number() {
+  // return 8;
+  return std::thread::hardware_concurrency();
+}
 
+}  // namespace reorder
 template <typename ContainerType, typename ElementType>
 LinearProgramScheduler<ContainerType, ElementType>::~LinearProgramScheduler() {
   uuid2container.clear();
@@ -102,7 +126,8 @@ LPSchedulerFunc(StatusOr<TaskType>)::AddNodeToTask(ContainerType* node) {
   node_to_task_.emplace(node->UUID(), std::make_tuple(node, task));
   return task;
 };
-LPSchedulerFunc(tsl::Status)::Solve() {
+
+LPSchedulerFunc(tsl::Status)::Solve(std::string mps_filename) {
   uint32_t max_execution_time = 0;
   for (auto node : nodes_) {
     node->Freeze();
@@ -154,9 +179,8 @@ LPSchedulerFunc(tsl::Status)::Solve() {
       if (IsSingleChannel(dep_type)) {
         auto dep_task = std::get<1>(node_to_task_.at(dep_node->UUID()));
         // interval
-        IntervalVar interval = cp_model_.NewIntervalVar(
-            dep_task.end, cost,
-            node_task.start);
+        IntervalVar interval =
+            cp_model_.NewIntervalVar(dep_task.end, cost, node_task.start);
         no_overlap_edges.push_back(interval);
       }
     }
@@ -171,7 +195,6 @@ LPSchedulerFunc(tsl::Status)::Solve() {
   }
   cp_model_.AddMaxEquality(obj_var, ends);
   cp_model_.Minimize(obj_var);
-
   // cp_model_.
   // VLOG(2)<<"Number of variables:"<<cp_model_.NumVariables()<<" Number of
   // constraint:"<<cp_model_.NumConstraints();
@@ -188,9 +211,24 @@ LPSchedulerFunc(tsl::Status)::Solve() {
     // parameters.set_log_search_progress(true);
   }
   parameters.set_num_search_workers(1);
+  auto model = cp_model_.Build();
+  // model is operations_research::sat::CpModelProto type
+  // need operations_research::MPModelProto& type, so we need to convert it
+  // model
+  if (mps_filename.size() > 0) {
+    operations_research::MPModelProto output;
+    operations_research::sat::ConvertCpModelProtoToMPModelProto(model, &output);
+    auto status_of_string = operations_research::ExportModelAsMpsFormat(output);
+    if (status_of_string.ok()) {
+      VLOG(2) << "ExportModelAsMpsFormat success";
+      std::ofstream out(absl::StrCat("/tmp/", mps_filename, ".mps"));
+      out << status_of_string.value();
+      out.close();
+    }
+  }
+
   const operations_research::sat::CpSolverResponse response =
-      operations_research::sat::SolveWithParameters(cp_model_.Build(),
-                                                    parameters);
+      operations_research::sat::SolveWithParameters(model, parameters);
   uint64_t solve_time = response.wall_time();
   VLOG(1) << "Solve finish:" << response.status()
           << " solve time:" << solve_time;
@@ -224,7 +262,7 @@ std::string ReplaceUnusedChar(const std::string str,
   }
   return result;
 }
-LPSchedulerFunc(std::vector<ContainerType*>)::GetSortedNodes() const{
+LPSchedulerFunc(std::vector<ContainerType*>)::GetSortedNodes() const {
   std::vector<ContainerType*> sorted_nodes;
   sorted_nodes.reserve(nodes_.size());
   for (auto node : nodes_) {
@@ -239,7 +277,64 @@ LPSchedulerFunc(std::vector<ContainerType*>)::GetSortedNodes() const{
       });
   return sorted_nodes;
 }
-LPSchedulerFunc(void)::RenderGraphviz(std::string filename) const{
+LPSchedulerFunc(void)::SaveJSON(std::string filename) const {
+  std::string json_file = absl::StrCat("/tmp/", filename, ".json");
+  std::ofstream json_out(json_file);
+  json_out << "{" << std::endl;
+  json_out << "\"nodes\": [" << std::endl;
+  int32_t node_count = 0;
+  int32_t edge_count = 0;
+
+  for (auto node : this->GetSortedNodes()) {
+    std::string name;
+    if (node->IsCommunication()) {
+      name = "communication";
+    } else {
+      name = "compute";
+    }
+    if (node_count > 0) {
+      json_out << ",\n{ \"uuid\": \"" << node->UUID() << "\",\"typename\": \""
+               << name << "\", \"name\": \""
+               << ReplaceUnusedChar(node->GetName(), "'")
+               << "\", \"cost\": " << node->GetCost() << " }";
+    } else {
+      json_out << "{ \"uuid\": \"" << node->UUID() << "\",\"typename\": \""
+               << name << "\", \"name\": \""
+               << ReplaceUnusedChar(node->GetName(), "'")
+               << "\", \"cost\": " << node->GetCost() << " }";
+    }
+    node_count++;
+  }
+  json_out << "]," << std::endl;
+  json_out << "\"edges\": [" << std::endl;
+  for (auto node : this->GetSortedNodes()) {
+    for (auto dep_pair : node->GetDeps()) {
+      auto dep_node = std::get<0>(dep_pair);
+      auto dep_cost = std::get<1>(dep_pair);
+      NodeType dep_type = std::get<2>(dep_pair);
+      std::string name;
+      if (IsSingleChannel(dep_type)) {
+        name = "communication";
+      } else {
+        name = "compute";
+      }
+      // draw edge
+      if (edge_count > 0) {
+        json_out << ",\n{ \"from\": \"" << dep_node->UUID() << "\", \"to\": \""
+                 << node->UUID() << "\", \"typename\": \"" << name
+                 << "\", \"cost\": " << dep_cost << " }";
+      } else {
+        json_out << "{ \"from\": \"" << dep_node->UUID() << "\", \"to\": \""
+                 << node->UUID() << "\", \"typename\": \"" << name
+                 << "\", \"cost\": " << dep_cost << " }";
+      }
+      edge_count++;
+    }
+  }
+  json_out << "]" << std::endl;
+  json_out << "}" << std::endl;
+}
+LPSchedulerFunc(void)::SaveGraphviz(std::string filename) const {
   // write a dot file
   std::string dot_file = absl::StrCat("/tmp/", filename, ".dot");
   std::ofstream out(dot_file);
@@ -287,7 +382,7 @@ LPSchedulerFunc(void)::RenderGraphviz(std::string filename) const{
   auto status = system(cmd.c_str());
   VLOG(4) << cmd << " execute status:" << status << std::endl;
 }
-LPSchedulerFunc(void)::RenderGantt(std::string filename) const{
+LPSchedulerFunc(void)::SaveGantt(std::string filename) const {
   // https://g2.antv.antgroup.com/en/examples/storytelling/storytelling/#gantt
   // { name: 'compute',label:'kernel name1', startTime: 1, endTime: 4 },
   VLOG(4) << "write node number:" << nodes_.size() << " to /tmp/" << filename
@@ -345,7 +440,6 @@ LPSchedulerFunc(void)::RenderGantt(std::string filename) const{
 
   chart.render();)";
 }
-
 
 LPContainerDAGFunc(bool)::IsIn(LPContainer<ElementType>* a) {
   return operands_.find(a) != operands_.end();

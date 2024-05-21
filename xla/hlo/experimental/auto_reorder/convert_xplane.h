@@ -9,6 +9,9 @@
 #include <string>
 #include <vector>
 
+#include <iostream>
+#include <fstream>
+
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/strings/match.h"
@@ -18,6 +21,7 @@
 // #include "xla/status.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/service/hlo.pb.h"
+#include "xla/primitive_util.h"
 #include "xla/xla.pb.h"
 
 #include "tsl/platform/env.h"
@@ -31,6 +35,8 @@
 #include "tsl/profiler/utils/xplane_visitor.h"
 #include "tsl/profiler/protobuf/profiled_instructions.pb.h"
 #include "tsl/profiler/protobuf/xplane.pb.h"
+#include "google/protobuf/util/json_util.h"
+#include "xla/hlo/experimental/auto_reorder/instr_profile_info.pb.h"
 
 namespace xla {
 
@@ -53,11 +59,15 @@ using tsl::profiler::XLineVisitor;
 using tsl::profiler::XPlaneVisitor;
 using tsl::profiler::XStatVisitor;
 
-// Latency info for a single HLO instruction.
+// Latency info for a single HLO instruction. it's a vector of durations. Each
+// duration is the latency of the instruction
 struct HloLatencyInfo {
   std::vector<double> durations;
 };
-
+struct HloLatencyStats {
+  uint32_t hits;
+  uint32_t misses;
+};
 Status ConvertXplaneToProfiledInstructionsProto(
     std::vector<tensorflow::profiler::XSpace> xspaces,
     tensorflow::profiler::ProfiledInstructionsProto*
@@ -69,5 +79,4 @@ Status ConvertXplaneUnderLogdirToProfiledInstructionsProto(
 Status ConvertXplaneToFile(const std::string& xplane_dir,
                            const std::string& output_filename);
 
-
-} //namespace xla
+}  // namespace xla

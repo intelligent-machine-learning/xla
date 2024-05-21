@@ -23,92 +23,15 @@ using CpModelBuilder = operations_research::sat::CpModelBuilder;
 using IntervalVar = operations_research::sat::IntervalVar;
 namespace reorder {
 const uint32_t ksolveTimeout = 180;  // 3min
-uint32_t get_autoreorder_timeout() {
-  const char* env = std::getenv("XLA_AUTOREORDER_TIMEOUT");
-  if (env == nullptr) {
-    return ksolveTimeout;
-  }
-  return std::atoi(env);
-};
-static const int kChannelNumber = 2;
-int get_horizon(int max_time) {
-  // scale should be fit with module?
-  return max_time * 2;
-}
-bool solve_debug = true;
+uint32_t get_autoreorder_timeout();
+constexpr const int kChannelNumber = 2;
+int get_horizon(int max_time);
+constexpr bool solve_debug = true;
 // TODO: no keep order will cause hung on multi processing, we should consider
 // how to resolve it
 // get cpu number of current machine
-const bool is_keep_communicate_order() {
-  const char* env = std::getenv("XLA_KEEP_COMMUNICATE_ORDER");
-  if (env == nullptr) {
-    return false;
-  }
-  return std::strcmp(env, "true") == 0;
-};
-void save_to_cache(const std::string& content) {
-  const char* cache_filename = std::getenv("XLA_REORDER_CACHE_FILE");
-  if (cache_filename == nullptr) {
-    cache_filename = "reorder.cache";
-  }
-  std::ofstream file(cache_filename);
-  file << content;
-  file.close();
-};
-bool is_cache_enable() {
-  const char* cache_filename = std::getenv("XLA_REORDER_CACHE_FILE");
-  if (cache_filename == nullptr) {
-    cache_filename = "reorder.cache";
-  }
-  // check file exists
-  return std::filesystem::exists(cache_filename);
-};
-std::string load_from_cache() {
-  const char* cache_filename = std::getenv("XLA_REORDER_CACHE_FILE");
-  if (cache_filename == nullptr) {
-    cache_filename = "reorder.cache";
-  }
-
-  std::ifstream file(cache_filename);
-  std::string content;
-  std::string line;
-  while (std::getline(file, line)) {
-    content += line;
-  }
-  file.close();
-  return content;
-};
-bool accuired_reorder_lock() {
-  const char* lock_filename = std::getenv("XLA_REORDER_LOCK_FILE");
-  if (lock_filename == nullptr) {
-    lock_filename = "/tmp/reorder.lock";
-  }
-  mode_t m = umask(0);
-  int fd = open(lock_filename, O_RDWR | O_CREAT, 0666);
-  umask(m);
-  if (fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) < 0) {
-    close(fd);
-    fd = -1;
-  }
-  return fd >= 0;
-};
-void release_reorder_lock() {
-  const char* lock_filename = std::getenv("XLA_REORDER_LOCK_FILE");
-  if (lock_filename == nullptr) {
-    lock_filename = "/tmp/reorder.lock";
-  }
-  mode_t m = umask(0);
-  int fd = open(lock_filename, O_RDWR | O_CREAT, 0666);
-  umask(m);
-  if (fd >= 0 && flock(fd, LOCK_UN) < 0) {
-    close(fd);
-    fd = -1;
-  }
-};
-int get_cpu_number() {
-  // return 8;
-  return std::thread::hardware_concurrency();
-}
+const bool is_keep_communicate_order();
+int get_cpu_number();
 }  // namespace reorder
 enum class NodeType {
   kCompute = 0,
@@ -307,7 +230,8 @@ class LinearProgramScheduler {
   // add Node to scheduler, its deps will execute before it
   Status AddConstraint(ContainerType* node);
   // solve the LP problem
-  Status Solve();
+  // Status Solve();
+  Status Solve(std::string mps_filename);
   // find instruction,if not exist, return error
   StatusOr<ContainerType*> FindInstructionLPNode(ElementType instruction);
   // find LPNode by instruction,if not exist,create it
@@ -315,10 +239,11 @@ class LinearProgramScheduler {
                                     NodeType type);
   // ContainerType*
   std::vector<ContainerType*> GetSortedNodes() const;
-  // for debug: render graph viz
-  void RenderGraphviz(std::string filename) const;
+  // for debug: save graph viz file
+  void SaveGraphviz(std::string filename) const;
   // for debug: render gantt chart
-  void RenderGantt(std::string filename) const;
+  void SaveGantt(std::string filename) const;
+  void SaveJSON(std::string filename) const;
   // set max start time as horizon
   void SetHorizon(uint32_t horizon) { horizon_ = horizon; }
   StatusOr<TaskType> FindTask(ContainerType* node);
