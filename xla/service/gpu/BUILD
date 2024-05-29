@@ -4292,6 +4292,7 @@ cc_library(
         "//xla:statusor",
         "//xla:util",
         "//xla/hlo/experimental/auto_reorder:auto_reorder",
+        "//xla/hlo/experimental/auto_reorder:offline_sqlite_pgle",
         "//xla/hlo/ir:hlo",
         "//xla/hlo/utils:hlo_query",
         "//xla/service:buffer_value",

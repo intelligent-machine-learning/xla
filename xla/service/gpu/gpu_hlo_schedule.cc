@@ -765,7 +765,8 @@ absl::StatusOr<ScheduleMetadata> ScheduleGpuModule(
   std::unique_ptr<LatencyEstimator> latency_estimator;
   std::optional<tensorflow::profiler::ProfiledInstructionsProto> profile =
       ReadPGLEProfile(module, fingerprint);
-
+  std::string offline_sqlite_pgle_path =
+      xla::auto_reorder::get_offline_sqlite_pgle_path();
   const bool enable_analytical_latency_estimator =
       module->config()
           .debug_options()
@@ -794,6 +795,27 @@ absl::StatusOr<ScheduleMetadata> ScheduleGpuModule(
       LOG(INFO) << "PGLE profile may not applicable to the module, but will "
                    "still be used : "
                 << s.message();
+    }
+  } else if (!offline_sqlite_pgle_path.empty()) {
+    if (enable_analytical_latency_estimator) {
+      auto backup_latency_estimator =
+          std::make_unique<AnalyticalLatencyEstimator>(
+              config, std::move(gpu_latency_estimator), gpu_device_info,
+              [input_pointer_size = pointer_size](const Shape& shape) {
+                return GetSizeOfShape(shape, input_pointer_size);
+              },
+              module->entry_computation());
+      LOG(INFO) << "Using analytical latency estimator as offline PGLE backup";
+      latency_estimator =
+          std::make_unique<xla::auto_reorder::OfflineSQLitePgle>(
+              config, std::move(backup_latency_estimator),
+              offline_sqlite_pgle_path);
+    } else {
+      LOG(INFO) << "Using gpu_latency_estimator as offline PGLE backup";
+      latency_estimator =
+          std::make_unique<xla::auto_reorder::OfflineSQLitePgle>(
+              config, std::move(gpu_latency_estimator),
+              offline_sqlite_pgle_path);
     }
   } else if (enable_analytical_latency_estimator) {
     latency_estimator = std::make_unique<AnalyticalLatencyEstimator>(

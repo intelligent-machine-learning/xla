@@ -29,6 +29,7 @@
 namespace xla {
 using InstructionVector = absl::InlinedVector<HloInstruction*, 2>;
 namespace auto_reorder {
+std::string get_offline_sqlite_pgle_path();
 struct HloLatencyStats {
   uint32_t hits = 0;
   uint32_t misses = 0;

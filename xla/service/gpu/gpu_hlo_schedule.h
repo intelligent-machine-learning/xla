@@ -39,7 +39,6 @@ limitations under the License.
 #include "absl/strings/string_view.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
 
-
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "xla/hlo/ir/hlo_computation.h"
@@ -52,6 +51,7 @@ limitations under the License.
 #include "xla/service/buffer_value.h"
 #include "xla/service/collective_ops_utils.h"
 #include "xla/hlo/experimental/auto_reorder/auto_reorder.h"
+#include "xla/hlo/experimental/auto_reorder/offline_sqlite_pgle.h"
 #include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/service/gpu/cublas_cudnn.h"
 #include "xla/service/gpu/gpu_schedule_postprocessing.h"
@@ -87,15 +87,14 @@ struct ScheduleMetadata {
 absl::StatusOr<ScheduleMetadata> ScheduleGpuModule(
     HloModule* module, int64_t pointer_size,
     const se::DeviceDescription& gpu_device_info);
-int64_t GetSchedulerMemoryLimit(
-    const HloModule* module, const se::DeviceDescription& gpu_device_info,
-    int pointer_size);
+int64_t GetSchedulerMemoryLimit(const HloModule* module,
+                                const se::DeviceDescription& gpu_device_info,
+                                int pointer_size);
 HloInstructionSequence PostProcessSchedule(const HloInstructionSequence& input);
 
 constexpr absl::string_view kFingerprintBeforeLHS = "fingerprint_before_lhs";
 
 }  // namespace gpu
-
 
 }  // namespace xla
 

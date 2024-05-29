@@ -11,7 +11,13 @@ namespace auto_reorder {
       return absl::InternalError("expect failed");      \
     }                                                   \
   }
-
+std::string get_offline_sqlite_pgle_path() {
+  const char* env = std::getenv("XLA_OFFLINE_SQLITE_PGLE_PATH");
+  if (env == nullptr) {
+    return "";
+  }
+  return env;
+};
 OfflineSQLitePgle::OfflineSQLitePgle(
     const SchedulerConfig& config,
     std::unique_ptr<LatencyEstimator> latency_estimator,
