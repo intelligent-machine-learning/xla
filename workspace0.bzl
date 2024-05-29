@@ -103,7 +103,7 @@ def workspace():
             "https://storage.googleapis.com/download.tensorflow.org/data/tf_lite_micro_person_data_grayscale_2020_05_24.zip",
         ],
     )
-
+    
     bazel_toolchains_repositories()
 
     # Apple rules for Bazel. https://github.com/bazelbuild/rules_apple.

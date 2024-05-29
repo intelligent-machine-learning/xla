@@ -384,19 +384,19 @@ StatusOr<bool> AutoReorderPass::Run(
   return true;
 
 }  // AutoReorderPass::Run
-CanonicalAsyncOp GpuGetCanonicalAsyncOp(const HloInstruction& hlo) {
-  switch (hlo.opcode()) {
-    case HloOpcode::kSend:
-      return {HloOpcode::kAsyncStart, HloOpcode::kSend};
-    case HloOpcode::kSendDone:
-      return {HloOpcode::kAsyncDone, HloOpcode::kSend};
-    case HloOpcode::kRecv:
-      return {HloOpcode::kAsyncStart, HloOpcode::kRecv};
-    case HloOpcode::kRecvDone:
-      return {HloOpcode::kAsyncDone, HloOpcode::kRecv};
-    default:
-      return DefaultGetCanonicalAsyncOp(hlo);
-  }
-}
+// CanonicalAsyncOp GpuGetCanonicalAsyncOp(const HloInstruction& hlo) {
+//   switch (hlo.opcode()) {
+//     case HloOpcode::kSend:
+//       return {HloOpcode::kAsyncStart, HloOpcode::kSend};
+//     case HloOpcode::kSendDone:
+//       return {HloOpcode::kAsyncDone, HloOpcode::kSend};
+//     case HloOpcode::kRecv:
+//       return {HloOpcode::kAsyncStart, HloOpcode::kRecv};
+//     case HloOpcode::kRecvDone:
+//       return {HloOpcode::kAsyncDone, HloOpcode::kRecv};
+//     default:
+//       return DefaultGetCanonicalAsyncOp(hlo);
+//   }
+// }
 
 }  // namespace xla

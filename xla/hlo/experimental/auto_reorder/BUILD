@@ -62,7 +62,13 @@ cc_library(
 # All header files that are used in the build must be declared in
 #   the hdrs or srcs of cc_* rules.
 #   This is enforced.
-
+cc_library(
+    name="common",
+    hdrs=["common.h"],
+    deps=[
+        "//xla/service/gpu/model:analytical_latency_estimator",
+    ]
+)
 cc_library(
     name = "auto_reorder",
     srcs = [
@@ -81,11 +87,11 @@ cc_library(
         "//xla/service:hlo_cost_analysis",
         "//xla/service:latency_hiding_scheduler",
         "//xla/service/gpu/model:gpu_hlo_cost_analysis",
-        "//xla/service/gpu/model:analytical_latency_estimator",
         "//xla/service:backend",
         "@com_google_absl//absl/strings",
         "@tsl//tsl/platform:statusor",
-        ":auto_reorder_solver"
+        ":auto_reorder_solver",
+        ":common"
     ],
 )
 tf_proto_library(
@@ -93,6 +99,19 @@ tf_proto_library(
     srcs = ["instr_profile_info.proto"],
 )
 
+
+cc_library(
+    name="offline_sqlite_pgle",
+    srcs=["offline_sqlite_pgle.cc"],
+    hdrs=["offline_sqlite_pgle.h"],
+    deps=[
+        "//xla/hlo/ir:hlo",
+        "@llvm-project//llvm:Support",
+        "@sqlite//:sqlite",
+        ":instr_profile_info_proto_cc",
+        ":common"
+    ]   
+)
 cc_library(
     name="convert_xplane",
     srcs=["convert_xplane.cc"],
@@ -118,7 +137,9 @@ cc_library(
         "@tsl//tsl/profiler/utils:xplane_utils",
         "@tsl//tsl/profiler/utils:xplane_visitor",
         "@com_google_protobuf//:protobuf",
-        ":instr_profile_info_proto_cc"
+        ":instr_profile_info_proto_cc",
+        ":offline_sqlite_pgle",
+        ":common",
     ]
 )
 xla_cc_test(
@@ -126,7 +147,6 @@ xla_cc_test(
     srcs = ["auto_reorder_test.cc"],
     deps = [
         ":auto_reorder",
-        ":convert_xplane",
         "//xla/hlo/ir:hlo",
         "//xla/hlo/utils:hlo_matchers",
         "//xla/service:hlo_parser",
@@ -140,9 +160,26 @@ xla_cc_test(
         "@com_google_googletest//:gtest",
         "@tsl//tsl/lib/core:status_test_util",
         "@tsl//tsl/platform:statusor",
+        ":common",
     ],
 )
-
+xla_cc_test(
+    name = "offline_sqlite_pgle_test",
+    srcs = ["offline_sqlite_pgle_test.cc"],
+    deps = [
+        ":convert_xplane",
+        ":offline_sqlite_pgle",
+        "//xla/hlo/ir:hlo",
+        "//xla/tests:xla_internal_test_main",
+        "//xla/tests:hlo_test_base",
+        "@com_google_absl//absl/status",
+        "@com_google_googletest//:gtest",
+        "@tsl//tsl/lib/core:status_test_util",
+        "@tsl//tsl/platform:statusor",
+        "//xla/service/gpu:gpu_hlo_schedule",
+        ":common",
+    ],
+)
 xla_cc_binary(
     name="convert_xplane_tools",
     linkopts = [
@@ -164,26 +201,3 @@ xla_cc_binary(
 
     ]
 )
-#     # compatible_with = get_compatible_with_libtpu_portable(),
-#     deps=[
-#         "//xla:status",
-#         "//xla:xla_proto_cc",
-#         "//xla/hlo/ir:hlo",
-#         "//xla/service:hlo_proto_cc",
-#         "@com_google_absl//absl/container:flat_hash_map",
-#         "@com_google_absl//absl/status",
-#         "@com_google_absl//absl/strings",
-#         "@com_google_absl//absl/types:optional",
-#         "@tsl//tsl/platform:env",
-#         "@tsl//tsl/platform:types",
-#         "@tsl//tsl/profiler/convert:xla_op_utils",
-#         "@tsl//tsl/profiler/protobuf:profiled_instructions_proto_cc",
-#         "@tsl//tsl/profiler/protobuf:xplane_proto_cc",
-#         "@tsl//tsl/profiler/utils:file_system_utils",
-#         "@tsl//tsl/profiler/utils:tf_xplane_visitor",
-#         "@tsl//tsl/profiler/utils:xplane_schema",
-#         "@tsl//tsl/profiler/utils:xplane_utils",
-#         "@tsl//tsl/profiler/utils:xplane_visitor",
-#         "@tsl//tsl/platform:platform_port",
-#     ]
-# )

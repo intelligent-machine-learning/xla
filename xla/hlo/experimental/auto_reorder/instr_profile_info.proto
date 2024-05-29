@@ -15,9 +15,9 @@ syntax = "proto3";
 package xla.auto_reorder;
 
 import "google/protobuf/any.proto";
-// Size(rank=3,sizes=[2,3,4])
+// Size(dim=3,sizes=[2,3,4])
 message Size {
-    int64 rank = 1;
+    int64 dim = 1;
     repeated int64 sizes = 2;
 }
 //ReplicaGroup(replica_group_id=1, replica_ids={1,2})
@@ -29,14 +29,17 @@ message ReplicaGroup{
 message InstrProfileInfo {
   string name = 1;
   uint32 operand_count=2;
-  uint32 result_count=3;
-  uint32 opcode=4;
-  uint32 version=5;
-  repeated string operand_types = 6;
-  repeated string result_types = 7;
-  repeated Size operand_sizes = 8;
-  Size result_size = 9;
-  repeated ReplicaGroup process_groups=10;
+  uint32 opcode=3;
+  string opname=13;
+  uint32 version=4;
+  repeated string operand_types = 5;
+  repeated string result_types = 6;
+  repeated Size operand_sizes = 7;
+  Size result_size = 8;
+  repeated ReplicaGroup process_groups=9;
+  uint32 replica_group_size=10;
   optional string custom_call_target = 11;
   double cost=12;
+  string hwinfo=14;
+  string operand_hash=15;
 }

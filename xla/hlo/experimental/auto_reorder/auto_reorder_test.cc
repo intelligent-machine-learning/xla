@@ -22,11 +22,11 @@
 
 #include "absl/algorithm/container.h"
 #include "xla/hlo/experimental/auto_reorder/auto_reorder.h"
-#include "xla/hlo/experimental/auto_reorder/convert_xplane.h"
 #include "xla/service/async_collective_creator.h"
 #include "xla/service/gpu/gpu_device_info_for_tests.h"
 #include "xla/service/gpu/gpu_hlo_schedule.h"
 #include "xla/tests/hlo_test_base.h"
+#include "xla/hlo/experimental/auto_reorder/common.h"
 
 #define debug_log(x)                           \
   {                                            \
@@ -165,25 +165,6 @@ class SavedInstLatencyEstimator : public GpuLatencyEstimator {
   std::unordered_map<int, TimeCost> edge_cost_;
 };
 using namespace xla::gpu;
-constexpr int kMaxConcurrentAsyncCollectivePermutes = 5;
-
-SchedulerConfig GetSchedulerConfig(int64_t memory_limit) {
-  SchedulerConfig config;
-  config.all_reduce_overlap_limit = 1;
-  config.collective_permute_overlap_limit = 1;
-  config.use_real_cost_model = false;
-  config.aggressive_scheduling_policies = true;
-  config.schedule_send_recvs = true;
-  config.memory_limit = memory_limit;
-  return config;
-}
-SchedulerConfig GetDefaultSchedConfig() {
-  SchedulerConfig sched_cfg;
-  sched_cfg.collective_permute_overlap_limit =
-      kMaxConcurrentAsyncCollectivePermutes;
-  sched_cfg.send_recv_overlap_limit = INT32_MAX;
-  return sched_cfg;
-}
 
 class AutoReorderingTest : public HloTestBase {
  protected:
@@ -725,7 +706,6 @@ ENTRY %elementwise {
                               buffer.shape(),
                               /*pointer_size=*/sizeof(void*));
                         }));
-
     TF_RETURN_IF_ERROR(module->set_schedule(std::move(schedule)));
     VLOG(2) << "setting default schedule finish." << TestName();
 
@@ -962,18 +942,6 @@ ENTRY %elementwise {
     }
   }
 };
-TEST_F(AutoReorderingTest, ConvertPDO) {
-  // GTEST_SKIP() << "using convert here;";
-  // get filepath from env
-  const char* env = std::getenv("XLA_AUTOREORDER_XPLANE_DIR");
-  if (env == nullptr) {
-    GTEST_SKIP() << "have no set XLA_AUTOREORDER_XPLANE_DIR env skip";
-  }
-  auto status = ConvertXplaneToFile(
-      env, "/root/tb/llama_xla_trace_2n16g/llama_fdo.jsonl");
-  std::cout << status.message() << std::endl;
-  EXPECT_TRUE(status.ok());
-}
 
 TEST_F(AutoReorderingTest, CommOpCostTest) {
   HloCostAnalysis::ShapeSizeFunction ShapeSizeBytesFunction =
@@ -1014,7 +982,7 @@ ENTRY e {
   %ag-start = (bf16[1024,4096], bf16[8192,4096]) all-gather-start(bf16[1024,4096] %p0), channel_id=1, replica_groups={{0,1,2,3,4,5,6,7}}, dimensions={0}, use_global_device_ids=true
   %ag-done = bf16[8192,4096] all-gather-done(
     (bf16[1024,4096], bf16[8192,4096]) %ag-start )
- %ar-start = bf16[8192,4096] all-reduce-start(bf16[8192,4096] %ag-done), channel_id=1, replica_groups={{0,1,2,3,4,5,6,7}}, dimensions={0}, use_global_device_ids=true to_apply=%add
+ %ar-start = bf16[8192,4096] all-reduce-start(bf16[8192,4096] %ag-done), channel_id=1, replica_groups={{0,1,2,3,4,5,6,7}}, use_global_device_ids=true to_apply=%add
  %ar-done = bf16[8192,4096] all-reduce-done(
     (bf16[1024,4096], bf16[8192,4096]) %ar-start )
   %add-ret = bf16[8192,4096] call(%ag-done,%ar-done), to_apply=%add
