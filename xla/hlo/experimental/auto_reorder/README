@@ -6,3 +6,14 @@ export TF_CPP_MIN_LOG_LEVEL=0
 export TF_CPP_VMODULE="auto_reorder=5,auto_reorder_solver=5"
 bazel run --compilation_mode=dbg xla/hlo/experimental/auto_reorder:auto_reorder_test --incompatible_strict_action_env --action_env=USE_CUDA --action_env=XLA_CUDA
 ```
+
+
+run Database PGLE test:
+
+```
+export TF_CPP_MIN_LOG_LEVEL=0 
+export TF_CPP_VMODULE="auto_reorder=5,auto_reorder_solver=5,gpu_collective_performance_model=5,gpu_performance_model=5,convert_xplane=5"
+
+bazel run --compilation_mode=dbg xla/hlo/experimental/auto_reorder:offline_sqlite_pgle_test 
+--incompatible_strict_action_env --action_env=USE_CUDA --action_env=XLA_CUDA --jobs=8
+```

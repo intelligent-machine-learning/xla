@@ -148,7 +148,7 @@ TEST_F(OfflineSqlitePGLETestcase, SQLitePGLEWithAutoReorderTest) {
 
   // query
   for (const xla::HloInstruction* inst : entry_computation->instructions()) {
-    absl::StatusOr<double> cost_or_status = dbbase_pgle->QueryInstCost(inst);
+    absl::StatusOr<double> cost_or_status = dbbase_pgle->QueryInstCost(*inst);
     EXPECT_TRUE(cost_or_status.ok());
     EXPECT_DOUBLE_EQ(cost_or_status.value(), 10.0);
   }

@@ -73,18 +73,18 @@ class OfflineSQLitePgle : public LatencyEstimator {
                     std::unique_ptr<LatencyEstimator> latency_estimator,
                     const std::string& db_path);
   ~OfflineSQLitePgle();
-  static std::string InstOperandHash(const xla::HloInstruction* inst);
+  //   static std::string InstOperandHash(const xla::HloInstruction* inst);
   static std::string InstOperandHash(const xla::HloInstruction& inst);
   // Create a new table and create it's indexes
   absl::Status CreateDB();
   // Open a db for read/write
   absl::Status OpenDB(const std::string& db_path);
   absl::Status SaveMemoryDBToFile(const std::string& db_path);
-  const absl::Status BatchInsertInstrProfileInfo(
+  // insert a vector of InstrProfileInfo into database
+  absl::Status BatchInsertInstrProfileInfo(
       std::vector<xla::auto_reorder::InstrProfileInfo>& infos);
 
   // HloGraphNode GetInstr() return const xla::HloInstruction
-  absl::StatusOr<double> QueryInstCost(const xla::HloInstruction* inst) const;
   absl::StatusOr<double> QueryInstCost(const xla::HloInstruction& inst) const;
 
   // parse computation instructions, put it into hlo_module_info,but no cost;
@@ -110,20 +110,14 @@ class OfflineSQLitePgle : public LatencyEstimator {
 
   // communicate hash,include process_group info
   static std::string CommunicateInstOperandHash(
-      const xla::HloInstruction* inst);
-  static std::string CommunicateInstOperandHash(
       const xla::HloInstruction& inst);
   // custom call hash,include custom call target
-  static std::string CustomCallInstOperandHash(const xla::HloInstruction* inst);
   static std::string CustomCallInstOperandHash(const xla::HloInstruction& inst);
 
   // default inst hash, using CommonHash
-  static std::string DefaultInstOperandHash(const xla::HloInstruction* inst);
   static std::string DefaultInstOperandHash(const xla::HloInstruction& inst);
 
   // update common hash logic,such as operand size, operand type
-  static void CommonHash(const xla::HloInstruction* inst,
-                         llvm::MD5* md5_instance);
   static void CommonHash(const xla::HloInstruction& inst,
                          llvm::MD5* md5_instance);
   static void CommonOperandsHash(const InstructionVector& operands,

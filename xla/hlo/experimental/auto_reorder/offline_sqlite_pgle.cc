@@ -78,7 +78,7 @@ absl::Status OfflineSQLitePgle::ParseToInstProfileInfo(
     // result_types
     instr_info.add_result_types(PrimitiveType_Name(shape.element_type()));
     instr_info.set_operand_hash(
-        xla::auto_reorder::OfflineSQLitePgle::InstOperandHash(instr));
+        xla::auto_reorder::OfflineSQLitePgle::InstOperandHash(*instr));
     // TODO: set hw info; for now, we don't have hw info
     //  instr_info.set_hwinfo
 
@@ -259,7 +259,7 @@ absl::Status OfflineSQLitePgle::BindInstInfoToSql(
                 SQLITE_OK);
   return absl::OkStatus();
 }
-const absl::Status OfflineSQLitePgle::BatchInsertInstrProfileInfo(
+absl::Status OfflineSQLitePgle::BatchInsertInstrProfileInfo(
     std::vector<xla::auto_reorder::InstrProfileInfo>& infos) {
   std::string params_sql = BatchInsertSQL(infos.size());
   sqlite3_stmt* stmt;
@@ -310,23 +310,6 @@ absl::Status OfflineSQLitePgle::OpenDB(const std::string& db_path) {
 }
 
 std::string OfflineSQLitePgle::InstOperandHash(
-    const xla::HloInstruction* inst) {
-  HloOpcode code = inst->opcode();
-  switch (code) {
-    case HloOpcode::kReduceScatter:
-    case HloOpcode::kAllGather:
-    case HloOpcode::kAllGatherStart:
-    case HloOpcode::kAllReduce:
-    case HloOpcode::kAllReduceStart:
-    case HloOpcode::kCollectivePermuteStart:
-      return CommunicateInstOperandHash(inst);
-    case HloOpcode::kCustomCall:
-      return CustomCallInstOperandHash(inst);
-    default:
-      return DefaultInstOperandHash(inst);
-  }
-}
-std::string OfflineSQLitePgle::InstOperandHash(
     const xla::HloInstruction& inst) {
   HloOpcode code = inst.opcode();
   switch (code) {
@@ -360,10 +343,6 @@ void OfflineSQLitePgle::CommonOperandsHash(const InstructionVector& operands,
     md5_instance->update(".");
   }
 }
-void OfflineSQLitePgle::CommonHash(const xla::HloInstruction* inst,
-                                   llvm::MD5* md5_instance) {
-  CommonOperandsHash(inst->operands(), md5_instance);
-}
 void OfflineSQLitePgle::CommonHash(const xla::HloInstruction& inst,
                                    llvm::MD5* md5_instance) {
   CommonOperandsHash(inst.operands(), md5_instance);
@@ -393,14 +372,6 @@ void UpdateCommonicationHash(std::vector<xla::ReplicaGroup> replica_groups,
   }
 }
 std::string OfflineSQLitePgle::CommunicateInstOperandHash(
-    const xla::HloInstruction* inst) {
-  std::unique_ptr<llvm::MD5> md5_instance(new llvm::MD5());
-  CommonHash(inst, md5_instance.get());
-  std::vector<xla::ReplicaGroup> replica_groups = inst->replica_groups();
-  UpdateCommonicationHash(replica_groups, md5_instance.get());
-  return GetHash(md5_instance.get());
-}
-std::string OfflineSQLitePgle::CommunicateInstOperandHash(
     const xla::HloInstruction& inst) {
   std::unique_ptr<llvm::MD5> md5_instance(new llvm::MD5());
   CommonHash(inst, md5_instance.get());
@@ -409,13 +380,7 @@ std::string OfflineSQLitePgle::CommunicateInstOperandHash(
   return GetHash(md5_instance.get());
 }
 /*static*/
-std::string OfflineSQLitePgle::CustomCallInstOperandHash(
-    const xla::HloInstruction* inst) {
-  std::unique_ptr<llvm::MD5> md5_instance(new llvm::MD5());
-  CommonHash(inst, md5_instance.get());
-  md5_instance->update(inst->custom_call_target());
-  return GetHash(md5_instance.get());
-}
+
 std::string OfflineSQLitePgle::CustomCallInstOperandHash(
     const xla::HloInstruction& inst) {
   std::unique_ptr<llvm::MD5> md5_instance(new llvm::MD5());
@@ -424,12 +389,6 @@ std::string OfflineSQLitePgle::CustomCallInstOperandHash(
   return GetHash(md5_instance.get());
 }
 /*static*/
-std::string OfflineSQLitePgle::DefaultInstOperandHash(
-    const xla::HloInstruction* inst) {
-  std::unique_ptr<llvm::MD5> md5_instance(new llvm::MD5());
-  CommonHash(inst, md5_instance.get());
-  return GetHash(md5_instance.get());
-}
 std::string OfflineSQLitePgle::DefaultInstOperandHash(
     const xla::HloInstruction& inst) {
   std::unique_ptr<llvm::MD5> md5_instance(new llvm::MD5());
@@ -468,17 +427,6 @@ absl::StatusOr<double> OfflineSQLitePgle::QueryInstCostByCode(
   return cost;
 }
 absl::StatusOr<double> OfflineSQLitePgle::QueryInstCost(
-    const xla::HloInstruction* inst) const {
-  /*
-  1. HloGraphNode GetInstr() return const xla::HloInstruction
-  2. NodeCost(const xla::HloInstruction* inst) input is const
-  xla::HloInstruction*
-  */
-  std::string hash = OfflineSQLitePgle::InstOperandHash(inst);
-  HloOpcode code = inst->opcode();
-  return QueryInstCostByCode(code, hash);
-}
-absl::StatusOr<double> OfflineSQLitePgle::QueryInstCost(
     const xla::HloInstruction& inst) const {
   /*
   1. HloGraphNode GetInstr() return const xla::HloInstruction
@@ -512,7 +460,7 @@ LatencyEstimator::TimeCost OfflineSQLitePgle::GetLatencyBetween(
         from.GetInstr().async_wrapped_instruction();
     VLOG(10) << "PGLE lookup async wrapped instruction: "
              << wrapped_inst->name() << " in " << from.GetInstr().name();
-    cost_or_status = QueryInstCost(wrapped_inst);
+    cost_or_status = QueryInstCost(*wrapped_inst);
     if (!cost_or_status.ok()) {
       return latency_estimator_->GetLatencyBetween(from, target);
     }
@@ -529,7 +477,7 @@ LatencyEstimator::TimeCost OfflineSQLitePgle::GetLatencyBetween(
        target.GetInstr().opcode() == HloOpcode::kAsyncDone)) {
     const HloInstruction* wrapped_inst =
         target.GetInstr().async_wrapped_instruction();
-    cost_or_status2 = QueryInstCost(wrapped_inst);
+    cost_or_status2 = QueryInstCost(*wrapped_inst);
   }
   if (cost_or_status2.ok()) {
     VLOG(10) << "PGLE found latency between " << from.GetInstr().name()
@@ -555,7 +503,7 @@ LatencyEstimator::TimeCost OfflineSQLitePgle::NodeCost(
     static constexpr TimeCost kLowCost = 1.0;
     return kLowCost;
   }
-  const absl::StatusOr<double> cost_or_status = QueryInstCost(instr);
+  const absl::StatusOr<double> cost_or_status = QueryInstCost(*instr);
   if (cost_or_status.ok()) {
     return cost_or_status.value();
   }
