@@ -146,9 +146,19 @@ TEST_F(OfflineSqlitePGLETestcase, SQLitePGLEWithAutoReorderTest) {
   status = dbbase_pgle->BatchInsertInstrProfileInfo(waiting_insert_profile);
   EXPECT_TRUE(status.ok());
 
+  status = dbbase_pgle->SaveMemoryDBToFile("/tmp/test.db");
+  EXPECT_TRUE(status.ok());
+  auto gpu_latency_estimator2 = std::make_unique<GpuLatencyEstimator>();
+  std::unique_ptr<xla::auto_reorder::OfflineSQLitePgle> dbbase_pgle_file =
+      std::make_unique<xla::auto_reorder::OfflineSQLitePgle>(
+          sched_config, std::move(gpu_latency_estimator2), "/tmp/test.db");
+  status = dbbase_pgle_file->LoadFileDBToMemory();
+  EXPECT_TRUE(status.ok());
+
   // query
   for (const xla::HloInstruction* inst : entry_computation->instructions()) {
-    absl::StatusOr<double> cost_or_status = dbbase_pgle->QueryInstCost(*inst);
+    absl::StatusOr<double> cost_or_status =
+        dbbase_pgle_file->QueryInstCost(*inst);
     EXPECT_TRUE(cost_or_status.ok());
     EXPECT_DOUBLE_EQ(cost_or_status.value(), 10.0);
   }
@@ -166,48 +176,50 @@ TEST_F(OfflineSqlitePGLETestcase, SQLitePGLEWithAutoReorderTest) {
   // use pass
   auto async_tracker = std::make_unique<AsyncTracker>(sched_config);
   auto scheduler_core = std::make_unique<DefaultSchedulerCore>(
-      shape_size_bytes, async_tracker.get(), dbbase_pgle.get(), sched_config);
+      shape_size_bytes, async_tracker.get(), dbbase_pgle_file.get(),
+      sched_config);
 
   HloPassPipeline pipeline("latency-hiding-scheduler");
 
   auto test_pass =
-      AutoReorderPass(std::move(dbbase_pgle), std::move(async_tracker),
+      AutoReorderPass(std::move(dbbase_pgle_file), std::move(async_tracker),
                       std::move(scheduler_core), shape_size_bytes);
   StatusOr<bool> success_or_status = test_pass.Run(hlo_module.get());
   EXPECT_TRUE(success_or_status.ok());
   EXPECT_TRUE(success_or_status.value());
 }
 TEST_F(OfflineSqlitePGLETestcase, SqliteTest) {
-  sqlite3* db;
+  sqlite3* db_raw;
   char* zErrMsg = 0;
   int rc;
   const char* sql;
   sqlite3_stmt* stmt;
 
   /* 打开数据库 */
-  rc = sqlite3_open(":memory:", &db);
-  EXPECT_TRUE(rc == SQLITE_OK) << "无法打开数据库:" << sqlite3_errmsg(db);
+  rc = sqlite3_open(":memory:", &db_raw);
 
+  EXPECT_TRUE(rc == SQLITE_OK) << "无法打开数据库:" << sqlite3_errmsg(db_raw);
+  xla::auto_reorder::SqlitePtr db(db_raw);
   std::string createTablesql =
       "CREATE TABLE COMPANY("
       "ID INT PRIMARY KEY     NOT NULL,"
       "NAME           TEXT    NOT NULL);";
   /* 创建表 */
-  rc = sqlite3_exec(db, createTablesql.c_str(), 0, 0, &zErrMsg);
+  rc = sqlite3_exec(db.get(), createTablesql.c_str(), 0, 0, &zErrMsg);
   EXPECT_TRUE(rc == SQLITE_OK) << "Table created successfully";
 
   /* 创建SQL语句 */
   sql = "INSERT INTO COMPANY (ID,NAME) VALUES (?,?),(?,?)";
 
   /* 准备语句 */
-  rc = sqlite3_prepare_v2(db, sql, -1, &stmt, 0);
+  rc = sqlite3_prepare_v2(db.get(), sql, -1, &stmt, 0);
   EXPECT_TRUE(rc == SQLITE_OK) << "Prepared statement created successfully";
 
   /* 插入多条数据 */
   for (int i = 0; i < 2; i++) {
     /* 绑定参数 */
     rc = sqlite3_bind_int(stmt, i * 2 + 1, i);
-    EXPECT_TRUE(rc == SQLITE_OK) << "无法绑定参数:" << sqlite3_errmsg(db);
+    EXPECT_TRUE(rc == SQLITE_OK) << "无法绑定参数:" << sqlite3_errmsg(db.get());
 
     char name[50];
     sprintf(name, "Company'asd' %d", i);
@@ -223,7 +235,7 @@ TEST_F(OfflineSqlitePGLETestcase, SqliteTest) {
   // sqlite3_finalize(stmt);
   /*select count*/
   sql = "SELECT COUNT(*) FROM COMPANY";
-  rc = sqlite3_prepare_v2(db, sql, -1, &stmt, 0);
+  rc = sqlite3_prepare_v2(db.get(), sql, -1, &stmt, 0);
   EXPECT_TRUE(rc == SQLITE_OK);
   rc = sqlite3_step(stmt);
   EXPECT_TRUE(rc == SQLITE_ROW);
@@ -232,8 +244,5 @@ TEST_F(OfflineSqlitePGLETestcase, SqliteTest) {
 
   /* 销毁准备语句 */
   sqlite3_finalize(stmt);
-
-  /* 关闭数据库 */
-  sqlite3_close(db);
 }
 }  // namespace xla

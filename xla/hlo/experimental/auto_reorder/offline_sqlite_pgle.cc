@@ -33,11 +33,7 @@ OfflineSQLitePgle::OfflineSQLitePgle(
     throw std::runtime_error("OpenDB failed");
   }
 }
-OfflineSQLitePgle::~OfflineSQLitePgle() {
-  if (client_ != nullptr) {
-    sqlite3_close(client_);
-  }
-}
+OfflineSQLitePgle::~OfflineSQLitePgle() {}
 
 absl::Status OfflineSQLitePgle::ParseToInstProfileInfo(
     HloComputation* computation,
@@ -151,16 +147,15 @@ absl::Status OfflineSQLitePgle::SaveMemoryDBToFile(const std::string& db_path) {
       VLOG(2) << "Opened database for save memory database successfully";
     }
     // ATTACH DATABASE ':memory:' AS memdb;
+    // client: sqlite3_backup_init(dst,src)
     sqlite3_backup* pBackup =
-        sqlite3_backup_init(file_client, "main", client_, "main");
+        sqlite3_backup_init(file_client, "main", client_.get(), "main");
     if (pBackup) {
       sqlite3_backup_step(pBackup, -1);
       sqlite3_backup_finish(pBackup);
       VLOG(2) << "backup finish";
     }
     sqlite3_close(file_client);
-    // sqlite3_close(client_);
-    // client_=nullptr;
     return absl::OkStatus();
   }
 }
@@ -269,10 +264,11 @@ absl::Status OfflineSQLitePgle::BatchInsertInstrProfileInfo(
     std::vector<xla::auto_reorder::InstrProfileInfo>& infos) {
   std::string params_sql = BatchInsertSQL(infos.size());
   sqlite3_stmt* stmt;
-  int code = sqlite3_prepare_v2(client_, params_sql.c_str(), -1, &stmt, 0);
+  int code =
+      sqlite3_prepare_v2(client_.get(), params_sql.c_str(), -1, &stmt, 0);
   if (code != SQLITE_OK) {
-    return absl::InternalError(
-        absl::StrCat("Can't prepare statement:", sqlite3_errmsg(client_)));
+    return absl::InternalError(absl::StrCat("Can't prepare statement:",
+                                            sqlite3_errmsg(client_.get())));
   }
   VLOG(5) << "finish prepare stmt, it have parameters: "
           << sqlite3_bind_parameter_count(stmt);
@@ -289,32 +285,64 @@ absl::Status OfflineSQLitePgle::BatchInsertInstrProfileInfo(
   return absl::OkStatus();
 }
 absl::Status OfflineSQLitePgle::CreateDB() {
-  int code =
-      sqlite3_exec(client_, kSQLCreate.c_str(), nullptr, nullptr, nullptr);
+  int code = sqlite3_exec(client_.get(), kSQLCreate.c_str(), nullptr, nullptr,
+                          nullptr);
   if (code != SQLITE_OK) {
-    VLOG(2) << "Can't create table: " << sqlite3_errmsg(client_) << std::endl;
+    VLOG(2) << "Can't create table: " << sqlite3_errmsg(client_.get())
+            << std::endl;
     return absl::InternalError("Can't create table");
   }
   for (auto sql : kSQLCreateIndexes) {
-    code = sqlite3_exec(client_, sql.c_str(), nullptr, nullptr, nullptr);
+    code = sqlite3_exec(client_.get(), sql.c_str(), nullptr, nullptr, nullptr);
     if (code != SQLITE_OK) {
-      VLOG(2) << "Can't create index: " << sqlite3_errmsg(client_) << std::endl;
+      VLOG(2) << "Can't create index: " << sqlite3_errmsg(client_.get())
+              << std::endl;
       return absl::InternalError("Can't create index");
     }
   }
   return absl::OkStatus();
 }
 absl::Status OfflineSQLitePgle::OpenDB(const std::string& db_path) {
-  int rc = sqlite3_open(db_path.c_str(), &client_);
+  sqlite3* client_raw;
+
+  int rc = sqlite3_open(db_path.c_str(), &client_raw);
   if (rc) {
-    VLOG(2) << "Can't open database: " << sqlite3_errmsg(client_) << std::endl;
+    VLOG(2) << "Can't open database: " << sqlite3_errmsg(client_raw)
+            << std::endl;
     return absl::InternalError("Can't open database");
   } else {
     VLOG(3) << "Opened database successfully" << std::endl;
   }
+  client_ = SqlitePtr(client_raw);
   return absl::OkStatus();
 }
-
+absl::Status OfflineSQLitePgle::LoadFileDBToMemory() {
+  if (is_memory_db_) {
+    return absl::OkStatus();
+  }
+  sqlite3* memory_client_raw;
+  int rc = sqlite3_open(":memory:", &memory_client_raw);
+  if (rc) {
+    VLOG(2) << "Can't open database: " << sqlite3_errmsg(memory_client_raw);
+    return absl::InternalError("Can't open database");
+  } else {
+    VLOG(2) << "Opened database for save memory database successfully";
+  }
+  SqlitePtr memory_client(memory_client_raw);
+  // ATTACH DATABASE ':memory:' AS memdb;
+  // client: sqlite3_backup_init(dst,src)
+  sqlite3_backup* pBackup =
+      sqlite3_backup_init(memory_client.get(), "main", client_.get(), "main");
+  if (pBackup) {
+    sqlite3_backup_step(pBackup, -1);
+    sqlite3_backup_finish(pBackup);
+    VLOG(2) << "backup finish";
+  }
+  client_.swap(memory_client);
+  // client_ = std::move(memory_client);
+  // client_=nullptr;
+  return absl::OkStatus();
+}
 std::string OfflineSQLitePgle::InstOperandHash(
     const xla::HloInstruction& inst) {
   HloOpcode code = inst.opcode();
@@ -419,14 +447,14 @@ absl::StatusOr<double> OfflineSQLitePgle::QueryInstCostByCode(
       "select ", groupby_func, "(cost) from inst_profiler where opcode=", code,
       " and operand_hash='", hash, "';");
   sqlite3_stmt* stmt;
-  int sqlcode = sqlite3_prepare_v2(client_, sql.c_str(), -1, &stmt, 0);
+  int sqlcode = sqlite3_prepare_v2(client_.get(), sql.c_str(), -1, &stmt, 0);
   if (sqlcode != SQLITE_OK) {
-    return absl::InternalError(
-        absl::StrCat("Can't prepare statement:", sqlite3_errmsg(client_)));
+    return absl::InternalError(absl::StrCat("Can't prepare statement:",
+                                            sqlite3_errmsg(client_.get())));
   }
   sqlcode = sqlite3_step(stmt);
   if (sqlcode != SQLITE_ROW) {
-    VLOG(2) << "Can't query table: " << sqlite3_errmsg(client_) << std::endl;
+    VLOG(6) << "Can't query table: " << sql << " code:" << sqlcode;
     return absl::NotFoundError("Can't find inst in table");
   }
   double cost = sqlite3_column_double(stmt, 0);
@@ -464,8 +492,8 @@ LatencyEstimator::TimeCost OfflineSQLitePgle::GetLatencyBetween(
        from.GetInstr().opcode() == HloOpcode::kAsyncDone)) {
     const HloInstruction* wrapped_inst =
         from.GetInstr().async_wrapped_instruction();
-    VLOG(10) << "PGLE lookup async wrapped instruction: "
-             << wrapped_inst->name() << " in " << from.GetInstr().name();
+    VLOG(5) << "PGLE lookup async wrapped instruction: " << wrapped_inst->name()
+            << " in " << from.GetInstr().name();
     cost_or_status = QueryInstCost(*wrapped_inst);
     if (!cost_or_status.ok()) {
       return latency_estimator_->GetLatencyBetween(from, target);
@@ -474,6 +502,7 @@ LatencyEstimator::TimeCost OfflineSQLitePgle::GetLatencyBetween(
   }
 
   if (!cost_or_status.ok()) {
+    VLOG(5) << "using backup estimator for latency: " << from.GetInstr().name();
     return latency_estimator_->GetLatencyBetween(from, target);
   }
 
@@ -486,20 +515,21 @@ LatencyEstimator::TimeCost OfflineSQLitePgle::GetLatencyBetween(
     cost_or_status2 = QueryInstCost(*wrapped_inst);
   }
   if (cost_or_status2.ok()) {
-    VLOG(10) << "PGLE found latency between " << from.GetInstr().name()
-             << " and " << target.GetInstr().name() << " in latency info";
+    VLOG(5) << "PGLE found latency between " << from.GetInstr().name()
+            << " and " << target.GetInstr().name() << " in latency info";
     return cost_or_status2.value() * CyclesPerMicrosecond();
   }
 
   // For async-start/done instructions, if there is no entry in latencies, fall
   // back to using instruction cost as the latency.
   if (cost_or_status.ok() && IsAsyncPair(from, target)) {
-    VLOG(10) << "PGLE found latency for async op " << from.GetInstr().name()
-             << " and (assumed)" << target.GetInstr().name()
-             << " in instruction costs";
+    VLOG(5) << "PGLE found latency for async op " << from.GetInstr().name()
+            << " and (assumed)" << target.GetInstr().name()
+            << " in instruction costs";
     return cost_or_status.value() * CyclesPerMicrosecond();
   }
 
+  VLOG(5) << "using backup estimator for latency: " << from.GetInstr().name();
   return latency_estimator_->GetLatencyBetween(from, target);
 }
 LatencyEstimator::TimeCost OfflineSQLitePgle::NodeCost(
@@ -511,9 +541,14 @@ LatencyEstimator::TimeCost OfflineSQLitePgle::NodeCost(
   }
   const absl::StatusOr<double> cost_or_status = QueryInstCost(*instr);
   if (cost_or_status.ok()) {
+    VLOG(5) << "NodeCost: " << instr->ToShortString()
+            << " success cost: " << cost_or_status.value();
     return cost_or_status.value();
   }
-  return latency_estimator_->NodeCost(instr);
+  auto cost = latency_estimator_->NodeCost(instr);
+  VLOG(5) << "NodeCost: " << instr->ToShortString()
+          << " fail. use backup estimator cost:" << cost;
+  return cost;
 }
 }  // namespace auto_reorder
 }  // namespace xla

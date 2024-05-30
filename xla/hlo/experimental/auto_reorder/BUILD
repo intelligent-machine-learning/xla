@@ -7,6 +7,8 @@ load(
     "@local_config_cuda//cuda:build_defs.bzl",
     "if_cuda",
 )
+load("//xla/stream_executor:build_defs.bzl", "if_gpu_is_configured")
+
 load(
     "@tsl//tsl/platform:build_config.bzl",
     "tf_proto_library",
@@ -182,22 +184,22 @@ xla_cc_test(
 )
 xla_cc_binary(
     name="convert_xplane_tools",
+    compatible_with = get_compatible_with_libtpu_portable(),
+    srcs=["convert_xplane_bin.cc"],
     linkopts = [
         "-Wl,--allow-multiple-definition",
-        "-lstdc++fs",  # For std::filesystem
+
     ],
-    srcs=["convert_xplane_bin.cc"],
     deps=[
         ":convert_xplane",
-        ":auto_reorder",
-        "//xla/hlo/ir:hlo",
-        "//xla/service:hlo_parser",
-        "//xla/service:latency_hiding_scheduler",
-        "//xla/service/gpu:gpu_hlo_schedule",
-        "//xla/service:gpu_plugin",
+        "@tsl//tsl/platform",
         "//xla:device_util",
-        "@com_google_absl//absl/log",
-        "@tsl//tsl/platform:statusor",
-
-    ]
+        "//xla/stream_executor",
+    ]+ if_gpu_is_configured([
+        "//xla/service/gpu:autotuner_util",
+        "//xla/service/gpu:executable_proto_cc",
+        "//xla/service/gpu:gpu_compiler",
+        "//xla/stream_executor/gpu:gpu_init",
+        "//xla/service/gpu:gpu_symbol_repository",
+    ])
 )

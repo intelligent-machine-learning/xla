@@ -30,6 +30,12 @@ namespace xla {
 using InstructionVector = absl::InlinedVector<HloInstruction*, 2>;
 namespace auto_reorder {
 std::string get_offline_sqlite_pgle_path();
+struct SqliteDeleter {
+  void operator()(sqlite3* db) const { sqlite3_close(db); }
+};
+
+using SqlitePtr = std::unique_ptr<sqlite3, SqliteDeleter>;
+
 struct HloLatencyStats {
   uint32_t hits = 0;
   uint32_t misses = 0;
@@ -81,6 +87,7 @@ class OfflineSQLitePgle : public LatencyEstimator {
   // Open a db for read/write
   absl::Status OpenDB(const std::string& db_path);
   absl::Status SaveMemoryDBToFile(const std::string& db_path);
+  absl::Status LoadFileDBToMemory();
   // insert a vector of InstrProfileInfo into database
   absl::Status BatchInsertInstrProfileInfo(
       std::vector<xla::auto_reorder::InstrProfileInfo>& infos);
@@ -134,7 +141,7 @@ class OfflineSQLitePgle : public LatencyEstimator {
 
  protected:
   bool is_memory_db_;
-  sqlite3* client_;
+  SqlitePtr client_;
   HloLatencyStats stats;
 };
 }  // namespace auto_reorder
