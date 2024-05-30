@@ -100,7 +100,6 @@ class OfflineSqlitePGLETestcase : public HloTestBase {
   }
 };
 TEST_F(OfflineSqlitePGLETestcase, ConvertPDO) {
-  GTEST_SKIP() << "convert Database here; dev will disable";
   // get filepath from env
   const char* env = std::getenv("XLA_AUTOREORDER_XPLANE_DIR");
   if (env == nullptr) {
@@ -232,7 +231,7 @@ TEST_F(OfflineSqlitePGLETestcase, SqliteTest) {
   /* 重置语句 */
   rc = sqlite3_reset(stmt);
   EXPECT_TRUE(rc == SQLITE_OK);
-  // sqlite3_finalize(stmt);
+  sqlite3_finalize(stmt);
   /*select count*/
   sql = "SELECT COUNT(*) FROM COMPANY";
   rc = sqlite3_prepare_v2(db.get(), sql, -1, &stmt, 0);

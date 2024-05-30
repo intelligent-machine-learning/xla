@@ -40,7 +40,7 @@ struct HloLatencyStats {
   uint32_t hits = 0;
   uint32_t misses = 0;
 };
-std::string kSQLCreate = R"(create table inst_profiler (
+const std::string kSQLCreate = R"(create table inst_profiler (
             name string,
             operandCount real,
             opcode real,
@@ -63,7 +63,7 @@ std::vector<std::string> kSQLCreateIndexes = {
     "create index idx_comm on inst_profiler(opcode, replicaGroupSize, "
     "operand_hash);",
 };
-std::string kSQLInsert = R"(insert into inst_profiler values)";
+const std::string kSQLInsert = R"(insert into inst_profiler values)";
 size_t kParamsCount = 12;
 std::string BatchInsertSQL(size_t size);
 /*

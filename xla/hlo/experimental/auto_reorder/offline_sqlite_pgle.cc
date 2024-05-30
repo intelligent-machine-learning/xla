@@ -142,6 +142,7 @@ absl::Status OfflineSQLitePgle::SaveMemoryDBToFile(const std::string& db_path) {
     int rc = sqlite3_open(db_path.c_str(), &file_client);
     if (rc) {
       VLOG(2) << "Can't open database: " << sqlite3_errmsg(file_client);
+      sqlite3_close(file_client);
       return absl::InternalError("Can't open database");
     } else {
       VLOG(2) << "Opened database for save memory database successfully";
@@ -267,6 +268,8 @@ absl::Status OfflineSQLitePgle::BatchInsertInstrProfileInfo(
   int code =
       sqlite3_prepare_v2(client_.get(), params_sql.c_str(), -1, &stmt, 0);
   if (code != SQLITE_OK) {
+    sqlite3_finalize(stmt);
+
     return absl::InternalError(absl::StrCat("Can't prepare statement:",
                                             sqlite3_errmsg(client_.get())));
   }
@@ -282,6 +285,8 @@ absl::Status OfflineSQLitePgle::BatchInsertInstrProfileInfo(
   EXPECT_SQL_EQ(sqlite3_step(stmt), SQLITE_DONE);
   VLOG(5) << "insert sql:" << params_sql << "sucess";
   EXPECT_SQL_EQ(sqlite3_reset(stmt), SQLITE_OK);
+  sqlite3_finalize(stmt);
+
   return absl::OkStatus();
 }
 absl::Status OfflineSQLitePgle::CreateDB() {
@@ -324,6 +329,7 @@ absl::Status OfflineSQLitePgle::LoadFileDBToMemory() {
   int rc = sqlite3_open(":memory:", &memory_client_raw);
   if (rc) {
     VLOG(2) << "Can't open database: " << sqlite3_errmsg(memory_client_raw);
+    sqlite3_close(memory_client_raw);
     return absl::InternalError("Can't open database");
   } else {
     VLOG(2) << "Opened database for save memory database successfully";
@@ -449,15 +455,21 @@ absl::StatusOr<double> OfflineSQLitePgle::QueryInstCostByCode(
   sqlite3_stmt* stmt;
   int sqlcode = sqlite3_prepare_v2(client_.get(), sql.c_str(), -1, &stmt, 0);
   if (sqlcode != SQLITE_OK) {
+    sqlite3_finalize(stmt);
+
     return absl::InternalError(absl::StrCat("Can't prepare statement:",
                                             sqlite3_errmsg(client_.get())));
   }
   sqlcode = sqlite3_step(stmt);
   if (sqlcode != SQLITE_ROW) {
     VLOG(6) << "Can't query table: " << sql << " code:" << sqlcode;
+    sqlite3_finalize(stmt);
+
     return absl::NotFoundError("Can't find inst in table");
   }
   double cost = sqlite3_column_double(stmt, 0);
+  sqlite3_finalize(stmt);
+
   return cost;
 }
 absl::StatusOr<double> OfflineSQLitePgle::QueryInstCost(
@@ -516,7 +528,8 @@ LatencyEstimator::TimeCost OfflineSQLitePgle::GetLatencyBetween(
   }
   if (cost_or_status2.ok()) {
     VLOG(5) << "PGLE found latency between " << from.GetInstr().name()
-            << " and " << target.GetInstr().name() << " in latency info";
+            << " and " << target.GetInstr().name()
+            << "cost: " << cost_or_status2.value() * CyclesPerMicrosecond();
     return cost_or_status2.value() * CyclesPerMicrosecond();
   }
 
@@ -525,11 +538,12 @@ LatencyEstimator::TimeCost OfflineSQLitePgle::GetLatencyBetween(
   if (cost_or_status.ok() && IsAsyncPair(from, target)) {
     VLOG(5) << "PGLE found latency for async op " << from.GetInstr().name()
             << " and (assumed)" << target.GetInstr().name()
-            << " in instruction costs";
+            << " in instruction costs:"
+            << cost_or_status.value() * CyclesPerMicrosecond();
     return cost_or_status.value() * CyclesPerMicrosecond();
   }
 
-  VLOG(5) << "using backup estimator for latency: " << from.GetInstr().name();
+  VLOG(5) << from.GetInstr().name() << "using backup estimator for latency ";
   return latency_estimator_->GetLatencyBetween(from, target);
 }
 LatencyEstimator::TimeCost OfflineSQLitePgle::NodeCost(
