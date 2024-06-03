@@ -212,6 +212,7 @@ absl::Status OfflineSQLitePgle::BindInstInfoToSql(
     }
     process_groups_strs.push_back(process_group_str);
   }
+  int process_group_size = info.replica_group_size();
   process_groups_str = absl::StrJoin(process_groups_strs, ",");
   // sqlite index start from 1
   size_t current_pos = index * kParamsCount + 1;
@@ -245,18 +246,20 @@ absl::Status OfflineSQLitePgle::BindInstInfoToSql(
       sqlite3_bind_text(stmt, current_pos + 7, operand_sizes_str.c_str(), -1,
                         SQLITE_TRANSIENT),
       SQLITE_OK);
+  EXPECT_SQL_EQ(sqlite3_bind_int(stmt, current_pos + 8, process_group_size),
+                SQLITE_OK);
   EXPECT_SQL_EQ(
-      sqlite3_bind_text(stmt, current_pos + 8, process_groups_str.c_str(), -1,
+      sqlite3_bind_text(stmt, current_pos + 9, process_groups_str.c_str(), -1,
                         SQLITE_TRANSIENT),
       SQLITE_OK);
-  EXPECT_SQL_EQ(sqlite3_bind_text(stmt, current_pos + 9,
+  EXPECT_SQL_EQ(sqlite3_bind_text(stmt, current_pos + 10,
                                   info.custom_call_target().c_str(), -1,
                                   SQLITE_TRANSIENT),
                 SQLITE_OK);
 
-  EXPECT_SQL_EQ(sqlite3_bind_double(stmt, current_pos + 10, info.cost()),
+  EXPECT_SQL_EQ(sqlite3_bind_double(stmt, current_pos + 11, info.cost()),
                 SQLITE_OK);
-  EXPECT_SQL_EQ(sqlite3_bind_text(stmt, current_pos + 11, info.hwinfo().c_str(),
+  EXPECT_SQL_EQ(sqlite3_bind_text(stmt, current_pos + 12, info.hwinfo().c_str(),
                                   -1, SQLITE_TRANSIENT),
                 SQLITE_OK);
   return absl::OkStatus();
@@ -469,7 +472,9 @@ absl::StatusOr<double> OfflineSQLitePgle::QueryInstCostByCode(
   }
   double cost = sqlite3_column_double(stmt, 0);
   sqlite3_finalize(stmt);
-
+  if (cost < kLowLatency) {
+    return kLowLatency;
+  }
   return cost;
 }
 absl::StatusOr<double> OfflineSQLitePgle::QueryInstCost(
@@ -504,12 +509,15 @@ LatencyEstimator::TimeCost OfflineSQLitePgle::GetLatencyBetween(
        from.GetInstr().opcode() == HloOpcode::kAsyncDone)) {
     const HloInstruction* wrapped_inst =
         from.GetInstr().async_wrapped_instruction();
-    VLOG(5) << "PGLE lookup async wrapped instruction: " << wrapped_inst->name()
-            << " in " << from.GetInstr().name();
+
     cost_or_status = QueryInstCost(*wrapped_inst);
     if (!cost_or_status.ok()) {
+      VLOG(5) << "using backup estimator for latency: " << wrapped_inst->name();
       return latency_estimator_->GetLatencyBetween(from, target);
     }
+    VLOG(5) << "PGLE found latency between " << wrapped_inst->name() << " and "
+            << target.GetInstr().name()
+            << "cost: " << cost_or_status.value() * CyclesPerMicrosecond();
     return cost_or_status.value() * CyclesPerMicrosecond();
   }
 

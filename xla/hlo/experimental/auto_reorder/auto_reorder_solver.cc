@@ -31,6 +31,13 @@ uint32_t get_autoreorder_timeout() {
   }
   return std::atoi(env);
 };
+uint32_t get_autoreorder_worker() {
+  const char* env = std::getenv("XLA_AUTOREORDER_WORKER");
+  if (env == nullptr) {
+    return 1;
+  }
+  return std::atoi(env);
+};
 int get_horizon(int max_time) {
   // scale should be fit with module?
   return max_time * 2;
@@ -210,7 +217,7 @@ LPSchedulerFunc(tsl::Status)::Solve(std::string mps_filename) {
     parameters.set_log_to_stdout(true);
     // parameters.set_log_search_progress(true);
   }
-  parameters.set_num_search_workers(1);
+  parameters.set_num_search_workers(xla::reorder::get_autoreorder_worker());
   auto model = cp_model_.Build();
   // model is operations_research::sat::CpModelProto type
   // need operations_research::MPModelProto& type, so we need to convert it

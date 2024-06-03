@@ -241,6 +241,14 @@ TEST_F(OfflineSqlitePGLETestcase, SqliteTest) {
   int count = sqlite3_column_int(stmt, 0);
   EXPECT_TRUE(count == 2);
 
+  sql = "SELECT COUNT(*) FROM COMPANY where name='not exist'";
+  rc = sqlite3_prepare_v2(db.get(), sql, -1, &stmt, 0);
+  EXPECT_TRUE(rc == SQLITE_OK);
+  rc = sqlite3_step(stmt);
+  EXPECT_TRUE(rc == SQLITE_ROW);
+  count = sqlite3_column_int(stmt, 0);
+  EXPECT_TRUE(count == 0);
+
   /* 销毁准备语句 */
   sqlite3_finalize(stmt);
 }

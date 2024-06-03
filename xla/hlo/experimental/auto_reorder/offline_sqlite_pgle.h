@@ -42,15 +42,16 @@ struct HloLatencyStats {
 };
 const std::string kSQLCreate = R"(create table inst_profiler (
             name string,
-            operandCount real,
-            opcode real,
-            version real,
+            operandCount int,
+            opcode int,
+            version int,
             operandTypes string,
 
             resultTypes string,
             operand_hash string,
             operandSizes_str string,
             replicaGroupSize real,
+            replicaGroupSize_str string,
             customCallTarget string,
 
             cost real,
@@ -64,7 +65,7 @@ std::vector<std::string> kSQLCreateIndexes = {
     "operand_hash);",
 };
 const std::string kSQLInsert = R"(insert into inst_profiler values)";
-size_t kParamsCount = 12;
+size_t kParamsCount = 13;
 std::string BatchInsertSQL(size_t size);
 /*
 Using DB(sqlite) for Profile Guided Latency Estimator

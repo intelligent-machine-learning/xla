@@ -24,6 +24,7 @@ using IntervalVar = operations_research::sat::IntervalVar;
 namespace reorder {
 const uint32_t ksolveTimeout = 180;  // 3min
 uint32_t get_autoreorder_timeout();
+uint32_t get_autoreorder_worker();
 constexpr const int kChannelNumber = 2;
 int get_horizon(int max_time);
 constexpr bool solve_debug = true;
