@@ -465,15 +465,16 @@ absl::StatusOr<double> OfflineSQLitePgle::QueryInstCostByCode(
   }
   sqlcode = sqlite3_step(stmt);
   if (sqlcode != SQLITE_ROW) {
-    VLOG(6) << "Can't query table: " << sql << " code:" << sqlcode;
+    VLOG(5) << "Can't query table: " << sql << " code:" << sqlcode;
     sqlite3_finalize(stmt);
 
     return absl::NotFoundError("Can't find inst in table");
   }
   double cost = sqlite3_column_double(stmt, 0);
   sqlite3_finalize(stmt);
+  // if there is no cost,it will be 0. so we return error
   if (cost < kLowLatency) {
-    return kLowLatency;
+    return absl::NotFoundError("Can't find inst in table");
   }
   return cost;
 }
@@ -502,30 +503,40 @@ LatencyEstimator::TimeCost OfflineSQLitePgle::GetLatencyBetween(
       (from_op == HloOpcode::kSend || from_op == HloOpcode::kRecv)) {
     return kLowLatency;
   }
+  // sqlite comm cost is on async-start,like this:
+  // all-gather-start.127 |917.475|
   absl::StatusOr<double> cost_or_status = QueryInstCost(from.GetInstr());
   // can't found inst and it's async wrapper inst, query inner inst
+  // Only async-start to async done will use this wrapped_inst  as cost
   if (!cost_or_status.ok() &&
-      (from.GetInstr().opcode() == HloOpcode::kAsyncStart ||
-       from.GetInstr().opcode() == HloOpcode::kAsyncDone)) {
+      (from.GetInstr().opcode() == HloOpcode::kAsyncStart &&
+       target.GetInstr().opcode() == HloOpcode::kAsyncDone)) {
     const HloInstruction* wrapped_inst =
         from.GetInstr().async_wrapped_instruction();
 
     cost_or_status = QueryInstCost(*wrapped_inst);
     if (!cost_or_status.ok()) {
-      VLOG(5) << "using backup estimator for latency: " << wrapped_inst->name();
+      VLOG(5) << "using backup estimator for edge latency: "
+              << wrapped_inst->name() << " to " << target.GetInstr().name();
       return latency_estimator_->GetLatencyBetween(from, target);
     }
-    VLOG(5) << "PGLE found latency between " << wrapped_inst->name() << " and "
-            << target.GetInstr().name()
+    VLOG(5) << "PGLE found latency 1 between " << wrapped_inst->name()
+            << " and " << target.GetInstr().name()
             << "cost: " << cost_or_status.value() * CyclesPerMicrosecond();
     return cost_or_status.value() * CyclesPerMicrosecond();
   }
 
   if (!cost_or_status.ok()) {
-    VLOG(5) << "using backup estimator for latency: " << from.GetInstr().name();
+    VLOG(5) << "using backup estimator for edge latency: "
+            << from.GetInstr().name() << " to " << target.GetInstr().name();
     return latency_estimator_->GetLatencyBetween(from, target);
+  } else {
+    VLOG(5) << "PGLE found latency 1 start from:" << from.GetInstr().name()
+            << ":" << cost_or_status.value() * CyclesPerMicrosecond()
+            << "but go target";
   }
 
+  // Ohh..query target will cause extra edge cost
   absl::StatusOr<double> cost_or_status2 = QueryInstCost(target.GetInstr());
   if (!cost_or_status2.ok() &&
       (target.GetInstr().opcode() == HloOpcode::kAsyncStart ||
@@ -533,12 +544,12 @@ LatencyEstimator::TimeCost OfflineSQLitePgle::GetLatencyBetween(
     const HloInstruction* wrapped_inst =
         target.GetInstr().async_wrapped_instruction();
     cost_or_status2 = QueryInstCost(*wrapped_inst);
-  }
-  if (cost_or_status2.ok()) {
-    VLOG(5) << "PGLE found latency between " << from.GetInstr().name()
-            << " and " << target.GetInstr().name()
-            << "cost: " << cost_or_status2.value() * CyclesPerMicrosecond();
-    return cost_or_status2.value() * CyclesPerMicrosecond();
+    if (cost_or_status2.ok()) {
+      VLOG(5) << "PGLE found latency 2 between " << from.GetInstr().name()
+              << " and " << target.GetInstr().name()
+              << "cost: " << cost_or_status2.value() * CyclesPerMicrosecond();
+      return cost_or_status2.value() * CyclesPerMicrosecond();
+    }
   }
 
   // For async-start/done instructions, if there is no entry in latencies, fall
@@ -551,7 +562,9 @@ LatencyEstimator::TimeCost OfflineSQLitePgle::GetLatencyBetween(
     return cost_or_status.value() * CyclesPerMicrosecond();
   }
 
-  VLOG(5) << from.GetInstr().name() << "using backup estimator for latency ";
+  VLOG(5) << from.GetInstr().name() << "using backup estimator for latency "
+          << " to " << target.GetInstr().name();
+  ;
   return latency_estimator_->GetLatencyBetween(from, target);
 }
 LatencyEstimator::TimeCost OfflineSQLitePgle::NodeCost(
@@ -565,7 +578,7 @@ LatencyEstimator::TimeCost OfflineSQLitePgle::NodeCost(
   if (cost_or_status.ok()) {
     VLOG(5) << "NodeCost: " << instr->ToShortString()
             << " success cost: " << cost_or_status.value();
-    return cost_or_status.value();
+    return cost_or_status.value() * CyclesPerMicrosecond();
   }
   auto cost = latency_estimator_->NodeCost(instr);
   VLOG(5) << "NodeCost: " << instr->ToShortString()

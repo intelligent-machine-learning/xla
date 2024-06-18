@@ -13,6 +13,14 @@
 
 // #include "xla/statusor.h"
 namespace xla {
+NodeType GetEdgeTypeOfInst(const HloInstruction& hlo) {
+  // If there are parallel thread computations, always schedule.
+  if (hlo.IsAsynchronous() &&
+      hlo.async_execution_thread() != hlo.parent()->execution_thread()) {
+    return NodeType::kAsynchronous;
+  }
+  return NodeType::kCommunication;
+}
 class AutoReorderPass : public HloModulePass {
  public:
   AutoReorderPass(){};

@@ -36,11 +36,25 @@ int get_cpu_number();
 }  // namespace reorder
 enum class NodeType {
   kCompute = 0,
-  kCommunication = 1
-
+  kCommunication = 1,
+  kAsynchronous = 2,
 };
+std::string NodeTypeToString(NodeType nodetype) {
+  switch (nodetype) {
+    case NodeType::kCompute:
+      return "compute";
+    case NodeType::kCommunication:
+      return "communication";
+    case NodeType::kAsynchronous:
+      return "asynchronous";
+    default:
+      return "unknown";
+  }
+}
+
 static bool IsSingleChannel(NodeType nodetype) {
-  return nodetype == NodeType::kCommunication;
+  return nodetype == NodeType::kCommunication ||
+         nodetype == NodeType::kAsynchronous;
 }
 
 struct TaskType {

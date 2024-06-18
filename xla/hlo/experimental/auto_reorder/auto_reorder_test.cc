@@ -52,52 +52,6 @@ class CostGenerator {
   std::mt19937 gen_;
   std::normal_distribution<float> dist_;
 };
-class GpuLatencyEstimator : public ApproximateLatencyEstimator {
- public:
-  explicit GpuLatencyEstimator(
-      GetCanonicalAsyncOpFunc func = GpuGetCanonicalAsyncOp)
-      : ApproximateLatencyEstimator(func) {}
-  TimeCost NodeCost(const HloInstruction* instr) const override {
-    HloOpcode op = instr->opcode();
-    if (op == HloOpcode::kGetTupleElement || op == HloOpcode::kBitcast ||
-        op == HloOpcode::kConstant || op == HloOpcode::kParameter ||
-        instr->IsEffectiveBitcast()) {
-      return 0.0;
-    }
-    // Consider cublas/cuddn/softmax custom calls as medium cost. Since the
-    // latency between async-start and async-done is 5000 and cost of each
-    // custom call is 1000, the LHS will try to schedule approximately 5 of
-    // these in between each start/end pair.
-    if (instr->opcode() == HloOpcode::kCustomCall) {
-      if (gpu::IsCublasGemm(*instr) ||
-          gpu::IsCustomCallToDnnConvolution(*instr)) {
-        return ApproximateLatencyEstimator::kMediumCost;
-      }
-      // consider other custom calls as medium cost for now. Keeping the case
-      // explicitly separate for further tuning.
-      return ApproximateLatencyEstimator::kMediumCost;
-    }
-    return ApproximateLatencyEstimator::NodeCost(instr);
-  }
-
-  LatencyEstimator::TimeCost GetLatencyBetween(
-      const HloGraphNode& from, const HloGraphNode& target) const override {
-    if (IsAsyncPair(from, target)) {
-      if (from.GetInstr().opcode() == HloOpcode::kRecv) {
-        // Recv -> RecvDone has a low latency.
-        return ApproximateLatencyEstimator::kLowLatency;
-      } else if (from.GetInstr().opcode() == HloOpcode::kSend) {
-        // Send -> SendDone has a very high latency.
-        return ApproximateLatencyEstimator::kHighLatency * 10;
-      }
-
-      return ApproximateLatencyEstimator::kHighLatency;
-    }
-    // Every other instruction we consider synchronous, which means the
-    // latency between each of them is always one unit.
-    return ApproximateLatencyEstimator::kLowLatency;
-  }
-};
 
 class SavedInstLatencyEstimator : public GpuLatencyEstimator {
   // make random inst cost
@@ -168,8 +122,14 @@ using namespace xla::gpu;
 
 class AutoReorderingTest : public HloTestBase {
  protected:
-  void SetUp() override { setenv("XLA_AUTOREORDER_TIMEOUT", "60", 1); }
-  void TearDown() override { unsetenv("XLA_AUTOREORDER_TIMEOUT"); }
+  void SetUp() override {
+    setenv("XLA_AUTOREORDER_TIMEOUT", "60", 1);
+    setenv("XLA_AUTOREORDER_WORKER", "32", 1);
+  }
+  void TearDown() override {
+    unsetenv("XLA_AUTOREORDER_TIMEOUT");
+    unsetenv("XLA_AUTOREORDER_WORKER");
+  }
   const char* const add_hlo_string_ = R"(
 HloModule module
 ENTRY %elementwise {
@@ -495,10 +455,10 @@ ENTRY %elementwise {
         builder.AddInstruction(HloInstruction::CreateAsyncStart(
             async_start_shape, {d01_dot_p0_add_p2}, rs_computation,
             /*async_execution_thread=*/"parallel_thread"));
-    HloInstruction* async_update = builder.AddInstruction(
-        HloInstruction::CreateAsyncUpdate(async_start_shape, async_start0));
+    // HloInstruction* async_update = builder.AddInstruction(
+    // HloInstruction::CreateAsyncUpdate(async_start_shape, async_start0));
     auto reducescater_ret0 = builder.AddInstruction(
-        HloInstruction::CreateAsyncDone(reduce_shape, async_update));
+        HloInstruction::CreateAsyncDone(reduce_shape, async_start0));
     // new version:need create other computation
     auto rs_computation2 =
         MakeReduceScatter(HloOpcode::kAdd, shape, reduce_shape, module);
@@ -506,10 +466,8 @@ ENTRY %elementwise {
         builder.AddInstruction(HloInstruction::CreateAsyncStart(
             async_start_shape, {d23_dot_p1_add_p3}, rs_computation2,
             /*async_execution_thread=*/"parallel_thread"));
-    HloInstruction* async_update1 = builder.AddInstruction(
-        HloInstruction::CreateAsyncUpdate(async_start_shape, async_start1));
     auto reducescater_ret1 = builder.AddInstruction(
-        HloInstruction::CreateAsyncDone(reduce_shape, async_update1));
+        HloInstruction::CreateAsyncDone(reduce_shape, async_start1));
 
     auto add_reduce_scatter = builder.AddInstruction(
         HloInstruction::CreateBinary(reduce_shape, HloOpcode::kAdd,
@@ -982,7 +940,7 @@ ENTRY e {
   %ag-start = (bf16[1024,4096], bf16[8192,4096]) all-gather-start(bf16[1024,4096] %p0), channel_id=1, replica_groups={{0,1,2,3,4,5,6,7}}, dimensions={0}, use_global_device_ids=true
   %ag-done = bf16[8192,4096] all-gather-done(
     (bf16[1024,4096], bf16[8192,4096]) %ag-start )
- %ar-start = bf16[8192,4096] all-reduce-start(bf16[8192,4096] %ag-done), channel_id=1, replica_groups={{0,1,2,3,4,5,6,7}}, use_global_device_ids=true to_apply=%add
+ %ar-start = bf16[8192,4096] all-reduce-start(bf16[8192,4096] %ag-done),to_apply=%add, channel_id=1, replica_groups={{0,1,2,3,4,5,6,7}}, use_global_device_ids=true
  %ar-done = bf16[8192,4096] all-reduce-done(
     (bf16[1024,4096], bf16[8192,4096]) %ar-start )
   %add-ret = bf16[8192,4096] call(%ag-done,%ar-done), to_apply=%add
@@ -1474,7 +1432,7 @@ TEST_F(AutoReorderingTest, ReorderPassWithRandom) {
 }
 // skip this test
 TEST_F(AutoReorderingTest, ReorderPassDataAnalyse) {
-  GTEST_SKIP() << "Skipping single test because longtime";
+  // GTEST_SKIP() << "Skipping single test because longtime";
   std::srand(kRandomSeed);
   auto gen = std::mt19937{kRandomSeed};
   int repeat_time = 1;

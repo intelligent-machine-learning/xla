@@ -171,7 +171,8 @@ LPSchedulerFunc(tsl::Status)::Solve(std::string mps_filename) {
     cp_model_.AddNoOverlap(it->second);
   }
   // for communicate stream, edge also should no overlap
-  std::vector<IntervalVar> no_overlap_edges;
+  std::map<NodeType, std::vector<IntervalVar>> no_overlap_edges;
+  // std::vector<IntervalVar> no_overlap_edges;
   for (auto node : nodes_) {
     if (!node->IsCommunication()) {
       continue;
@@ -188,11 +189,15 @@ LPSchedulerFunc(tsl::Status)::Solve(std::string mps_filename) {
         // interval
         IntervalVar interval =
             cp_model_.NewIntervalVar(dep_task.end, cost, node_task.start);
-        no_overlap_edges.push_back(interval);
+        no_overlap_edges[dep_type].push_back(interval);
       }
     }
   }
-  cp_model_.AddNoOverlap(no_overlap_edges);
+  for (auto it = no_overlap_edges.begin(); it != no_overlap_edges.end(); it++) {
+    if (!it->second.empty()) {
+      cp_model_.AddNoOverlap(it->second);
+    }
+  }
 
   //  objective.
   IntVar obj_var = cp_model_.NewIntVar({0, horizon_}).WithName("makespan");
@@ -215,24 +220,29 @@ LPSchedulerFunc(tsl::Status)::Solve(std::string mps_filename) {
   parameters.set_symmetry_level(1);
   if (reorder::solve_debug) {
     parameters.set_log_to_stdout(true);
-    // parameters.set_log_search_progress(true);
+    parameters.set_log_search_progress(true);
   }
   parameters.set_num_search_workers(xla::reorder::get_autoreorder_worker());
   auto model = cp_model_.Build();
   // model is operations_research::sat::CpModelProto type
   // need operations_research::MPModelProto& type, so we need to convert it
   // model
-  if (mps_filename.size() > 0) {
-    operations_research::MPModelProto output;
-    operations_research::sat::ConvertCpModelProtoToMPModelProto(model, &output);
-    auto status_of_string = operations_research::ExportModelAsMpsFormat(output);
-    if (status_of_string.ok()) {
+  do {
+    if (mps_filename.size() > 0) {
+      // ConvertCpModelProtoToMPModelProto can't export interval var
+      operations_research::MPModelProto output;
+      // bool success =
+      // operations_research::sat::ConvertCpModelProtoToMPModelProto(model,
+      // &output);
+
       VLOG(2) << "ExportModelAsMpsFormat success";
+      std::string string_out;
+      model.SerializeToString(&string_out);
       std::ofstream out(absl::StrCat("/tmp/", mps_filename, ".mps"));
-      out << status_of_string.value();
+      out << string_out;
       out.close();
     }
-  }
+  } while (false);
 
   const operations_research::sat::CpSolverResponse response =
       operations_research::sat::SolveWithParameters(model, parameters);
@@ -319,12 +329,8 @@ LPSchedulerFunc(void)::SaveJSON(std::string filename) const {
       auto dep_node = std::get<0>(dep_pair);
       auto dep_cost = std::get<1>(dep_pair);
       NodeType dep_type = std::get<2>(dep_pair);
-      std::string name;
-      if (IsSingleChannel(dep_type)) {
-        name = "communication";
-      } else {
-        name = "compute";
-      }
+      std::string name = NodeTypeToString(dep_type);
+
       // draw edge
       if (edge_count > 0) {
         json_out << ",\n{ \"from\": \"" << dep_node->UUID() << "\", \"to\": \""

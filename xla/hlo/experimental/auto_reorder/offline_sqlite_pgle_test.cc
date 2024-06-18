@@ -36,6 +36,19 @@ class OfflineSqlitePGLETestcase : public HloTestBase {
         module->AddEmbeddedComputation(sum_builder.Build());
     return reduction;
   }
+  HloComputation* MakeReduceScatter(const HloOpcode type, Shape input_shape,
+                                    Shape output_shape, HloModule* module) {
+    HloComputation::Builder async_builder("AsyncOp");
+    HloInstruction* param = async_builder.AddInstruction(
+        HloInstruction::CreateParameter(0, input_shape, "pasync"));
+    async_builder.AddInstruction(HloInstruction::CreateReduceScatter(
+        output_shape, {param}, MakeReduction(type, module),
+        CreateReplicaGroups({{0, 1}}), false, /*channel_id*/ 3, false, 0));
+    HloComputation* reduction =
+        module->AddEmbeddedComputation(async_builder.Build());
+
+    return reduction;
+  }
   StatusOr<HloComputation*> MakeTestComputation(HloModule* module) {
     HloComputation::Builder builder("test");
     auto add_reducer = MakeReduction(HloOpcode::kAdd, module);
@@ -240,12 +253,13 @@ TEST_F(OfflineSqlitePGLETestcase, SqliteTest) {
   EXPECT_TRUE(rc == SQLITE_ROW);
   int count = sqlite3_column_int(stmt, 0);
   EXPECT_TRUE(count == 2);
-
+  // if there is not exist,
   sql = "SELECT COUNT(*) FROM COMPANY where name='not exist'";
   rc = sqlite3_prepare_v2(db.get(), sql, -1, &stmt, 0);
   EXPECT_TRUE(rc == SQLITE_OK);
   rc = sqlite3_step(stmt);
   EXPECT_TRUE(rc == SQLITE_ROW);
+  std::cout << "not exist,rc=" << rc << std::endl;
   count = sqlite3_column_int(stmt, 0);
   EXPECT_TRUE(count == 0);
 
