@@ -181,14 +181,14 @@ LPSchedulerFunc(tsl::Status)::Solve(std::string mps_filename) {
     auto node_task = std::get<1>(node_to_task_.at(node->UUID()));
     for (auto dep_tuple : node->GetDeps()) {
       auto dep_node = std::get<0>(dep_tuple);
-      auto cost = std::get<1>(dep_tuple);
+      auto edge_cost = std::get<1>(dep_tuple);
       auto dep_type = std::get<2>(dep_tuple);
 
       if (IsSingleChannel(dep_type)) {
         auto dep_task = std::get<1>(node_to_task_.at(dep_node->UUID()));
         // interval
         IntervalVar interval =
-            cp_model_.NewIntervalVar(dep_task.end, cost, node_task.start);
+            cp_model_.NewIntervalVar(dep_task.end, edge_cost, node_task.start);
         no_overlap_edges[dep_type].push_back(interval);
       }
     }
@@ -303,12 +303,7 @@ LPSchedulerFunc(void)::SaveJSON(std::string filename) const {
   int32_t edge_count = 0;
 
   for (auto node : this->GetSortedNodes()) {
-    std::string name;
-    if (node->IsCommunication()) {
-      name = "communication";
-    } else {
-      name = "compute";
-    }
+    std::string name= NodeTypeToString(node->GetType());
     if (node_count > 0) {
       json_out << ",\n{ \"uuid\": \"" << node->UUID() << "\",\"typename\": \""
                << name << "\", \"name\": \""
@@ -409,12 +404,7 @@ LPSchedulerFunc(void)::SaveGantt(std::string filename) const {
   csv_out << R"(import { Chart } from '@antv/g2'; 
   const events = [ )";
   for (auto node : this->GetSortedNodes()) {
-    std::string name;
-    if (node->IsCommunication()) {
-      name = "communication";
-    } else {
-      name = "compute";
-    }
+    std::string name= NodeTypeToString(node->GetType());
     if (draw_start_time) {
       csv_out << "{ name: \"" << name << "\",label:'"
               << ReplaceUnusedChar(node->GetName(), "'")

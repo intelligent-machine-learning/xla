@@ -14,11 +14,26 @@
 // #include "xla/statusor.h"
 namespace xla {
 NodeType GetEdgeTypeOfInst(const HloInstruction& hlo) {
-  // If there are parallel thread computations, always schedule.
-  if (hlo.IsAsynchronous() &&
-      hlo.async_execution_thread() != hlo.parent()->execution_thread()) {
-    return NodeType::kAsynchronous;
+  auto op = GpuGetCanonicalAsyncOp(hlo);
+  if (op.outer == HloOpcode::kAsyncDone){
+    if (hlo.IsAsynchronous() &&
+        hlo.async_execution_thread() != hlo.parent()->execution_thread()) {
+      return NodeType::kAsynchronous;
+    }
+    switch (op.inner) {
+      case HloOpcode::kAllGather:
+      case HloOpcode::kAllReduce:
+      case HloOpcode::kCollectivePermute:
+      case HloOpcode::kCopy:
+        return NodeType::kCommunication;
+      default:
+        return NodeType::kAsynchronous;
+        
+    }
   }
+  // If there are parallel thread computations, always schedule.
+  
+  VLOG(2)<<"edge from:"<<hlo.ToString()<<","<<hlo.IsAsynchronous()<<" thread="<<hlo.async_execution_thread()<<" parent="<<hlo.parent()->execution_thread();
   return NodeType::kCommunication;
 }
 class AutoReorderPass : public HloModulePass {
