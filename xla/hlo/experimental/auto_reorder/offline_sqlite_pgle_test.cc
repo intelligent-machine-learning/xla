@@ -118,8 +118,8 @@ TEST_F(OfflineSqlitePGLETestcase, ConvertPDO) {
   if (env == nullptr) {
     GTEST_SKIP() << "have no set XLA_AUTOREORDER_XPLANE_DIR env skip";
   }
-  auto status =
-      ConvertXplaneToFile(env, "/root/tb/llama_xla_trace_2n16g/llama_fdo.db");
+  auto status = ConvertXplaneToFile(
+      env, "/root/tb/llama_xla_trace_2n16g/bailingchat_fdo.db");
   std::cout << status.message() << std::endl;
   EXPECT_TRUE(status.ok());
 }

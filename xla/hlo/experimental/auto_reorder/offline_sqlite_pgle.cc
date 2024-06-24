@@ -98,14 +98,18 @@ absl::Status OfflineSQLitePgle::ParseToInstProfileInfo(
         instr_info.set_custom_call_target(instr->custom_call_target());
         break;
       }
+      case HloOpcode::kAsyncStart: {
+        // instr = instr->wrapped_instr();
+        break;
+      }
       case HloOpcode::kReduceScatter:
       case HloOpcode::kAllGather:
       case HloOpcode::kAllGatherStart:
       case HloOpcode::kAllReduce:
-      case HloOpcode::kAllReduceStart:
-      case HloOpcode::kCollectivePermuteStart: {  // comm op need record
-                                                  // process group
+      case HloOpcode::kAllReduceStart: {  // comm op need record
+                                          // process group
         // example :{{1,2,3,4}}, {{1,2},{3,4}}
+        // collective-permute-start can't cast to HloCollectiveInstruction
         std::vector<xla::ReplicaGroup> replica_groups = instr->replica_groups();
         uint16_t group_id = 0;
         uint32_t replica_group_size = 1;
@@ -125,8 +129,32 @@ absl::Status OfflineSQLitePgle::ParseToInstProfileInfo(
         // instr_info.set_process_group();
         break;
       }
-      case HloOpcode::kAsyncStart: {
-        // if(instr)
+      case HloOpcode::kSend:
+      case HloOpcode::kSendDone:
+      case HloOpcode::kRecv:
+      case HloOpcode::kRecvDone: {
+        // seems not need
+        break;
+      }
+      case HloOpcode::kCollectivePermuteStart:
+      case HloOpcode::kCollectivePermute: {
+        // source_target_pairs [(1,1),(2,2)]
+        const std::vector<std::pair<int64_t, int64_t>> src_tar_pairs =
+            instr->source_target_pairs();
+        // store to proces group
+        uint16_t group_id = 0;
+        uint32_t replica_group_size = 1;
+
+        for (auto pair : src_tar_pairs) {
+          xla::auto_reorder::ReplicaGroup* group =
+              instr_info.add_process_groups();
+          group->set_replica_group_id(group_id);
+          group_id++;
+          replica_group_size += 2;
+          group->add_replica_ids(std::get<0>(pair));
+          group->add_replica_ids(std::get<1>(pair));
+        }
+        instr_info.set_replica_group_size(replica_group_size);
       }
       default:
         break;
@@ -418,7 +446,32 @@ std::string OfflineSQLitePgle::CommunicateInstOperandHash(
     const xla::HloInstruction& inst) {
   std::unique_ptr<llvm::MD5> md5_instance(new llvm::MD5());
   CommonHash(inst, md5_instance.get());
-  std::vector<xla::ReplicaGroup> replica_groups = inst.replica_groups();
+  std::vector<xla::ReplicaGroup> replica_groups;
+  switch (inst.opcode()) {
+    case HloOpcode::kCollectivePermuteStart:
+    case HloOpcode::kCollectivePermute: {
+      // source_target_pairs [(1,1),(2,2)]
+      const std::vector<std::pair<int64_t, int64_t>> src_tar_pairs =
+          inst.source_target_pairs();
+      // store to proces group
+      uint16_t group_id = 0;
+      uint32_t replica_group_size = 1;
+
+      for (auto pair : src_tar_pairs) {
+        xla::ReplicaGroup group;
+        replica_group_size += 2;
+        group.add_replica_ids(std::get<0>(pair));
+        group.add_replica_ids(std::get<1>(pair));
+        replica_groups.push_back(group);
+      }
+      break;
+    }
+
+    default: {
+      replica_groups = inst.replica_groups();
+      break;
+    }
+  }
   UpdateCommonicationHash(replica_groups, md5_instance.get());
   return GetHash(md5_instance.get());
 }
