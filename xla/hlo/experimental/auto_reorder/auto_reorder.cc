@@ -73,13 +73,8 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
           latency_estimator_->GetLatencyBetween(operand_node, instr_node);
       VLOG(2) << from_inst->ToShortString() + " should execute before " +
                      instr->ToShortString();
-      // if(edge_type==NodeType::kCommunication){
-      //   //let edge become a node,so edge will no overlap
-      //   auto edge_node = solver_->FindLPNodeOrCreate(nullptr, edge_cost,
-      //   edge_type);
-      // }else{
+
       dst_node->AddDep(operand_lp_node.value(), edge_cost, edge_type);
-      // }
 
       return true;
     };
@@ -97,8 +92,9 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
       if (async_tracker_->IsSupportedAsyncDone(*instr)) {
         // create a edge, which is communication
         auto operand_inst = instr->operand(0);
+
         auto is_success = addEdge(operand_inst, current_inst_lp_node,
-                                  NodeType::kCommunication);
+                                  GetEdgeTypeOfInst(*instr));
         TF_RET_CHECK(is_success)
             << "operand_lp_node not found:" << operand_inst->ToShortString();
       } else {
@@ -174,8 +170,8 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
     solver_->SaveGraphviz(absl::StrCat("gantt_before_", computation->name()));
     solver_->SaveJSON(absl::StrCat("gantt_before_", computation->name()));
   }
-  auto status =
-      solver_->Solve(absl::StrCat("mps_file_of_", computation->name()));
+  auto solve_method = xla::reorder::get_solve_method();
+  auto status = solver_->Solve(solve_method);
   if (reorder::solve_debug) {
     // save to pid related file
     solver_->SaveGantt(absl::StrCat("gantt_", computation->name()));
@@ -384,19 +380,19 @@ StatusOr<bool> AutoReorderPass::Run(
   return true;
 
 }  // AutoReorderPass::Run
-CanonicalAsyncOp GpuGetCanonicalAsyncOp(const HloInstruction& hlo) {
-  switch (hlo.opcode()) {
-    case HloOpcode::kSend:
-      return {HloOpcode::kAsyncStart, HloOpcode::kSend};
-    case HloOpcode::kSendDone:
-      return {HloOpcode::kAsyncDone, HloOpcode::kSend};
-    case HloOpcode::kRecv:
-      return {HloOpcode::kAsyncStart, HloOpcode::kRecv};
-    case HloOpcode::kRecvDone:
-      return {HloOpcode::kAsyncDone, HloOpcode::kRecv};
-    default:
-      return DefaultGetCanonicalAsyncOp(hlo);
-  }
-}
+// CanonicalAsyncOp GpuGetCanonicalAsyncOp(const HloInstruction& hlo) {
+//   switch (hlo.opcode()) {
+//     case HloOpcode::kSend:
+//       return {HloOpcode::kAsyncStart, HloOpcode::kSend};
+//     case HloOpcode::kSendDone:
+//       return {HloOpcode::kAsyncDone, HloOpcode::kSend};
+//     case HloOpcode::kRecv:
+//       return {HloOpcode::kAsyncStart, HloOpcode::kRecv};
+//     case HloOpcode::kRecvDone:
+//       return {HloOpcode::kAsyncDone, HloOpcode::kRecv};
+//     default:
+//       return DefaultGetCanonicalAsyncOp(hlo);
+//   }
+// }
 
 }  // namespace xla

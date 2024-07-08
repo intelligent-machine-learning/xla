@@ -1,8 +1,37 @@
 # Auto Reorder
 
-run tests
+## run tests
 ```
 export TF_CPP_MIN_LOG_LEVEL=0
 export TF_CPP_VMODULE="auto_reorder=5,auto_reorder_solver=5"
-bazel run --compilation_mode=dbg xla/hlo/experimental/auto_reorder:auto_reorder_test --incompatible_strict_action_env --action_env=USE_CUDA --action_env=XLA_CUDA
+bazel test --compilation_mode=dbg xla/hlo/experimental/auto_reorder:auto_reorder_test --test_filter="AutoReorderingTest.ReorderPassAntOPT" --incompatible_strict_action_env --action_env=USE_CUDA --action_env=XLA_CUDA --jobs=8 --flaky_test_attempts=1 --test_output=errors
+```
+
+
+
+## run Database PGLE test:
+
+```
+export TF_CPP_MIN_LOG_LEVEL=0 
+export TF_CPP_VMODULE="auto_reorder=5,auto_reorder_solver=5,gpu_collective_performance_model=5,gpu_performance_model=5,convert_xplane=5"
+
+bazel run --compilation_mode=dbg xla/hlo/experimental/auto_reorder:offline_sqlite_pgle_test 
+--incompatible_strict_action_env --action_env=USE_CUDA --action_env=XLA_CUDA --jobs=8
+```
+
+build auto reorder tools
+1. convert xplane to sqlite file
+2. convert xplane to chrome_trace_json
+
+```
+export USE_CUDA=1
+export XLA_CUDA=1
+bazel build --compilation_mode=dbg xla/hlo/experimental/auto_reorder:convert_xplane_tools --incompatible_strict_action_env --action_env=USE_CUDA --action_env=XLA_CUDA --jobs=8  --config=monolithic
+```
+
+## using antopt
+
+```bash
+pip install http://antsys-opt.cn-shanghai-alipay-office.oss-alipay.aliyuncs.com/optflow/product/solverhub/1.0.9rc02/20231223/py38/optflow-latest-py2.py3-none-any.whl -i https://pypi.antfin-inc.com/simple
+export XLA_AUTOREORDER_METHOD=antopt
 ```

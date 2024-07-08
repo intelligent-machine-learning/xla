@@ -21,13 +21,15 @@
 #include <stdlib.h>
 
 #include "absl/algorithm/container.h"
+#include "absl/cleanup/cleanup.h"
 #include "xla/hlo/experimental/auto_reorder/auto_reorder.h"
-#include "xla/hlo/experimental/auto_reorder/convert_xplane.h"
 #include "xla/service/async_collective_creator.h"
 #include "xla/service/gpu/gpu_device_info_for_tests.h"
 #include "xla/service/gpu/gpu_hlo_schedule.h"
 #include "xla/tests/hlo_test_base.h"
-
+#include "xla/hlo/experimental/auto_reorder/common.h"
+#include "tsl/platform/human_readable_json.h"
+#include "xla/hlo/experimental/auto_reorder/instr_profile_info.pb.h"
 #define debug_log(x)                           \
   {                                            \
     if (is_debug) std::cout << x << std::endl; \
@@ -51,52 +53,6 @@ class CostGenerator {
  private:
   std::mt19937 gen_;
   std::normal_distribution<float> dist_;
-};
-class GpuLatencyEstimator : public ApproximateLatencyEstimator {
- public:
-  explicit GpuLatencyEstimator(
-      GetCanonicalAsyncOpFunc func = GpuGetCanonicalAsyncOp)
-      : ApproximateLatencyEstimator(func) {}
-  TimeCost NodeCost(const HloInstruction* instr) const override {
-    HloOpcode op = instr->opcode();
-    if (op == HloOpcode::kGetTupleElement || op == HloOpcode::kBitcast ||
-        op == HloOpcode::kConstant || op == HloOpcode::kParameter ||
-        instr->IsEffectiveBitcast()) {
-      return 0.0;
-    }
-    // Consider cublas/cuddn/softmax custom calls as medium cost. Since the
-    // latency between async-start and async-done is 5000 and cost of each
-    // custom call is 1000, the LHS will try to schedule approximately 5 of
-    // these in between each start/end pair.
-    if (instr->opcode() == HloOpcode::kCustomCall) {
-      if (gpu::IsCublasGemm(*instr) ||
-          gpu::IsCustomCallToDnnConvolution(*instr)) {
-        return ApproximateLatencyEstimator::kMediumCost;
-      }
-      // consider other custom calls as medium cost for now. Keeping the case
-      // explicitly separate for further tuning.
-      return ApproximateLatencyEstimator::kMediumCost;
-    }
-    return ApproximateLatencyEstimator::NodeCost(instr);
-  }
-
-  LatencyEstimator::TimeCost GetLatencyBetween(
-      const HloGraphNode& from, const HloGraphNode& target) const override {
-    if (IsAsyncPair(from, target)) {
-      if (from.GetInstr().opcode() == HloOpcode::kRecv) {
-        // Recv -> RecvDone has a low latency.
-        return ApproximateLatencyEstimator::kLowLatency;
-      } else if (from.GetInstr().opcode() == HloOpcode::kSend) {
-        // Send -> SendDone has a very high latency.
-        return ApproximateLatencyEstimator::kHighLatency * 10;
-      }
-
-      return ApproximateLatencyEstimator::kHighLatency;
-    }
-    // Every other instruction we consider synchronous, which means the
-    // latency between each of them is always one unit.
-    return ApproximateLatencyEstimator::kLowLatency;
-  }
 };
 
 class SavedInstLatencyEstimator : public GpuLatencyEstimator {
@@ -165,30 +121,17 @@ class SavedInstLatencyEstimator : public GpuLatencyEstimator {
   std::unordered_map<int, TimeCost> edge_cost_;
 };
 using namespace xla::gpu;
-constexpr int kMaxConcurrentAsyncCollectivePermutes = 5;
-
-SchedulerConfig GetSchedulerConfig(int64_t memory_limit) {
-  SchedulerConfig config;
-  config.all_reduce_overlap_limit = 1;
-  config.collective_permute_overlap_limit = 1;
-  config.use_real_cost_model = false;
-  config.aggressive_scheduling_policies = true;
-  config.schedule_send_recvs = true;
-  config.memory_limit = memory_limit;
-  return config;
-}
-SchedulerConfig GetDefaultSchedConfig() {
-  SchedulerConfig sched_cfg;
-  sched_cfg.collective_permute_overlap_limit =
-      kMaxConcurrentAsyncCollectivePermutes;
-  sched_cfg.send_recv_overlap_limit = INT32_MAX;
-  return sched_cfg;
-}
 
 class AutoReorderingTest : public HloTestBase {
  protected:
-  void SetUp() override { setenv("XLA_AUTOREORDER_TIMEOUT", "60", 1); }
-  void TearDown() override { unsetenv("XLA_AUTOREORDER_TIMEOUT"); }
+  void SetUp() override {
+    setenv("XLA_AUTOREORDER_TIMEOUT", "60", 1);
+    setenv("XLA_AUTOREORDER_WORKER", "32", 1);
+  }
+  void TearDown() override {
+    unsetenv("XLA_AUTOREORDER_TIMEOUT");
+    unsetenv("XLA_AUTOREORDER_WORKER");
+  }
   const char* const add_hlo_string_ = R"(
 HloModule module
 ENTRY %elementwise {
@@ -514,10 +457,10 @@ ENTRY %elementwise {
         builder.AddInstruction(HloInstruction::CreateAsyncStart(
             async_start_shape, {d01_dot_p0_add_p2}, rs_computation,
             /*async_execution_thread=*/"parallel_thread"));
-    HloInstruction* async_update = builder.AddInstruction(
-        HloInstruction::CreateAsyncUpdate(async_start_shape, async_start0));
+    // HloInstruction* async_update = builder.AddInstruction(
+    // HloInstruction::CreateAsyncUpdate(async_start_shape, async_start0));
     auto reducescater_ret0 = builder.AddInstruction(
-        HloInstruction::CreateAsyncDone(reduce_shape, async_update));
+        HloInstruction::CreateAsyncDone(reduce_shape, async_start0));
     // new version:need create other computation
     auto rs_computation2 =
         MakeReduceScatter(HloOpcode::kAdd, shape, reduce_shape, module);
@@ -525,10 +468,8 @@ ENTRY %elementwise {
         builder.AddInstruction(HloInstruction::CreateAsyncStart(
             async_start_shape, {d23_dot_p1_add_p3}, rs_computation2,
             /*async_execution_thread=*/"parallel_thread"));
-    HloInstruction* async_update1 = builder.AddInstruction(
-        HloInstruction::CreateAsyncUpdate(async_start_shape, async_start1));
     auto reducescater_ret1 = builder.AddInstruction(
-        HloInstruction::CreateAsyncDone(reduce_shape, async_update1));
+        HloInstruction::CreateAsyncDone(reduce_shape, async_start1));
 
     auto add_reduce_scatter = builder.AddInstruction(
         HloInstruction::CreateBinary(reduce_shape, HloOpcode::kAdd,
@@ -725,7 +666,6 @@ ENTRY %elementwise {
                               buffer.shape(),
                               /*pointer_size=*/sizeof(void*));
                         }));
-
     TF_RETURN_IF_ERROR(module->set_schedule(std::move(schedule)));
     VLOG(2) << "setting default schedule finish." << TestName();
 
@@ -962,18 +902,6 @@ ENTRY %elementwise {
     }
   }
 };
-TEST_F(AutoReorderingTest, ConvertPDO) {
-  // GTEST_SKIP() << "using convert here;";
-  // get filepath from env
-  const char* env = std::getenv("XLA_AUTOREORDER_XPLANE_DIR");
-  if (env == nullptr) {
-    GTEST_SKIP() << "have no set XLA_AUTOREORDER_XPLANE_DIR env skip";
-  }
-  auto status = ConvertXplaneToFile(
-      env, "/root/tb/llama_xla_trace_2n16g/llama_fdo.jsonl");
-  std::cout << status.message() << std::endl;
-  EXPECT_TRUE(status.ok());
-}
 
 TEST_F(AutoReorderingTest, CommOpCostTest) {
   HloCostAnalysis::ShapeSizeFunction ShapeSizeBytesFunction =
@@ -1014,7 +942,7 @@ ENTRY e {
   %ag-start = (bf16[1024,4096], bf16[8192,4096]) all-gather-start(bf16[1024,4096] %p0), channel_id=1, replica_groups={{0,1,2,3,4,5,6,7}}, dimensions={0}, use_global_device_ids=true
   %ag-done = bf16[8192,4096] all-gather-done(
     (bf16[1024,4096], bf16[8192,4096]) %ag-start )
- %ar-start = bf16[8192,4096] all-reduce-start(bf16[8192,4096] %ag-done), channel_id=1, replica_groups={{0,1,2,3,4,5,6,7}}, dimensions={0}, use_global_device_ids=true to_apply=%add
+ %ar-start = bf16[8192,4096] all-reduce-start(bf16[8192,4096] %ag-done),to_apply=%add, channel_id=1, replica_groups={{0,1,2,3,4,5,6,7}}, use_global_device_ids=true
  %ar-done = bf16[8192,4096] all-reduce-done(
     (bf16[1024,4096], bf16[8192,4096]) %ar-start )
   %add-ret = bf16[8192,4096] call(%ag-done,%ar-done), to_apply=%add
@@ -1338,6 +1266,49 @@ TEST_F(AutoReorderingTest, ReorderScheduleComputation) {
     EXPECT_TRUE(status.ok());
   }
 }
+
+TEST_F(AutoReorderingTest, ReorderPassAntOPT) {
+  setenv("XLA_AUTOREORDER_METHOD", "antopt", 1);
+  absl::Cleanup env_cleanup = [&]() { unsetenv("XLA_AUTOREORDER_METHOD"); };
+
+  auto hlo_module = CreateNewUnverifiedModule();
+  auto st = MakeTestComputation(hlo_module.get());
+  EXPECT_TRUE(st.ok());
+  int pointer_size_ = 4;
+  Backend& test_backend = backend();
+  auto gpu_device_info = TestGpuDeviceInfo::RTXA6000DeviceInfo();
+  const int64_t scheduler_mem_limit = xla::gpu::GetSchedulerMemoryLimit(
+      hlo_module.get(), gpu_device_info, pointer_size_);
+  SchedulerConfig config = GetSchedulerConfig(scheduler_mem_limit);
+  auto gpu_latency_estimator = std::make_unique<GpuLatencyEstimator>();
+  std::unique_ptr<LatencyEstimator> latency_estimator =
+      std::make_unique<AnalyticalLatencyEstimator>(
+          config, std::move(gpu_latency_estimator), gpu_device_info,
+          [input_pointer_size = pointer_size_](const Shape& shape) {
+            return GetSizeOfShape(shape, input_pointer_size);
+          },
+          hlo_module->entry_computation());
+  // we should create other estimator,otherwise it's nullptr(move to other
+  // place)
+  auto gpu_latency_estimator2 = std::make_unique<GpuLatencyEstimator>();
+
+  auto latency_estimator2 = std::make_unique<AnalyticalLatencyEstimator>(
+      config, std::move(gpu_latency_estimator2), gpu_device_info,
+      [input_pointer_size = pointer_size_](const Shape& shape) {
+        return GetSizeOfShape(shape, input_pointer_size);
+      },
+      hlo_module->entry_computation());
+  SchedulerConfig sched_config = GetDefaultSchedConfig();
+  auto status = RunScheduler(hlo_module.get(), sched_config,
+                             std::move(latency_estimator));
+  EXPECT_TRUE(status.ok());
+  auto statics_or_status =
+      GetModuleCost(hlo_module.get(), sched_config, latency_estimator2.get());
+
+  EXPECT_TRUE(statics_or_status.ok());
+  auto statics = statics_or_status.value();
+  // statics.
+};
 TEST_F(AutoReorderingTest, ReorderPass) {
   auto hlo_module = CreateNewUnverifiedModule();
   auto st = MakeTestComputation(hlo_module.get());
@@ -1499,22 +1470,21 @@ TEST_F(AutoReorderingTest, ReorderPassWithRandom) {
   EXPECT_TRUE(CheckParameterInst(hlo_module.get()));
   statics = GetModuleCost(hlo_module.get(), sched_config,
                           gpu_latency_estimator2.get());
+
   EXPECT_TRUE(statics.ok());
   auto xla_lhs_cost = statics.value().total_cycles;
+  std::cout << "RunLatencyHidingScheduler:" << xla_lhs_cost << std::endl;
   EXPECT_LE(auto_reorder_cost, post_order_cost);
   EXPECT_LE(auto_reorder_cost, xla_lhs_cost);
 }
 // skip this test
 TEST_F(AutoReorderingTest, ReorderPassDataAnalyse) {
-  GTEST_SKIP() << "Skipping single test because longtime";
+  // GTEST_SKIP() << "Skipping single test because longtime";
   std::srand(kRandomSeed);
   auto gen = std::mt19937{kRandomSeed};
   int repeat_time = 1;
   uint32_t nnodes = 100;
   std::vector<float> communication_rates;
-  //  = {
-  //   0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9
-  // };
   for (float current = 0.1; current < 0.9; current += 0.05) {
     communication_rates.push_back(current);
   }
@@ -1592,5 +1562,94 @@ TEST_F(AutoReorderingTest, ReorderPassDataAnalyse) {
     }
   }
 }
+TEST_F(AutoReorderingTest, ReorderPassAntOPTDataAnalyse) {
+  setenv("XLA_AUTOREORDER_METHOD", "antopt", 1);
+  absl::Cleanup env_cleanup = [&]() { unsetenv("XLA_AUTOREORDER_METHOD"); };
+  // GTEST_SKIP() << "Skipping single test because longtime";
+  std::srand(kRandomSeed);
+  auto gen = std::mt19937{kRandomSeed};
+  int repeat_time = 1;
+  uint32_t nnodes = 100;
+  std::vector<float> communication_rates;
+  for (float current = 0.1; current < 0.9; current += 0.05) {
+    communication_rates.push_back(current);
+  }
 
+  // communication rate from 0.05 to 0.95,step is 0.05
+  std::ofstream csv_out("/tmp/test_ret_antopt.csv");
+  csv_out
+      << "exp_id,nnodes,communication_rate,auto_reorder_cost,post_order_cost,"
+         "xla_hiding_order_cost,xla_hiding_solve_time,auto_reorder_solve_time"
+      << std::endl;
+  for (auto communication_rate : communication_rates) {
+    for (size_t i = 0; i < repeat_time; i++) {
+      std::cout << TestName() << " repeat time:" << i << std::endl;
+      auto hlo_module = CreateNewUnverifiedModule();
+      auto gpu_latency_estimator =
+          std::make_unique<SavedInstLatencyEstimator>();
+      // float communication_rate = 0.2;
+      SchedulerConfig sched_config = GetDefaultSchedConfig();
+      auto st =
+          MakeRandomComputation(hlo_module.get(), gpu_latency_estimator.get(),
+                                /*inst num*/ nnodes,
+                                /*max deps*/ 5,
+                                /*communication rate*/ communication_rate,
+                                /* gen */ gen);
+      EXPECT_TRUE(st.ok());
+      // auto latency_estimator = create_latency_estimator();
+
+      auto gpu_latency_estimator2 = gpu_latency_estimator->clone();
+      auto gpu_latency_estimator3 = gpu_latency_estimator->clone();
+      // run AutoReorder for compare
+      // get running time cost
+      auto start = std::chrono::steady_clock::now();
+      auto status = RunScheduler(hlo_module.get(), sched_config,
+                                 std::move(gpu_latency_estimator));
+      EXPECT_TRUE(status.ok());
+      auto end = std::chrono::steady_clock::now();
+      auto auto_reorder_solve_time =
+          std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
+              .count();
+
+      auto statics = GetModuleCost(hlo_module.get(), sched_config,
+                                   gpu_latency_estimator2.get());
+      EXPECT_TRUE(statics.ok());
+      auto auto_reorder_cost = statics.value().total_cycles;
+      // compare post order vs reorder
+      auto post_insts_order =
+          hlo_module->entry_computation()->MakeInstructionPostOrder();
+      hlo_module->schedule().set_sequence(hlo_module->entry_computation(),
+                                          post_insts_order);
+
+      statics = GetModuleCost(hlo_module.get(), sched_config,
+                              gpu_latency_estimator2.get());
+      EXPECT_TRUE(statics.ok());
+      auto post_order_cost = statics.value().total_cycles;
+
+      // run LatencyHidingScheduler for compare
+      // NOTICE:  DO NOT using gpu_latency_estimator after
+      // std::move(gpu_latency_estimator)
+      start = std::chrono::steady_clock::now();
+      auto lhs_status = RunLatencyHidingScheduler(
+          hlo_module.get(), sched_config, std::move(gpu_latency_estimator3));
+      EXPECT_TRUE(lhs_status.ok());
+      end = std::chrono::steady_clock::now();
+      auto xla_hiding_solve_time =
+          std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
+              .count();
+      statics = GetModuleCost(hlo_module.get(), sched_config,
+                              gpu_latency_estimator2.get());
+      EXPECT_TRUE(statics.ok());
+      auto xla_hiding_order_cost = statics.value().total_cycles;
+      csv_out << i << "," << nnodes << "," << communication_rate << ","
+              << auto_reorder_cost << "," << post_order_cost << ","
+              << xla_hiding_order_cost << "," << xla_hiding_solve_time << ","
+              << auto_reorder_solve_time << std::endl;
+    }
+  }
+}
+TEST_F(AutoReorderingTest, DAGSolver){
+  auto solver_ = absl::make_unique<LinearProgramScheduler<
+      LPContainerDAG<const HloInstruction*>, const HloInstruction*>>();
+}
 }  // namespace xla

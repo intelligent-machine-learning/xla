@@ -16,6 +16,7 @@ load("//third_party/nanobind:workspace.bzl", nanobind = "repo")
 load("//third_party/robin_map:workspace.bzl", robin_map = "repo")
 load("//third_party/stablehlo:workspace.bzl", stablehlo = "repo")
 load("//third_party/triton:workspace.bzl", triton = "repo")
+load("//third_party/sqlite:workspace.bzl", sqlite = "repo")
 
 def _initialize_third_party():
     """ Load third party repositories.  See above load() statements. """
@@ -27,6 +28,7 @@ def _initialize_third_party():
     robin_map()
     stablehlo()
     triton()
+    sqlite()
 
 # Define all external repositories required by TensorFlow
 def _tf_repositories():

@@ -1,7 +1,7 @@
 #include "xla/hlo/experimental/auto_reorder/auto_reorder_solver.h"
 #include <fstream>
 #include <iostream>
-
+using bazel::tools::cpp::runfiles::Runfiles;
 #ifndef LPSchedulerFunc(return_type)
 #define LPSchedulerFunc(return_type)                      \
   template <typename ContainerType, typename ElementType> \
@@ -31,6 +31,31 @@ uint32_t get_autoreorder_timeout() {
   }
   return std::atoi(env);
 };
+uint32_t get_autoreorder_worker() {
+  const char* env = std::getenv("XLA_AUTOREORDER_WORKER");
+  if (env == nullptr) {
+    return 1;
+  }
+  return std::atoi(env);
+};
+xla::SolveMethod get_solve_method() {
+  const char* env = std::getenv("XLA_AUTOREORDER_METHOD");
+  if (env == nullptr) {
+    VLOG(2) << "using SolveMethod: ortools";
+    return SolveMethod::kORTools;
+  }
+  // kORTools
+  // kAntOpt
+  if (std::strcmp(env, "antopt") == 0) {
+    VLOG(2) << "using SolveMethod: antopt";
+    return SolveMethod::kAntOpt;
+  } else if(std::strcmp(env, "antoptremote") == 0) {
+    VLOG(2) << "using SolveMethod: antoptremote";
+    return SolveMethod::kAntOptRemote;
+  }
+  VLOG(2) << "using SolveMethod: ortools";
+  return SolveMethod::kORTools;
+}
 int get_horizon(int max_time) {
   // scale should be fit with module?
   return max_time * 2;
@@ -126,8 +151,115 @@ LPSchedulerFunc(StatusOr<TaskType>)::AddNodeToTask(ContainerType* node) {
   node_to_task_.emplace(node->UUID(), std::make_tuple(node, task));
   return task;
 };
+LPSchedulerFunc(uint32_t)::GetNodesCount() const { return nodes_.size(); }
+LPSchedulerFunc(tsl::Status)::SolveUsingAntOPT(SolveMethod solve_method) {
+  /* 1. export to json
+     2. send to server
+     3. query until get result
+     4. return
+  */
+  std::string json_filename = "AntOPT.req";
+  std::string input_filename = SaveJSON(json_filename);
+  std::string output_filename = absl::StrCat("/tmp/", "AntOPT.res.json");
 
-LPSchedulerFunc(tsl::Status)::Solve(std::string mps_filename) {
+  // if it's in torch_xla env, we need using module;otherwise this script point
+  // to workdir
+  std::vector<std::string> args = {"python3", "-m",};
+  if(solve_method==SolveMethod::kAntOptRemote){
+    args.push_back("lynx.tools.solve_remote");
+  }else{
+    args.push_back("lynx.tools.solve_local");
+  }
+  args.push_back(input_filename);
+  args.push_back(output_filename);
+  // absl::Cleanup file_cleanup = [&]() {
+  //   if(std::filesystem::exists(input_filename)){
+  //     std::filesystem::remove(input_filename);
+  //   }
+  //   if(std::filesystem::exists(output_filename)){
+  //     std::filesystem::remove(output_filename);
+  //   }
+  // };
+  // SubProcess can't set env
+  tsl::SubProcess proc;
+  proc.SetProgram("python3", args);
+  proc.SetChannelAction(tsl::CHAN_STDOUT, tsl::ACTION_PIPE);
+  proc.SetChannelAction(tsl::CHAN_STDERR, tsl::ACTION_PIPE);
+
+  bool start = proc.Start();
+  std::string in = "\n";
+  std::string out, err;
+
+  int process_ret = proc.Communicate(&in, &out, &err);
+
+  if (process_ret != 0) {
+    LOG(ERROR) << "Error running python script, input=" << input_filename
+               << " output:" << output_filename << err;
+    return tsl::errors::InvalidArgument(
+        absl::StrCat("Error running python script:", input_filename,
+                     " output:", output_filename));
+  }
+  VLOG(2) << "python script stdout:";
+  VLOG(2) << out;
+  VLOG(2) << "python script stderr:";
+  VLOG(2) << err;
+
+  xla::auto_reorder::AntOPTSolverResponse solve_response;
+  std::ifstream jsonfile_in(output_filename);
+  if (!jsonfile_in.is_open()) {
+    LOG(ERROR) << "Could not open the file - '" << output_filename << "'"
+               << std::endl;
+    return tsl::errors::InvalidArgument("Could not open the result file");
+  }
+  // read all json
+  jsonfile_in.seekg(0, std::ios::end);
+  std::streampos fileSize = jsonfile_in.tellg();
+  jsonfile_in.seekg(0, std::ios::beg);
+  std::string content;
+  content.resize(fileSize);
+  jsonfile_in.read(&content[0], fileSize);
+
+  auto status = tsl::HumanReadableJsonToProto(content, &solve_response);
+  if (!status.ok()) {
+    LOG(ERROR) << "parse json fail:" << status.message();
+    return status;
+  }
+  // std::vector<ContainerType*> nodes_;
+  std::map<int, ContainerType*> uuid2node;
+  for (auto node : nodes_) {
+    uuid2node[node->UUID()] = node;
+  }
+  uint32_t solved_node_count = 0;
+  uint32_t solved_edge_count = 0;
+  for (auto node_item : solve_response.finalized_node_start_end_time()) {
+    std::string node_uuid = node_item.node_uuid();
+    int32_t find_idx = node_uuid.find("__");
+    if (find_idx > 0) {  // it's edge
+      solved_edge_count += 1;
+      continue;
+    }
+    // convert uuid to int
+    solved_node_count += 1;
+    int uuid_int = std::stoi(node_uuid);
+    int start_time = node_item.start_time();
+    uuid2node[uuid_int]->SetStart(start_time);
+    node_starttime_.emplace(uuid_int, start_time);
+  }
+  if (solved_node_count != GetNodesCount()) {
+    return tsl::errors::InvalidArgument(
+        absl::StrCat("Not all nodes are solved, solved:", solved_node_count,
+                     " total:", GetNodesCount(), " edges:", solved_edge_count));
+  }
+  return OkStatus();
+}
+LPSchedulerFunc(tsl::Status)::Solve(SolveMethod solve_method) {
+  if (solve_method == SolveMethod::kORTools) {
+    return SolveUsingORTools();
+  } else {
+    return SolveUsingAntOPT(solve_method);
+  }
+}
+LPSchedulerFunc(tsl::Status)::SolveUsingORTools() {
   uint32_t max_execution_time = 0;
   for (auto node : nodes_) {
     node->Freeze();
@@ -164,7 +296,8 @@ LPSchedulerFunc(tsl::Status)::Solve(std::string mps_filename) {
     cp_model_.AddNoOverlap(it->second);
   }
   // for communicate stream, edge also should no overlap
-  std::vector<IntervalVar> no_overlap_edges;
+  std::map<NodeType, std::vector<IntervalVar>> no_overlap_edges;
+  // std::vector<IntervalVar> no_overlap_edges;
   for (auto node : nodes_) {
     if (!node->IsCommunication()) {
       continue;
@@ -173,19 +306,23 @@ LPSchedulerFunc(tsl::Status)::Solve(std::string mps_filename) {
     auto node_task = std::get<1>(node_to_task_.at(node->UUID()));
     for (auto dep_tuple : node->GetDeps()) {
       auto dep_node = std::get<0>(dep_tuple);
-      auto cost = std::get<1>(dep_tuple);
+      auto edge_cost = std::get<1>(dep_tuple);
       auto dep_type = std::get<2>(dep_tuple);
 
       if (IsSingleChannel(dep_type)) {
         auto dep_task = std::get<1>(node_to_task_.at(dep_node->UUID()));
         // interval
         IntervalVar interval =
-            cp_model_.NewIntervalVar(dep_task.end, cost, node_task.start);
-        no_overlap_edges.push_back(interval);
+            cp_model_.NewIntervalVar(dep_task.end, edge_cost, node_task.start);
+        no_overlap_edges[dep_type].push_back(interval);
       }
     }
   }
-  cp_model_.AddNoOverlap(no_overlap_edges);
+  for (auto it = no_overlap_edges.begin(); it != no_overlap_edges.end(); it++) {
+    if (!it->second.empty()) {
+      cp_model_.AddNoOverlap(it->second);
+    }
+  }
 
   //  objective.
   IntVar obj_var = cp_model_.NewIntVar({0, horizon_}).WithName("makespan");
@@ -205,27 +342,16 @@ LPSchedulerFunc(tsl::Status)::Solve(std::string mps_filename) {
   // Currently, at level 1 we detect them in presolve and try
   // to fix Booleans. At level 2, we also do some form of dynamic symmetry
   // breaking during search.(default=2)
-  parameters.set_symmetry_level(1);
+  parameters.set_symmetry_level(2);
   if (reorder::solve_debug) {
     parameters.set_log_to_stdout(true);
-    // parameters.set_log_search_progress(true);
+    parameters.set_log_search_progress(true);
   }
-  parameters.set_num_search_workers(1);
+  parameters.set_num_search_workers(xla::reorder::get_autoreorder_worker());
   auto model = cp_model_.Build();
   // model is operations_research::sat::CpModelProto type
   // need operations_research::MPModelProto& type, so we need to convert it
   // model
-  if (mps_filename.size() > 0) {
-    operations_research::MPModelProto output;
-    operations_research::sat::ConvertCpModelProtoToMPModelProto(model, &output);
-    auto status_of_string = operations_research::ExportModelAsMpsFormat(output);
-    if (status_of_string.ok()) {
-      VLOG(2) << "ExportModelAsMpsFormat success";
-      std::ofstream out(absl::StrCat("/tmp/", mps_filename, ".mps"));
-      out << status_of_string.value();
-      out.close();
-    }
-  }
 
   const operations_research::sat::CpSolverResponse response =
       operations_research::sat::SolveWithParameters(model, parameters);
@@ -277,7 +403,7 @@ LPSchedulerFunc(std::vector<ContainerType*>)::GetSortedNodes() const {
       });
   return sorted_nodes;
 }
-LPSchedulerFunc(void)::SaveJSON(std::string filename) const {
+LPSchedulerFunc(std::string)::SaveJSON(std::string filename) const {
   std::string json_file = absl::StrCat("/tmp/", filename, ".json");
   std::ofstream json_out(json_file);
   json_out << "{" << std::endl;
@@ -286,12 +412,7 @@ LPSchedulerFunc(void)::SaveJSON(std::string filename) const {
   int32_t edge_count = 0;
 
   for (auto node : this->GetSortedNodes()) {
-    std::string name;
-    if (node->IsCommunication()) {
-      name = "communication";
-    } else {
-      name = "compute";
-    }
+    std::string name = NodeTypeToString(node->GetType());
     if (node_count > 0) {
       json_out << ",\n{ \"uuid\": \"" << node->UUID() << "\",\"typename\": \""
                << name << "\", \"name\": \""
@@ -312,12 +433,8 @@ LPSchedulerFunc(void)::SaveJSON(std::string filename) const {
       auto dep_node = std::get<0>(dep_pair);
       auto dep_cost = std::get<1>(dep_pair);
       NodeType dep_type = std::get<2>(dep_pair);
-      std::string name;
-      if (IsSingleChannel(dep_type)) {
-        name = "communication";
-      } else {
-        name = "compute";
-      }
+      std::string name = NodeTypeToString(dep_type);
+
       // draw edge
       if (edge_count > 0) {
         json_out << ",\n{ \"from\": \"" << dep_node->UUID() << "\", \"to\": \""
@@ -333,6 +450,9 @@ LPSchedulerFunc(void)::SaveJSON(std::string filename) const {
   }
   json_out << "]" << std::endl;
   json_out << "}" << std::endl;
+  json_out.flush();
+  json_out.close();
+  return json_file;
 }
 LPSchedulerFunc(void)::SaveGraphviz(std::string filename) const {
   // write a dot file
@@ -396,12 +516,7 @@ LPSchedulerFunc(void)::SaveGantt(std::string filename) const {
   csv_out << R"(import { Chart } from '@antv/g2'; 
   const events = [ )";
   for (auto node : this->GetSortedNodes()) {
-    std::string name;
-    if (node->IsCommunication()) {
-      name = "communication";
-    } else {
-      name = "compute";
-    }
+    std::string name = NodeTypeToString(node->GetType());
     if (draw_start_time) {
       csv_out << "{ name: \"" << name << "\",label:'"
               << ReplaceUnusedChar(node->GetName(), "'")
@@ -512,7 +627,7 @@ template class LPContainer<const HloInstruction*>;
 template class LinearProgramScheduler<LPContainer<const HloInstruction*>,
                                       const HloInstruction*>;
 
-template class LPContainerDAG<const HloInstruction*>;
+// template class LPContainerDAG<const HloInstruction*>;
 // template class LinearProgramScheduler<LPContainerDAG<const HloInstruction*>,
 // const HloInstruction*>;
 

@@ -12,18 +12,33 @@
 #include <thread>
 #include <tuple>
 #include <unordered_map>
+#include <unistd.h>
 #include "absl/container/flat_hash_map.h"
 #include "absl/strings/string_view.h"
+#include "absl/cleanup/cleanup.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/utils/common_ortools_deps.h"
+#include "tsl/platform/human_readable_json.h"
+#include "tsl/platform/subprocess.h"
+#include "absl/status/status.h"
+
+#include "xla/hlo/experimental/auto_reorder/instr_profile_info.pb.h"
+#include "tools/cpp/runfiles/runfiles.h"
 
 namespace xla {
 using IntVar = operations_research::sat::IntVar;
 using CpModelBuilder = operations_research::sat::CpModelBuilder;
 using IntervalVar = operations_research::sat::IntervalVar;
+enum class SolveMethod {
+  kORTools = 0,
+  kAntOpt = 1,
+  kAntOptRemote = 2,
+};
+
 namespace reorder {
 const uint32_t ksolveTimeout = 180;  // 3min
 uint32_t get_autoreorder_timeout();
+uint32_t get_autoreorder_worker();
 constexpr const int kChannelNumber = 2;
 int get_horizon(int max_time);
 constexpr bool solve_debug = true;
@@ -32,14 +47,41 @@ constexpr bool solve_debug = true;
 // get cpu number of current machine
 const bool is_keep_communicate_order();
 int get_cpu_number();
+xla::SolveMethod get_solve_method();
 }  // namespace reorder
 enum class NodeType {
   kCompute = 0,
-  kCommunication = 1
-
+  kCommunication = 1,
+  kAsynchronous = 2,
+  kUnknown = 99,
 };
+
+std::string NodeTypeToString(NodeType nodetype) {
+  switch (nodetype) {
+    case NodeType::kCompute:
+      return "compute";
+    case NodeType::kCommunication:
+      return "communication";
+    case NodeType::kAsynchronous:
+      return "asynchronous";
+    default:
+      return "unknown";
+  }
+}
+NodeType StringToNodeType(std::string s) {
+  if (s == "compute") {
+    return NodeType::kCompute;
+  } else if (s == "communication") {
+    return NodeType::kCommunication;
+  } else if (s == "asynchronous") {
+    return NodeType::kAsynchronous;
+  }
+  return NodeType::kUnknown;
+}
+
 static bool IsSingleChannel(NodeType nodetype) {
-  return nodetype == NodeType::kCommunication;
+  return nodetype == NodeType::kCommunication ||
+         nodetype == NodeType::kAsynchronous;
 }
 
 struct TaskType {
@@ -160,6 +202,12 @@ class LPContainerDAG : public LPContainer<ElementType> {
       : LPContainer<ElementType>(inner_element, cost, type) {
     // TODO: there should not create element?
     auto ele = new LPContainer<ElementType>(inner_element, cost, type);
+    // for(auto opera: inner_element->operands()){
+    //   operands_.add(opera)
+    // }
+    // for(auto user: inner_element->users()){
+    //   users_.add(user)
+    // }
     inner_elements.push_back(ele);
   };
   bool IsIn(LPContainer<ElementType>* a);
@@ -199,7 +247,8 @@ class LPContainerDAG : public LPContainer<ElementType> {
   Status MergeFrom(LPContainerDAG<ElementType>* other);
 
  private:
-  std::set<LPContainer<ElementType>*> operands_;
+  std::set<ElementType> operands_;
+  std::set<ElementType> users_;
   std::vector<LPContainer<ElementType>*> inner_elements;
   // maintain edges between inner_elements
   std::vector<DAGEdge> edges_;
@@ -231,7 +280,7 @@ class LinearProgramScheduler {
   Status AddConstraint(ContainerType* node);
   // solve the LP problem
   // Status Solve();
-  Status Solve(std::string mps_filename);
+  Status Solve(SolveMethod solve_method);
   // find instruction,if not exist, return error
   StatusOr<ContainerType*> FindInstructionLPNode(ElementType instruction);
   // find LPNode by instruction,if not exist,create it
@@ -239,11 +288,12 @@ class LinearProgramScheduler {
                                     NodeType type);
   // ContainerType*
   std::vector<ContainerType*> GetSortedNodes() const;
+  uint32_t GetNodesCount() const;
   // for debug: save graph viz file
   void SaveGraphviz(std::string filename) const;
   // for debug: render gantt chart
   void SaveGantt(std::string filename) const;
-  void SaveJSON(std::string filename) const;
+  std::string SaveJSON(std::string filename) const;
   // set max start time as horizon
   void SetHorizon(uint32_t horizon) { horizon_ = horizon; }
   StatusOr<TaskType> FindTask(ContainerType* node);
@@ -251,8 +301,10 @@ class LinearProgramScheduler {
   CostType GetNodeStartTime(ContainerType* node);
   void AddNodeToTask(ContainerType* node, TaskType task);
   StatusOr<TaskType> AddNodeToTask(ContainerType* node);
-
+  Status MergeGraph();
  private:
+  Status SolveUsingORTools();
+  Status SolveUsingAntOPT(SolveMethod solve_method);
   StatusOr<bool> AddEdgesNoOverlap(ContainerType* node);
   CpModelBuilder cp_model_;
   bool verbose_ = false;

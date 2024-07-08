@@ -1,4 +1,6 @@
 // decouple xla/python deps, xla/python need
+#ifndef XLA_HLO_EXPERIMENTAL_AUTO_REORDER_CONVERT_XPLANE_H_
+#define XLA_HLO_EXPERIMENTAL_AUTO_REORDER_CONVERT_XPLANE_H_
 #include <cstdint>
 #include <memory>
 #include <numeric>
@@ -37,12 +39,14 @@
 #include "tsl/profiler/protobuf/xplane.pb.h"
 #include "google/protobuf/util/json_util.h"
 #include "xla/hlo/experimental/auto_reorder/instr_profile_info.pb.h"
+#include "xla/hlo/experimental/auto_reorder/offline_sqlite_pgle.h"
+#include "xla/hlo/experimental/auto_reorder/common.h"
 
 namespace xla {
 
 constexpr char kXPlanePb[] = "xplane.pb";
 constexpr char kCostNameSep[] = "::";
-
+constexpr int kBatchInsertSize = 5;
 using tensorflow::profiler::XPlane;
 using tensorflow::profiler::XSpace;
 using tsl::profiler::CreateTfXPlaneVisitor;
@@ -64,19 +68,16 @@ using tsl::profiler::XStatVisitor;
 struct HloLatencyInfo {
   std::vector<double> durations;
 };
-struct HloLatencyStats {
-  uint32_t hits;
-  uint32_t misses;
-};
-Status ConvertXplaneToProfiledInstructionsProto(
-    std::vector<tensorflow::profiler::XSpace> xspaces,
-    tensorflow::profiler::ProfiledInstructionsProto*
-        profiled_instructions_proto);
-Status ConvertXplaneUnderLogdirToProfiledInstructionsProto(
-    const std::string& logdir, tensorflow::profiler::ProfiledInstructionsProto*
-                                   profiled_instructions_proto);
 
+Status ConvertXplaneToOfflineSQLitePgle(
+    std::vector<tensorflow::profiler::XSpace> xspaces,
+    xla::auto_reorder::OfflineSQLitePgle* dbbase_pgle);
+Status ConvertXplaneUnderLogdirToOfflineSQLitePgle(
+    const std::string& logdir,
+    xla::auto_reorder::OfflineSQLitePgle* database_pgle);
 Status ConvertXplaneToFile(const std::string& xplane_dir,
                            const std::string& output_filename);
 
 }  // namespace xla
+
+#endif  // XLA_HLO_EXPERIMENTAL_AUTO_REORDER_CONVERT_XPLANE_H_

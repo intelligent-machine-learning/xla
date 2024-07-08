@@ -55,6 +55,10 @@ void GetXPlaneLatencyInfo(
       xevent.Metadata().ForEachStat(for_each_stat);
       xevent.ForEachStat(for_each_stat);
       double latency = static_cast<double>(xevent.DurationNs()) / 1e3;
+      if (!hlo_name.has_value()) {
+        // why some hlo have no name?
+        return;
+      }
       VLOG(5) << "hlo_name: " << hlo_name.value_or("N/A")
               << "latency:" << latency;
 
@@ -85,86 +89,14 @@ Status GetHloInstrProfileInfo(
   if (hlo_module == nullptr) {
     return absl::InternalError("Failed to create HloModule from proto");
   }
-  VLOG(5) << "success get hlo module from proto";
+  VLOG(4) << "success get hlo module from proto";
   for (HloComputation* computation :
        hlo_module->MakeNonfusionComputations({})) {
-    for (auto* instr : computation->instructions()) {
-      // instr to json
-      //{name:"name",opcode:"opcode",operand_count:1,operand_names:["a"],operand_types:["f32"],shape:"[1,2,3]",result_type:"f32",result_shape:"[1,2,3]",result_element_type:"f32",result_element_shape:"[1,2,3]",result_element_count:6}
-      //  TODO: should we need shard info?
-      //  TODO: custom call
-      //  there are 3 category  instrs:
-      //  1. custom call, include GEMM now; record its input shape/dtype
-      //  2. communicate call, include async reducescatter ; record its input
-      //  shape/dtype
-      //  3. other,
-      HloInstructionProto instr_origin_proto = instr->ToProto();
-      auto_reorder::InstrProfileInfo instr_info;
-      auto_reorder::Size ret_size;
-      instr_info.set_name(instr_origin_proto.name());
-      HloOpcode code = instr->opcode();
-
-      instr_info.set_opcode(static_cast<uint32_t>(code));
-
-      // set operand count/type/size
-      instr_info.set_operand_count(instr->operand_count());
-      for (auto operand : instr->operands()) {
-        Shape op_shape = operand->shape();
-        // operand dtype
-
-        instr_info.add_operand_types(
-            PrimitiveType_Name(op_shape.element_type()));
-        auto_reorder::Size* op_size = instr_info.add_operand_sizes();
-        op_size->set_rank(op_shape.dimensions_size());
-        for (size_t i = 0; i < op_shape.dimensions_size(); i++) {
-          op_size->add_sizes(op_shape.dimensions(i));
-        }
-      }
-
-      Shape shape = instr->shape();
-      instr_info.mutable_result_size()->set_rank(shape.dimensions_size());
-      for (size_t i = 0; i < shape.dimensions_size(); i++) {
-        /* code */
-        instr_info.mutable_result_size()->add_sizes(shape.dimensions(i));
-      }
-      // custom call
-      switch (code) {
-        case HloOpcode::kCustomCall: {
-          instr_info.set_custom_call_target(instr->custom_call_target());
-          break;
-        }
-        case HloOpcode::kReduceScatter:
-        case HloOpcode::kAllGather:
-        case HloOpcode::kAllGatherStart:
-        case HloOpcode::kAllReduce:
-        case HloOpcode::kAllReduceStart:
-        case HloOpcode::kCollectivePermuteStart: {  // comm op need record
-                                                    // process group
-          // example :{{1,2,3,4}}, {{1,2},{3,4}}
-          std::vector<ReplicaGroup> replica_groups = instr->replica_groups();
-          uint16_t group_id = 0;
-          for (auto replica_group : replica_groups) {
-            xla::auto_reorder::ReplicaGroup* group =
-                instr_info.add_process_groups();
-            group->set_replica_group_id(group_id);
-            group_id++;
-            for (auto replica : replica_group.replica_ids()) {
-              group->add_replica_ids(replica);
-            }
-          }
-
-          // instr_info.set_process_group();
-          break;
-        }
-        case HloOpcode::kAsyncStart: {
-          // get async inner instr
-        }
-        default:
-          break;
-
-      }  // end switch
-      hlo_module_info->emplace(instr_origin_proto.name(), instr_info);
-    }  // end for instrs
+    auto status = xla::auto_reorder::OfflineSQLitePgle::ParseToInstProfileInfo(
+        computation, hlo_module_info);
+    if (!status.ok()) {
+      return status;
+    }
   }  // end for computations
   return absl::OkStatus();
 }
@@ -183,23 +115,22 @@ void GetXPlaneHloModuleProfileInfo(
 
         Status st = GetHloInstrProfileInfo(hlo_module_proto, hlo_module_info);
         if (!st.ok()) {
-          VLOG(5) << "Failed to get HloInstrProfileInfo from HloModuleProto";
+          VLOG(4) << "Failed to get HloInstrProfileInfo from HloModuleProto";
         }
       }
     });
   });
 }
 
-Status ConvertXplaneToProfiledJSONLine(
+Status ConvertXplaneToOfflineSQLitePgle(
     std::vector<tensorflow::profiler::XSpace> xspaces,
-    std::vector<std::string>* jsonline_vector) {
+    xla::auto_reorder::OfflineSQLitePgle* dbbase_pgle) {
   // name to HloLatencyInfo
   absl::flat_hash_map<std::string, HloLatencyInfo> hlo_latency_info;
   // name to HloInstructionProto
   absl::flat_hash_map<std::string, xla::auto_reorder::InstrProfileInfo>
       hlo_instr_profile_info;
   google::protobuf::util::JsonPrintOptions options;
-  options.add_whitespace = true;
   options.always_print_primitive_fields = true;
   google::protobuf::util::Status st;
   // st = google::protobuf::util::MessageToJsonString(profile_proto,
@@ -220,12 +151,12 @@ Status ConvertXplaneToProfiledJSONLine(
     // We don't expect GPU and TPU planes and custom devices to be present in
     // the same XSpace.
     if (device_planes.empty()) {
-      VLOG(5) << "No GPU plane found, try to find TPU plane.";
+      VLOG(4) << "No GPU plane found, try to find TPU plane.";
       device_planes =
           FindPlanesWithPrefix(xspace, tsl::profiler::kTpuPlanePrefix);
     }
     if (device_planes.empty()) {
-      VLOG(5) << "No TPU plane found, try to find custom device plane.";
+      VLOG(4) << "No TPU plane found, try to find custom device plane.";
       device_planes =
           FindPlanesWithPrefix(xspace, tsl::profiler::kCustomPlanePrefix);
     }
@@ -236,21 +167,21 @@ Status ConvertXplaneToProfiledJSONLine(
     }
   }
   if (hlo_instr_profile_info.empty()) {
-    VLOG(5) << "No HLO instruction info found in xplane protobuf.";
+    VLOG(4) << "No HLO instruction info found in xplane protobuf.";
     return absl::InternalError("No HLO latency info found in xplane");
   }
   if (hlo_latency_info.empty()) {
-    VLOG(5) << "No HLO latency info found in xplane.";
+    VLOG(4) << "No HLO latency info found in xplane.";
     return absl::InternalError("No HLO latency info found in xplane");
   }
-  HloLatencyStats stats;
-
+  xla::auto_reorder::HloLatencyStats stats;
+  std::vector<xla::auto_reorder::InstrProfileInfo> waiting_insert_profile;
   // Get the mean duration for each hlo and store into the proto.
   for (const auto& iter : hlo_latency_info) {
     // auto* cost = profiled_instructions_proto->add_costs();
     auto profile_it = hlo_instr_profile_info.find(iter.first);
     if (profile_it == hlo_instr_profile_info.end()) {
-      VLOG(5) << "No instr info found for instr: " << iter.first;
+      VLOG(4) << "No instr info found for instr: " << iter.first;
       stats.misses++;
       continue;
     } else {
@@ -259,24 +190,36 @@ Status ConvertXplaneToProfiledJSONLine(
 
     auto_reorder::InstrProfileInfo cost = profile_it->second;
     for (auto duration : iter.second.durations) {
-      // cost->add_durations(d);
-      cost.set_cost(duration);
-      std::string json_string;
-      auto st = google::protobuf::util::MessageToJsonString(cost, &json_string,
-                                                            options);
-      if (!st.ok()) {
-        return absl::InternalError(
-            "Failed to convert ProfiledInstructionsProto to json");
+      // here need copy
+      auto_reorder::InstrProfileInfo copyed_cost;
+      copyed_cost.CopyFrom(cost);
+      copyed_cost.set_cost(duration);
+      waiting_insert_profile.push_back(copyed_cost);
+      if (waiting_insert_profile.size() >= kBatchInsertSize) {
+        auto status =
+            dbbase_pgle->BatchInsertInstrProfileInfo(waiting_insert_profile);
+        if (!status.ok()) {
+          return status;
+        }
+        waiting_insert_profile.clear();
       }
-      jsonline_vector->push_back(json_string);
     }
   }
-  VLOG(5) << "Lookup inst profiler, Hits: " << stats.hits
+  if (waiting_insert_profile.size() > 0) {
+    auto status =
+        dbbase_pgle->BatchInsertInstrProfileInfo(waiting_insert_profile);
+    if (!status.ok()) {
+      return status;
+    }
+    waiting_insert_profile.clear();
+  }
+  VLOG(4) << "Lookup inst profiler, Hits: " << stats.hits
           << " Misses: " << stats.misses;
   return OkStatus();
 }
-Status ConvertXplaneUnderLogdirToProfiledInstructionsProto(
-    const std::string& logdir, std::vector<std::string>* jsonline_vector) {
+Status ConvertXplaneUnderLogdirToOfflineSQLitePgle(
+    const std::string& logdir,
+    xla::auto_reorder::OfflineSQLitePgle* database_pgle) {
   // Find the xplane files for each host under logdir.
   std::vector<std::string> children_path;
   TF_RETURN_IF_ERROR(tsl::Env::Default()->GetChildren(logdir, &children_path));
@@ -299,26 +242,35 @@ Status ConvertXplaneUnderLogdirToProfiledInstructionsProto(
         absl::StrCat("Could not find xplane file under: ", logdir));
   }
   VLOG(3) << "Have load " << xspaces.size() << " xspaces";
-  return ConvertXplaneToProfiledJSONLine(xspaces, jsonline_vector);
+  return ConvertXplaneToOfflineSQLitePgle(xspaces, database_pgle);
 }
 
 Status ConvertXplaneToFile(const std::string& xplane_dir,
                            const std::string& output_filename) {
-  tensorflow::profiler::ProfiledInstructionsProto profile_proto;
+  // tensorflow::profiler::ProfiledInstructionsProto profile_proto;
   std::vector<std::string> jsonline_vector;
-  auto status = ConvertXplaneUnderLogdirToProfiledInstructionsProto(
-      xplane_dir, &jsonline_vector);
+  auto gpu_latency_estimator = std::make_unique<GpuLatencyEstimator>();
+  int64_t memory_limit = 80 * 1000 * 1000;
+  SchedulerConfig config = GetSchedulerConfig(memory_limit);
+
+  std::unique_ptr<xla::auto_reorder::OfflineSQLitePgle> dbbase_pgle =
+      std::make_unique<xla::auto_reorder::OfflineSQLitePgle>(
+          config, std::move(gpu_latency_estimator), ":memory:");
+  auto status = dbbase_pgle->CreateDB();
+  if (!status.ok()) {
+    return status;
+  }
+  status = ConvertXplaneUnderLogdirToOfflineSQLitePgle(xplane_dir,
+                                                       dbbase_pgle.get());
   if (!status.ok()) {
     return status;
   }
   // open file,write jsonline
-  std::ofstream fout = std::ofstream(output_filename);
-  if (!fout.is_open()) {
-    return absl::InternalError("Failed to open file for writing");
+  status = dbbase_pgle->SaveMemoryDBToFile(output_filename);
+  if (!status.ok()) {
+    return status;
   }
-  for (const std::string& jsonline : jsonline_vector) {
-    fout << jsonline << std::endl;
-  }
+
   return OkStatus();
 }
 

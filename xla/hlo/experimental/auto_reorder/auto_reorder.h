@@ -9,9 +9,33 @@
 #include "xla/service/hlo_cost_analysis.h"
 #include "xla/service/hlo_pass_interface.h"
 #include "xla/service/latency_hiding_scheduler.h"
+#include "xla/hlo/experimental/auto_reorder/common.h"
 
 // #include "xla/statusor.h"
 namespace xla {
+NodeType GetEdgeTypeOfInst(const HloInstruction& hlo) {
+  auto op = GpuGetCanonicalAsyncOp(hlo);
+  if (op.outer == HloOpcode::kAsyncDone){
+    if (hlo.IsAsynchronous() &&
+        hlo.async_execution_thread() != hlo.parent()->execution_thread()) {
+      return NodeType::kAsynchronous;
+    }
+    switch (op.inner) {
+      case HloOpcode::kAllGather:
+      case HloOpcode::kAllReduce:
+      case HloOpcode::kCollectivePermute:
+      case HloOpcode::kCopy:
+        return NodeType::kCommunication;
+      default:
+        return NodeType::kAsynchronous;
+        
+    }
+  }
+  // If there are parallel thread computations, always schedule.
+  
+  VLOG(2)<<"edge from:"<<hlo.ToString()<<","<<hlo.IsAsynchronous()<<" thread="<<hlo.async_execution_thread()<<" parent="<<hlo.parent()->execution_thread();
+  return NodeType::kCommunication;
+}
 class AutoReorderPass : public HloModulePass {
  public:
   AutoReorderPass(){};
@@ -65,7 +89,7 @@ class AutoReorderPass : public HloModulePass {
   HloCostAnalysis::ShapeSizeFunction shape_size_bytes_;
 };
 
-CanonicalAsyncOp GpuGetCanonicalAsyncOp(const HloInstruction& hlo);
+// CanonicalAsyncOp GpuGetCanonicalAsyncOp(const HloInstruction& hlo);
 
 }  // namespace xla
 
