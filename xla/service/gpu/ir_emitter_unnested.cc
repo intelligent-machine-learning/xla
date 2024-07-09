@@ -97,6 +97,7 @@ limitations under the License.
 #include "xla/service/gpu/gpu_asm_opts_util.h"
 #include "xla/service/gpu/gpu_conv_runner.h"
 #include "xla/service/gpu/gpu_flash_attn.h"
+#include "xla/service/gpu/gpu_resize_bicubic.h"
 #include "xla/service/gpu/gpu_fused_mha_runner.h"
 #include "xla/service/gpu/gpu_norm_runner.h"
 #include "xla/service/gpu/hlo_fusion_analysis.h"
@@ -121,6 +122,7 @@ limitations under the License.
 #include "xla/service/gpu/runtime/fft_thunk.h"
 #include "xla/service/gpu/runtime/flash_attn_thunk.h"
 #include "xla/service/gpu/runtime/fused_mha_thunk.h"
+#include "xla/service/gpu/runtime/resize_bicubic_thunk.h"
 #include "xla/service/gpu/runtime/gemm_thunk.h"
 #include "xla/service/gpu/runtime/infeed_thunk.h"
 #include "xla/service/gpu/runtime/kernel_thunk.h"
@@ -2974,6 +2976,38 @@ absl::Status IrEmitterUnnested::EmitRecvDoneThunk(
   return absl::OkStatus();
 }
 
+absl::Status IrEmitterUnnested::EmitResizeBicubicFwdThunk(
+    const HloCustomCallInstruction* instr) {
+  int64_t num_operands = instr->operand_count();
+  CHECK(num_operands >= 1);
+
+  // TF_ASSIGN_OR_RETURN(const auto gpu_config,
+  //                     instr->backend_config<xla::gpu::GpuBackendConfig>());
+  // const auto& config = gpu_config.flash_attn_backend_config();
+  bool align_corners = false;
+  const HloInstruction* input = instr->operand(0);
+  // const HloInstruction* key = instr->operand(1);
+  // const HloInstruction* value = instr->operand(2);
+
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice input_slice,
+                      GetAllocationSliceForHlo(input));
+
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice output_slice,
+                      GetAllocationSliceForHlo(instr, {0}));
+
+  const Shape& output_shape =
+      ShapeUtil::GetTupleElementShape(instr->shape(), 0);
+
+  TF_ASSIGN_OR_RETURN(
+      ResizeBicubicFwdConfig resize_bicubic_fwd_config,
+      ResizeBicubicFwdConfig::For(
+          input->shape(), output_shape, align_corners));
+  AddThunkToThunkSequence(std::make_unique<ResizeBicubicFwdThunk>(
+      Thunk::ThunkInfo::WithProfileAnnotation(instr),
+      std::move(resize_bicubic_fwd_config), input_slice, output_slice));
+  return absl::OkStatus();
+}
+
 absl::Status IrEmitterUnnested::EmitHloInstruction(
     const HloInstruction* instr) {
   switch (instr->opcode()) {
@@ -3110,6 +3144,9 @@ absl::Status IrEmitterUnnested::EmitHloInstruction(
       }
       if (IsBwdCustomCallToFlashAttn(*instr)) {
         return EmitFlashAttnBwdThunk(custom_call);
+      }
+      if (IsFwdCustomCallToResizeBicubic(*instr)) {
+        return EmitResizeBicubicFwdThunk(custom_call);
       }
 #endif  // GOOGLE_CUDA
       if (IsCustomCallToTopK(*instr)) {

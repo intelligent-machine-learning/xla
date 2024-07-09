@@ -268,6 +268,7 @@ Thunk::ExecuteParams::ExecuteParams(
     CASE(kTriangularSolve);
     CASE(kWhile);
     CASE(kFlashAttn);
+    CASE(kResizeBicubic);
     CASE(kFusedMHA);
     CASE(kWaitForStreams);
     CASE(kCuDnn);

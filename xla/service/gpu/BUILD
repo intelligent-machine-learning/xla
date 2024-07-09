@@ -373,6 +373,7 @@ cc_library(
         "//xla/service/gpu/runtime:custom_call_thunk",
         "//xla/service/gpu/runtime:fft_thunk",
         "//xla/service/gpu/runtime:flash_attn_thunk",
+        "//xla/service/gpu/runtime:resize_bicubic_thunk",
         "//xla/service/gpu/runtime:fused_mha_thunk",
         "//xla/service/gpu/runtime:gemm_thunk",
         "//xla/service/gpu/runtime:infeed_thunk",
@@ -2193,6 +2194,30 @@ cc_library(
     ] + if_cuda_is_configured([
         "@flash_attn//:flash_attn",
     ])
+)
+
+cc_library(
+    name = "gpu_resize_bicubic",
+    srcs = if_cuda_is_configured([
+        "gpu_resize_bicubic.cc"
+    ]),
+    hdrs = ["gpu_resize_bicubic.h"],
+    deps = [
+        ":stream_executor_util",
+        "//xla:shape_util",
+        "//xla:status",
+        "//xla:status_macros",
+        "//xla:statusor",
+        "//xla:types",
+        "//xla:util",
+        "//xla/hlo/ir:hlo",
+        "//xla/stream_executor",
+        "//xla/stream_executor:dnn",
+        "//xla/stream_executor/gpu:gpu_stream",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+    ]
 )
 
 cc_library(

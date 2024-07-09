@@ -149,6 +149,8 @@ class IrEmitterUnnested : public IrEmitter {
   absl::Status EmitFusedMHABackwardThunk(const HloCustomCallInstruction* instr);
   absl::Status EmitFlashAttnFwdThunk(const HloCustomCallInstruction* instr);
   absl::Status EmitFlashAttnBwdThunk(const HloCustomCallInstruction* instr);
+  absl::Status EmitResizeBicubicFwdThunk(const HloCustomCallInstruction* instr);
+  absl::Status EmitResizeBicubicBwdThunk(const HloCustomCallInstruction* instr);
 #endif  // GOOGLE_CUDA
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
   absl::Status EmitCubDeviceRadixSort(const HloCustomCallInstruction* instr);

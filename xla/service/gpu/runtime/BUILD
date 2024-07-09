@@ -632,6 +632,23 @@ cc_library(
 )
 
 cc_library(
+    name = "resize_bicubic_thunk",
+    srcs = ["resize_bicubic_thunk.cc"],
+    hdrs = ["resize_bicubic_thunk.h"],
+    deps = [
+        "//xla:util",
+        "//xla:xla_data_proto_cc",
+        "//xla/service:buffer_assignment",
+        "//xla/service/gpu:gpu_resize_bicubic",
+        "//xla/service/gpu/runtime:thunk",
+        "//xla/stream_executor",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/status",
+    ],
+)
+
+
+cc_library(
     name = "fused_mha_thunk",
     srcs = ["fused_mha_thunk.cc"],
     hdrs = ["fused_mha_thunk.h"],
