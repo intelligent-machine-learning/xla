@@ -40,7 +40,7 @@ struct HloLatencyStats {
   uint32_t hits = 0;
   uint32_t misses = 0;
 };
-const std::string kSQLCreate = R"(create table inst_profiler (
+static const std::string kSQLCreate = R"(create table inst_profiler (
             name string,
             operandCount int,
             opcode int,
@@ -57,15 +57,15 @@ const std::string kSQLCreate = R"(create table inst_profiler (
             cost real,
             hwinfo string
         ) )";
-std::vector<std::string> kSQLCreateIndexes = {
+static const std::vector<std::string> kSQLCreateIndexes = {
     "create index idx_opcode on inst_profiler(opcode, operand_hash);",
     "create index idx_customcall on inst_profiler(opcode, customCallTarget, "
     "operand_hash);",
     "create index idx_comm on inst_profiler(opcode, replicaGroupSize, "
     "operand_hash);",
 };
-const std::string kSQLInsert = R"(insert into inst_profiler values)";
-size_t kParamsCount = 13;
+static const std::string kSQLInsert = R"(insert into inst_profiler values)";
+static const size_t kParamsCount = 13;
 std::string BatchInsertSQL(size_t size);
 /*
 Using DB(sqlite) for Profile Guided Latency Estimator
