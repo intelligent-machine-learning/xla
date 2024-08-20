@@ -6,47 +6,26 @@ int64_t ShapeSize(const Shape& shape) {
   return ShapeUtil::ByteSizeOf(shape, kPointerSize);
 }
 
-tsl::Status AutoReorderPass::RebuildHloOrdering(
-    HloSchedule& module_schedule, HloComputation* entry_computation) {
-  bool is_debug = false;
-  // module_schedule.remove_computation(entry_computation);
-  // module_schedule.GetOrCreateSequence(entry_computation);
-  auto status = module_schedule.UpdateComputationSchedule(entry_computation);
-
-  if (!status.ok()) {
-    return status;
-  } else {
-  }
-  status = module_schedule.Update({});
-  if (!status.ok()) {
-    VLOG(2) << "Update error:" << status.message() << std::endl;
-    return status;
-  }
-  // SequentialHloOrdering seq_ordering(module_schedule);
-  // auto seqs = seq_ordering.SequentialOrder(*entry_computation);
-  // module_schedule.set_sequence(entry_computation, *seqs);
-
-  auto new_instruction_sequence =
-      module_schedule.sequence(entry_computation).instructions();
-  for (auto i = 0; i < new_instruction_sequence.size(); i++) {
-    auto inst = new_instruction_sequence.at(i);
-  }
-  status = module_schedule.Verify();
-  if (!status.ok()) {
-    return status;
-  }
+Status AutoReorderSchedulerCore::InitializeScheduler(const HloModule* module) {
+  TF_ASSIGN_OR_RETURN(alias_analysis_, HloAliasAnalysis::Run(module));
+  module_pressure_state_ = std::make_unique<ModulePressureState>(
+      module, alias_analysis_.get(), shape_size_bytes_);
+  module_pressure_state_->InitializePressureStates();
+  module_pressure_state_->SetMemoryPeak(0);
   return OkStatus();
 }
-tsl::StatusOr<std::vector<HloInstruction*>>
-AutoReorderPass::ScheduleComputation(HloComputation* computation) {
+
+absl::StatusOr<std::vector<HloInstruction*>>
+AutoReorderSchedulerCore::ScheduleComputation(const HloComputation* computation) {
+  VLOG(0) << "ScheduleComputation";
   int64_t current_pos = 0;
   auto post_order_instructions = computation->MakeInstructionPostOrder();
   HloScheduleGraph schedule_graph(&post_order_instructions,
                                   /*alias_analysis=*/nullptr,
-                                  latency_estimator_.get(),
-                                  async_tracker_.get());
+                                  latency_estimator_,
+                                  async_tracker_);
   async_tracker_->PostProcessScheduleGraph(&schedule_graph,
-                                           latency_estimator_.get());
+                                           latency_estimator_);
   // we don't need InitializeGraphAnalysis for init node status;
 
   auto solver_ = absl::make_unique<LinearProgramScheduler<
@@ -57,7 +36,7 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
   // post order,every inst will iter before it's operators
   for (HloInstruction* instr : post_order_instructions) {
     // AddHint
-
+    VLOG(0) << "instr:" << instr->ToShortString();
     const HloGraphNode& instr_node = schedule_graph.GetNode(instr);
     VLOG(2) << instr->ToShortString() << "flops cost :" << instr_node.GetCost();
     auto addEdge = [&](const xla::HloInstruction* from_inst,
@@ -171,7 +150,16 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
     solver_->SaveJSON(absl::StrCat("gantt_before_", computation->name()));
   }
   auto solve_method = xla::reorder::get_solve_method();
-  auto status = solver_->Solve(solve_method);
+  
+  auto status = solver_->Solve(
+                              solve_method,
+                              shape_size_bytes_,
+                              alias_analysis_.get(),
+                              module_pressure_state_->buffer_tracker(),
+                              module_pressure_state_->GetPressureStateForComputation(computation)
+                            );
+
+
   if (reorder::solve_debug) {
     // save to pid related file
     solver_->SaveGantt(absl::StrCat("gantt_", computation->name()));
@@ -201,6 +189,9 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
               });
     new_schedule_params.insert(new_schedule_params.end(), new_schedule.begin(),
                                new_schedule.end());
+    for (auto inst : new_schedule_params) {
+      VLOG(0) << "new_schedule_instr:" << inst->ToShortString();
+    }
     return new_schedule_params;
   }
   TF_RET_CHECK(status.ok()) << "Solver error:" << status.message();
@@ -323,12 +314,46 @@ tsl::Status AutoReorderPass::MoveInstruction(HloComputation* src_computation,
     return OkStatus();
   }
 }
+
+tsl::Status AutoReorderPass::RebuildHloOrdering(
+    HloSchedule& module_schedule, HloComputation* entry_computation) {
+  bool is_debug = false;
+  // module_schedule.remove_computation(entry_computation);
+  // module_schedule.GetOrCreateSequence(entry_computation);
+  auto status = module_schedule.UpdateComputationSchedule(entry_computation);
+
+  if (!status.ok()) {
+    return status;
+  } else {
+  }
+  status = module_schedule.Update({});
+  if (!status.ok()) {
+    VLOG(2) << "Update error:" << status.message() << std::endl;
+    return status;
+  }
+  // SequentialHloOrdering seq_ordering(module_schedule);
+  // auto seqs = seq_ordering.SequentialOrder(*entry_computation);
+  // module_schedule.set_sequence(entry_computation, *seqs);
+
+  auto new_instruction_sequence =
+      module_schedule.sequence(entry_computation).instructions();
+  for (auto i = 0; i < new_instruction_sequence.size(); i++) {
+    auto inst = new_instruction_sequence.at(i);
+  }
+  status = module_schedule.Verify();
+  if (!status.ok()) {
+    return status;
+  }
+  return OkStatus();
+}
+
 StatusOr<bool> AutoReorderPass::Run(
     HloModule* module,
     const absl::flat_hash_set<absl::string_view>& execution_threads) {
   // about reorder: be careful about RNG, such as dropout, random_shuffle,
   // random_uniform;
   // HloCostAnalysis, get instruction cost
+  VLOG(0) << "AutoReorderPass";
   HloComputation* entry_computation = module->entry_computation();
 
   // Currently we expect that a schedule that minimizes memory pressure is
@@ -353,11 +378,11 @@ StatusOr<bool> AutoReorderPass::Run(
 
   absl::flat_hash_map<HloComputation*, std::vector<HloInstruction*>>
       saved_schedules;
-  // TF_RETURN_IF_ERROR(scheduler_core_->InitializeScheduler(module)); //TODO:
+  TF_RETURN_IF_ERROR(scheduler_core_->InitializeScheduler(module));
   // we don't limit memory usage
   for (HloComputation* computation : computations_to_schedule) {
     TF_ASSIGN_OR_RETURN(std::vector<HloInstruction*> new_schedule,
-                        ScheduleComputation(computation));
+                        scheduler_core_->ScheduleComputation(computation));
     VLOG(2) << "new_schedule length:" << new_schedule.size()
             << " computation instruction_count:"
             << computation->instruction_count();
@@ -374,8 +399,19 @@ StatusOr<bool> AutoReorderPass::Run(
             << std::endl;
     module->schedule().set_sequence(
         computation, absl::MakeConstSpan(saved_schedules[computation]));
+
     VLOG(1) << "Statistics after scheduling:";
     // LogScheduleStatistics(computation);
+  }
+      std::unique_ptr<HloAliasAnalysis> alias_analysis =
+      HloAliasAnalysis::Run(module).value();
+    // VLOG(0) << alias_analysis->ToString();
+  for (HloComputation* computation : computations_to_schedule) {
+
+    TF_ASSIGN_OR_RETURN(
+      std::unique_ptr<HloLiveRange> hlo_live_range,
+      HloLiveRange::Run(module->schedule(), *alias_analysis, computation));
+    VLOG(0) << hlo_live_range->ToString();
   }
   return true;
 

@@ -847,15 +847,20 @@ absl::StatusOr<ScheduleMetadata> ScheduleGpuModule(
 
   HloPassPipeline pipeline("latency-hiding-scheduler");
 
-  auto scheduler_core = std::make_unique<DefaultSchedulerCore>(
-      shape_size_in_bytes, async_tracker.get(), latency_estimator.get(),
-      config);
 
   if (enable_linear_program_scheduler) {
+    VLOG(0) << "enable_linear_program_scheduler";
+      auto scheduler_core = std::make_unique<AutoReorderSchedulerCore>(
+        shape_size_in_bytes, async_tracker.get(), latency_estimator.get(),
+        config);
     pipeline.AddPass<AutoReorderPass>(
         std::move(latency_estimator), std::move(async_tracker),
         std::move(scheduler_core), shape_size_in_bytes);
   } else {
+    VLOG(0) << "LatencyHidingScheduler";
+    auto scheduler_core = std::make_unique<DefaultSchedulerCore>(
+        shape_size_in_bytes, async_tracker.get(), latency_estimator.get(),
+        config);
     pipeline.AddPass<LatencyHidingScheduler>(
         std::move(latency_estimator), std::move(async_tracker),
         std::move(scheduler_core), shape_size_in_bytes);

@@ -53,7 +53,7 @@ limitations under the License.
 #include "xla/service/memory_space_assignment/repacking.h"
 #include "xla/service/tuple_points_to_analysis.h"
 #include "xla/statusor.h"
-
+#include "xla/hlo/utils/common_ortools_deps.h"
 namespace xla {
 
 // Forward declare classes defined below.
@@ -997,6 +997,65 @@ class ChooseBestHeapAlgorithm : public HeapAlgorithm<BufferType> {
  private:
   std::vector<std::unique_ptr<HeapAlgorithm<BufferType>>> algorithms_;
 };
+
+template <typename BufferType>
+class SolverBasedAlgo : public GlobalDecreasingSizeBestFitHeap<HloValue> {
+  public:
+    explicit SolverBasedAlgo(int64_t alignment, int64_t time_limit = 15, double offset_limit = -1) : 
+    GlobalDecreasingSizeBestFitHeap<HloValue>(alignment),
+      time_limit_(time_limit), offset_limit_(offset_limit) {}
+    
+    ~SolverBasedAlgo() override {}
+    absl::StatusOr<typename HeapSimulator::Result<BufferType>> Finish() override;
+  
+  protected:
+    virtual std::vector<std::pair<typename GlobalDecreasingSizeBestFitHeap<HloValue>::BufferInterval, int64_t>> Solve() = 0;
+
+  private:
+    int64_t time_limit_;
+    
+    // set infinity if offset_limit_ is -1
+    double offset_limit_; 
+}; 
+
+class ConstrainedSolverBasedAlgo : public SolverBasedAlgo<HloValue> {
+  public:
+    explicit ConstrainedSolverBasedAlgo(
+      uint64_t size_limit_per_heap, int64_t alignment, int64_t time_limit = 15, double offset_limit = -1)
+      : SolverBasedAlgo<HloValue>(alignment, time_limit, offset_limit),
+        size_limit_per_heap_(size_limit_per_heap) {}
+    ~ConstrainedSolverBasedAlgo() override {}
+    absl::StatusOr<HeapSimulator::Result<HloValue>> Finish() override;
+  private:
+    uint64_t size_limit_per_heap_;
+};
+
+class ConstrainedMODelAlgo : public ConstrainedSolverBasedAlgo {
+  public:
+    explicit ConstrainedMODelAlgo(
+      uint64_t size_limit_per_heap, int64_t alignment, int64_t time_limit = 15, double offset_limit = -1)
+      : ConstrainedSolverBasedAlgo(size_limit_per_heap, alignment, time_limit, offset_limit) {}
+    ~ConstrainedMODelAlgo() override {}
+  protected:
+    std::vector<std::pair<GlobalDecreasingSizeBestFitHeap<HloValue>::BufferInterval, int64_t>> Solve();
+};
+
+class ConstrainedCPSATAlgo : public ConstrainedSolverBasedAlgo {
+  public:
+    explicit ConstrainedCPSATAlgo(
+      uint64_t size_limit_per_heap, int64_t alignment, int64_t time_limit = 15, double offset_limit = -1)
+      : ConstrainedSolverBasedAlgo(size_limit_per_heap, alignment, time_limit, offset_limit) {}
+    ~ConstrainedCPSATAlgo() override {}
+  protected:
+    std::vector<std::pair<GlobalDecreasingSizeBestFitHeap<HloValue>::BufferInterval, int64_t>> Solve();
+};
+
+// May need a way to visualize the assignment for every algorithm result
+// template <typename BufferType>
+// void ForVisualize(HeapSimulator::Result<BufferType> result);
+
+extern template class SolverBasedAlgo<HloValue>;
+// extern template class SolverBasedAlgo<AllocationBlock>;
 
 extern template class GlobalDecreasingSizeBestFitHeap<HloValue>;
 extern template class GlobalDecreasingSizeBestFitHeap<AllocationBlock>;

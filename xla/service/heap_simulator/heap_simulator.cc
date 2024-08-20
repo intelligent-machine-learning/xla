@@ -2404,6 +2404,10 @@ ChooseBestHeapAlgorithm<BufferType>::Finish() {
   int min_size_index = -1;
   for (int i = 0; i < algorithms_.size(); ++i) {
     TF_ASSIGN_OR_RETURN(results[i], algorithms_[i]->Finish());
+    VLOG(1) << "algorithm " << i << " heap size " << results[i].heap_size;
+    if (std::getenv("PH_DEV") != nullptr && i == algorithms_.size() - 1) {
+      continue;
+    }
     if (results[i].heap_size < min_size) {
       min_size = results[i].heap_size;
       min_size_index = i;
@@ -2413,6 +2417,247 @@ ChooseBestHeapAlgorithm<BufferType>::Finish() {
   DCHECK_GE(min_size_index, 0);
   return results[min_size_index];
 }
+
+template <typename BufferType>
+StatusOr<typename HeapSimulator::Result<BufferType>>
+SolverBasedAlgo<BufferType>::Finish() {
+  std::vector<std::pair<typename GlobalDecreasingSizeBestFitHeap<BufferType>::BufferInterval, int64_t>> buffer_intervals = Solve();
+  for (auto& buffer_interval : buffer_intervals) {
+    if (!buffer_interval.first.need_allocation) {
+      continue;
+    }
+    // This implementation of the heap algorithm does not have a notion of
+    // maximum heap size, so it just commits.
+    CommitChunk(buffer_interval.first, FindChunkCandidate(buffer_interval.first, buffer_interval.second));
+  }
+  HeapSimulator::Result<BufferType> result;
+  result.heap_size = result_.heap_size;
+  result.heap_results.emplace_back(result_);
+  return result;
+}
+
+StatusOr<HeapSimulator::Result<HloValue>>
+ConstrainedSolverBasedAlgo::Finish() {
+std::vector<std::pair<GlobalDecreasingSizeBestFitHeap<HloValue>::BufferInterval, int64_t>> buffer_vec = Solve();
+  // Convert into std::list so that erase() is O(1).
+  std::list<std::pair<GlobalDecreasingSizeBestFitHeap<HloValue>::BufferInterval, int64_t>> buffer_intervals(buffer_vec.begin(),
+                                                    buffer_vec.end());
+
+  // Use do-while here, because we need to create 1 heap in `multi_heap_result`
+  // even if `sorted_buffer_intervals` is empty.
+  Result multi_heap_result;
+  do {
+    // Place buffers into the currently processed heap as many as possible.
+    for (auto it = buffer_intervals.begin();
+         it != buffer_intervals.end();) {
+      GlobalDecreasingSizeBestFitHeap<HloValue>::BufferInterval buffer_interval = it->first;
+      if (!buffer_interval.need_allocation) {
+        it = buffer_intervals.erase(it);
+        continue;
+      }
+      if (buffer_interval.size > size_limit_per_heap_) {
+        LOG(WARNING) << "Alloc buffer size " << buffer_interval.size
+                     << " larger than the per-heap size limit "
+                     << size_limit_per_heap_;
+      }
+
+      HeapSimulator::Chunk chunk_candidate = FindChunkCandidate(buffer_interval, it->second);
+      if (chunk_candidate.chunk_end() <= size_limit_per_heap_ ||
+          // Commit the chunk as long as the heap is empty. We do this because
+          // we want the size constraint to be soft, meaning that results are
+          // successfully generated even if there are some buffer sizes larger
+          // than the given constraint size.
+          result_.heap_size == 0) {
+        CommitChunk(buffer_interval, chunk_candidate);
+        it = buffer_intervals.erase(it);
+        continue;
+      }
+
+      ++it;
+    }
+    // Collect the result from the currently processed heap and reset the heap
+    // states.
+    multi_heap_result.heap_size += result_.heap_size;
+    multi_heap_result.heap_results.push_back(std::move(result_));
+    result_ = {};
+    interval_tree_ = {};
+  } while (!buffer_intervals.empty());
+
+  VLOG(0) << "Number of heaps produced = "
+          << multi_heap_result.heap_results.size();
+  return multi_heap_result;
+}
+
+
+
+std::vector<std::pair<GlobalDecreasingSizeBestFitHeap<HloValue>::BufferInterval, int64_t>>
+ConstrainedMODelAlgo::Solve() {
+
+  // TODO(): Unit Test for Solve
+  // sharebuffer will not be treated as a single buffer
+  // the size will be aligned when be put into solver
+  auto align = [](int64_t size) -> int64_t {
+    return (size / 128 + (size % 128 != 0)) * 128;
+  }; // need to use alignment_
+
+  std::vector<std::pair<GlobalDecreasingSizeBestFitHeap<HloValue>::BufferInterval, int64_t>> buffer_intervals;
+  buffer_intervals.reserve(buffer_intervals_.size());
+  for (auto& entry : buffer_intervals_) {
+    buffer_intervals.emplace_back(entry.second, -1);
+  }
+  auto num_buffer = buffer_intervals.size();
+
+  std::unique_ptr<operations_research::MPSolver> solver(operations_research::MPSolver::CreateSolver("SCIP"));
+  if (!solver) {
+    LOG(WARNING) << "SCIP solver unavailable.";
+  }
+  double offset_limit = -1; // need use offset_limit_
+  const double infinity = solver->infinity();
+  if (offset_limit == -1) {
+    offset_limit = static_cast<int64_t>(1) << 50;
+  }
+
+  auto env = std::getenv("PH_TL");
+  int64_t time_limit =30;
+  if (env != nullptr) {
+    time_limit = std::atol(env);
+  }
+  solver->set_time_limit(time_limit); // need use time_limit_
+
+  // add var to solver 
+  std::vector<operations_research::MPVariable*> addresses(buffer_intervals_.size());
+  operations_research::MPVariable* peak_memory = solver->MakeIntVar(0.0, offset_limit, "peak_memory");
+  int ad_id = 0;
+  for (auto& ad : addresses) {
+    std::string name_ad = "ad" + static_cast<char>(ad_id);
+    ad = solver->MakeIntVar(0.0, offset_limit, name_ad);
+    ad_id++;
+  }
+
+  // add constrains and var between the buffer which have overlap lifetime
+  
+  // only for debug
+
+  for (int i = 0; i < num_buffer; i++) {
+    for (int j = i + 1; j < num_buffer; j++) {
+      if (!(std::min(buffer_intervals[i].first.end, buffer_intervals[j].first.end) >= std::max(buffer_intervals[i].first.start, buffer_intervals[j].first.start))) {
+        continue;
+      }
+      // similar to the method in MODel but only introducing one binary parameter for each pair
+      std::string name_a = "a" + static_cast<char>(i * num_buffer + j);
+      operations_research::MPVariable* const a = solver->MakeBoolVar(name_a);
+      operations_research::MPConstraint* const c0 = solver->MakeRowConstraint(-infinity, -align(buffer_intervals[j].first.size));
+      c0->SetCoefficient(addresses[i], -1);
+      c0->SetCoefficient(addresses[j], 1);
+      c0->SetCoefficient(a, -offset_limit);
+      operations_research::MPConstraint* const c1 = solver->MakeRowConstraint(-infinity, offset_limit - align(buffer_intervals[i].first.size));
+      c1->SetCoefficient(addresses[i], 1);
+      c1->SetCoefficient(addresses[j], -1); 
+      c1->SetCoefficient(a, offset_limit);
+    }
+  }
+
+  for (int i = 0; i < num_buffer; i++) {
+    operations_research::MPConstraint* const c = solver->MakeRowConstraint(-infinity, - align(buffer_intervals[i].first.size));
+    c->SetCoefficient(addresses[i], 1); 
+    c->SetCoefficient(peak_memory, -1);
+  }
+
+  VLOG(0) << "solver info: ";
+  VLOG(0) << solver->NumVariables();
+  VLOG(0) << solver->NumConstraints();
+
+  // objective
+  operations_research::MPObjective* const objective = solver->MutableObjective();
+  objective->SetCoefficient(peak_memory, 1);
+  objective->SetMinimization();
+
+  // solve
+  const operations_research::MPSolver::ResultStatus result_status = solver->Solve();
+  if (result_status != operations_research::MPSolver::OPTIMAL) {
+    VLOG(0) << "The problem does not have an optimal solution!";
+  }
+
+  int idx = 0;
+
+  VLOG(0) << objective->Value();
+  for (auto &[buffer_interval, offset] : buffer_intervals) {
+    offset = addresses[idx++]->solution_value();
+    VLOG(0) << "buffer " << idx - 1 << " offset " << offset;
+  }
+  return buffer_intervals;
+}
+
+std::vector<std::pair<GlobalDecreasingSizeBestFitHeap<HloValue>::BufferInterval, int64_t>>
+ConstrainedCPSATAlgo::Solve() {
+  std::vector<std::pair<GlobalDecreasingSizeBestFitHeap<HloValue>::BufferInterval, int64_t>> buffer_intervals;
+  buffer_intervals.reserve(buffer_intervals_.size());
+  for (auto& entry : buffer_intervals_) {
+    buffer_intervals.emplace_back(entry.second, -1);
+  }
+
+  auto num_buffer = buffer_intervals.size();
+  operations_research::sat::CpModelBuilder cp_model;
+  int64_t offset_upper_bound = (static_cast<int64_t>(1) << 50);
+  const operations_research::Domain domain(0, offset_upper_bound);
+
+  std::vector<operations_research::sat::IntVar> offsets(num_buffer);
+  operations_research::sat::IntVar peak_memory = cp_model.NewIntVar(domain).WithName("peak_memory");
+  for (auto &offset : offsets) {
+    offset = cp_model.NewIntVar(domain).WithName("");
+  }
+
+  // the size will be aligned when be put into solver
+  auto align = [](int64_t size) -> int64_t {
+    return (size / 128 + (size % 128 != 0)) * 128;
+  }; // need to use alignment_
+
+  for (int i = 0; i < num_buffer; i++) {
+    for (int j = i + 1; j < num_buffer; j++) {
+      if (!(std::min(buffer_intervals[i].first.end, buffer_intervals[j].first.end) >= std::max(buffer_intervals[i].first.start, buffer_intervals[j].first.start))) {
+        continue;
+      }
+      const operations_research::Domain domain_a(0, 1); 
+      auto a = cp_model.NewIntVar(domain_a).WithName("");
+      cp_model.AddLessOrEqual(offsets[i] - offsets[j] + offset_upper_bound * a, offset_upper_bound - align(buffer_intervals[i].first.size));
+      cp_model.AddLessOrEqual(offsets[j] - offsets[i] - offset_upper_bound * a, -align(buffer_intervals[j].first.size));
+    }
+  }
+
+  for (int i = 0; i < num_buffer; i++) {
+    cp_model.AddLessOrEqual(offsets[i] - peak_memory, -buffer_intervals[i].first.size);
+  }
+  VLOG(0) << "CP solver";
+  cp_model.Minimize(peak_memory);
+  
+  operations_research::sat::Model model;
+  operations_research::sat::SatParameters parameters;
+  auto env = std::getenv("PH_TL");
+  int64_t time_limit =30;
+  if (env != nullptr) {
+    time_limit = std::atol(env);
+  }
+  parameters.set_max_time_in_seconds(time_limit);
+  model.Add(operations_research::sat::NewSatParameters(parameters));
+  const operations_research::sat::CpSolverResponse response = operations_research::sat::SolveCpModel(cp_model.Build(), &model);
+  if (response.status() == operations_research::sat::CpSolverStatus::OPTIMAL || response.status() == operations_research::sat::CpSolverStatus::FEASIBLE) {
+    VLOG(0) << "object is " << response.objective_value();
+  } else {
+    VLOG(0) << "No Solution Found";
+  }
+  for (int i = 0; i < num_buffer; i++) {
+    buffer_intervals[i].second = operations_research::sat::SolutionIntegerValue(response, offsets[i]);
+    VLOG(0) << "buffer " << i << " offset " << buffer_intervals[i].second;
+  }
+  return buffer_intervals;
+}
+
+
+
+
+template class SolverBasedAlgo<HloValue>;
+// template class SolverBasedAlgo<AllocationBlock>;
+
 
 template class GlobalDecreasingSizeBestFitHeap<HloValue>;
 template class GlobalDecreasingSizeBestFitHeap<AllocationBlock>;
