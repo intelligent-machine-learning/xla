@@ -2169,29 +2169,34 @@ cc_library(
     ]),
 )
 
+cuda_library(
+    name = "gpu_flash_attn_helper_kernel",
+    srcs = if_cuda_is_configured(["gpu_flash_attn_helper_kernel.cu.cc"]),
+    hdrs = if_cuda_is_configured(["gpu_flash_attn_helper_kernel.h"]),
+    deps = [
+        "@cutlass_for_flash_attn//:cutlass",
+        "@local_config_cuda//cuda:cuda_headers"
+    ],
+)
+
 cc_library(
     name = "gpu_flash_attn",
-    srcs = if_cuda_is_configured([
-        "gpu_flash_attn.cc"
-    ]),
+    srcs = ["gpu_flash_attn.cc"],
     hdrs = ["gpu_flash_attn.h"],
     deps = [
-        ":stream_executor_util",
-        "//xla:shape_util",
         "//xla:status",
         "//xla:status_macros",
         "//xla:statusor",
-        "//xla:types",
-        "//xla:util",
         "//xla/hlo/ir:hlo",
         "//xla/stream_executor",
-        "//xla/stream_executor:dnn",
         "//xla/stream_executor/gpu:gpu_stream",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
     ] + if_cuda_is_configured([
+        ":gpu_flash_attn_helper_kernel",
         "@flash_attn//:flash_attn",
+        "@cutlass_for_flash_attn//:cutlass",
     ])
 )
 
@@ -2696,14 +2701,13 @@ xla_cc_test(
 )
 
 cc_library(
-    name = "gpu_flash_attn_normalization",
-    srcs = ["gpu_flash_attn_normalization.cc"],
-    hdrs = ["gpu_flash_attn_normalization.h"],
+    name = "gpu_flash_attn_rewriter",
+    srcs = ["gpu_flash_attn_rewriter.cc"],
+    hdrs = ["gpu_flash_attn_rewriter.h"],
     deps = [
         ":backend_configs_cc",
         ":gpu_flash_attn",
         "//xla/hlo/ir:hlo",
-        "//xla:literal_util",
         "//xla/service:hlo_pass",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/status:statusor",
@@ -3480,7 +3484,7 @@ cc_library(
     deps = [
         ":alias_passthrough_params",
         ":copy_fusion",
-        ":gpu_flash_attn_normalization",
+        ":gpu_flash_attn_rewriter",
         ":gpu_sanitize_constant_names",
         ":horizontal_loop_fusion",
         "//xla:xla_proto_cc",

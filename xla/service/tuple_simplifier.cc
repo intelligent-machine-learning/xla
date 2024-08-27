@@ -20,6 +20,7 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/service/gpu/gpu_flash_attn.h"
 
 namespace xla {
 
@@ -45,6 +46,11 @@ absl::StatusOr<bool> TupleSimplifier::RemoveWholeTuple(HloInstruction* tuple) {
     }
   }
   if (top_tuple == nullptr) {
+    return false;
+  }
+  // The layout of FlashAttn may be changed in subsequent rewriter passes, so we
+  // should not simplify this Tuple instruction here
+  if (tuple->IsRoot() && gpu::IsCustomCallToFlashAttn(*top_tuple)) {
     return false;
   }
   TF_ASSIGN_OR_RETURN(bool changed,

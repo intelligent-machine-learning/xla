@@ -331,6 +331,10 @@ HloSharding HloSharding::Subgroup(
   return create_sharding(tile_assignment, subgroup_types, metadata);
 }
 
+HloSharding HloSharding::Tuple(std::vector<HloSharding> shardings) {
+  return HloSharding(std::move(shardings));
+}
+
 HloSharding HloSharding::Tuple(const ShapeTree<HloSharding>& sub_shardings) {
   std::vector<HloSharding> flattened_list;
   flattened_list.reserve(sub_shardings.leaf_count());

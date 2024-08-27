@@ -2,6 +2,10 @@
 
 load("@tsl//tsl/platform:rules_cc.bzl", "cc_library")
 load("//xla:xla.bzl", "xla_cc_test")
+load(
+    "@tsl//tsl/platform/default:cuda_build_defs.bzl",
+    "if_cuda_is_configured",
+)
 
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
@@ -26,13 +30,13 @@ cc_library(
         "gather_scatter_handler.cc",
         "spmd_partitioner.cc",
         "spmd_partitioner_util.cc",
-    ],
+    ] + if_cuda_is_configured(["gpu_flash_attn_handler.cc"]),
     hdrs = [
         "convolution_handler.h",
         "custom_call_handler.h",
         "spmd_partitioner.h",
         "spmd_partitioner_util.h",
-    ],
+    ] + if_cuda_is_configured(["gpu_flash_attn_handler.h"]),
     deps = [
         "//xla:array",
         "//xla:comparison_util",
@@ -86,7 +90,10 @@ cc_library(
         "@tsl//tsl/platform:errors",
         "@tsl//tsl/platform:numbers",
         "@tsl//tsl/platform:statusor",
-    ],
+    ] + if_cuda_is_configured([
+        "//xla/service/gpu:backend_configs_cc",
+        "//xla/service/gpu:gpu_flash_attn",
+    ]),
 )
 
 xla_cc_test(

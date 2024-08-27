@@ -55,17 +55,17 @@ limitations under the License.
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Linker/Linker.h"
-#include "mlir/AsmParser/AsmParser.h"  // from @llvm-project
-#include "mlir/Dialect/LLVMIR/LLVMDialect.h"  // from @llvm-project
+#include "mlir/AsmParser/AsmParser.h"               // from @llvm-project
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"        // from @llvm-project
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"  // from @llvm-project
-#include "mlir/IR/Attributes.h"  // from @llvm-project
-#include "mlir/IR/Builders.h"  // from @llvm-project
-#include "mlir/IR/BuiltinAttributes.h"  // from @llvm-project
-#include "mlir/IR/BuiltinOps.h"  // from @llvm-project
-#include "mlir/IR/BuiltinTypes.h"  // from @llvm-project
-#include "mlir/IR/MLIRContext.h"  // from @llvm-project
-#include "mlir/Parser/Parser.h"  // from @llvm-project
-#include "mlir/Support/LLVM.h"  // from @llvm-project
+#include "mlir/IR/Attributes.h"                     // from @llvm-project
+#include "mlir/IR/Builders.h"                       // from @llvm-project
+#include "mlir/IR/BuiltinAttributes.h"              // from @llvm-project
+#include "mlir/IR/BuiltinOps.h"                     // from @llvm-project
+#include "mlir/IR/BuiltinTypes.h"                   // from @llvm-project
+#include "mlir/IR/MLIRContext.h"                    // from @llvm-project
+#include "mlir/Parser/Parser.h"                     // from @llvm-project
+#include "mlir/Support/LLVM.h"                      // from @llvm-project
 #include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"  // from @llvm-project
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"  // from @llvm-project
 #include "mlir/Target/LLVMIR/Dialect/NVVM/NVVMToLLVMIRTranslation.h"  // from @llvm-project
@@ -1204,19 +1204,23 @@ absl::Status IrEmitterUnnested::EmitFusedMHABackwardThunk(
   return absl::OkStatus();
 }
 
-absl::Status IrEmitterUnnested::EmitFlashAttnFwdThunk(
-    const HloCustomCallInstruction* instr) {
-  int64_t num_operands = instr->operand_count();
-  CHECK(num_operands >= 3);
+static inline int64_t RoundMultiple(int64_t num, int64_t alignment) {
+  return (num + alignment - 1) & (~(alignment - 1));
+}
 
+absl::Status IrEmitterUnnested::EmitFlashAttnForwardThunk(
+    const HloCustomCallInstruction* instr) {
   TF_ASSIGN_OR_RETURN(const auto gpu_config,
                       instr->backend_config<xla::gpu::GpuBackendConfig>());
   const auto& config = gpu_config.flash_attn_backend_config();
 
+  constexpr int64_t min_num_operands = 3;
+  const int64_t num_operands = instr->operand_count();
+  CHECK(num_operands >= min_num_operands);
+
   const HloInstruction* query = instr->operand(0);
   const HloInstruction* key = instr->operand(1);
   const HloInstruction* value = instr->operand(2);
-
   TF_ASSIGN_OR_RETURN(BufferAllocation::Slice query_slice,
                       GetAllocationSliceForHlo(query));
   TF_ASSIGN_OR_RETURN(BufferAllocation::Slice key_slice,
@@ -1224,49 +1228,25 @@ absl::Status IrEmitterUnnested::EmitFlashAttnFwdThunk(
   TF_ASSIGN_OR_RETURN(BufferAllocation::Slice value_slice,
                       GetAllocationSliceForHlo(value));
 
-  int64_t cur_arg_idx = 3;
-
-  BufferAllocation::Slice cu_seqlens_query_slice, cu_seqlens_key_slice;
-  std::optional<Shape> cu_seqlens_query_shape, cu_seqlens_key_shape;
-  std::optional<int> max_seqlen_q, max_seqlen_k;
-  if (instr->custom_call_target() == kGpuFlashAttnVarLenFwdCallTarget) {
-    CHECK(num_operands >= cur_arg_idx + 2);
-    const HloInstruction* cu_seqlens_query = instr->operand(cur_arg_idx++);
-    const HloInstruction* cu_seqlens_key = instr->operand(cur_arg_idx++);
-    TF_ASSIGN_OR_RETURN(cu_seqlens_query_slice,
-                        GetAllocationSliceForHlo(cu_seqlens_query));
-    TF_ASSIGN_OR_RETURN(cu_seqlens_key_slice,
-                        GetAllocationSliceForHlo(cu_seqlens_key));
-    cu_seqlens_query_shape = cu_seqlens_query->shape();
-    cu_seqlens_key_shape = cu_seqlens_key->shape();
-    CHECK(config.has_max_seqlen_q() && config.has_max_seqlen_k());
-    max_seqlen_q = config.max_seqlen_q();
-    max_seqlen_k = config.max_seqlen_k();
-  }
+  int64_t arg_index = min_num_operands;
 
   BufferAllocation::Slice alibi_slopes_slice;
-  std::optional<Shape> alibi_slopes_shape;
+  int64_t alibi_slopes_batch_stride;
   if (config.has_alibi_slopes()) {
-    CHECK(num_operands >= cur_arg_idx + 1);
-    const HloInstruction* alibi_slopes = instr->operand(cur_arg_idx++);
+    CHECK(num_operands == arg_index + 1);
+    const HloInstruction* alibi_slopes = instr->operand(arg_index++);
     TF_ASSIGN_OR_RETURN(alibi_slopes_slice,
                         GetAllocationSliceForHlo(alibi_slopes));
-    alibi_slopes_shape = alibi_slopes->shape();
+    const Shape& alibi_slopes_shape = alibi_slopes->shape();
+    alibi_slopes_batch_stride =
+        alibi_slopes_shape.rank() == 2 ? alibi_slopes_shape.dimensions(1) : 0;
+  } else {
+    CHECK(num_operands == arg_index);
   }
 
-  // These two parameters are inserted by FlashAttnNormalization pass.
-  BufferAllocation::Slice output_accum_slice;
-  BufferAllocation::Slice softmax_lse_accum_slice;
-  if (num_operands == cur_arg_idx + 2) {
-    const HloInstruction* output_accum = instr->operand(cur_arg_idx++);
-    const HloInstruction* softmax_lse_accum = instr->operand(cur_arg_idx++);
-    TF_ASSIGN_OR_RETURN(output_accum_slice,
-                        GetAllocationSliceForHlo(output_accum));
-    TF_ASSIGN_OR_RETURN(softmax_lse_accum_slice,
-                        GetAllocationSliceForHlo(softmax_lse_accum));
-  } else {
-    CHECK(num_operands == cur_arg_idx);
-  }
+  constexpr int64_t min_num_returns = 3;
+  const int64_t num_returns = xla::ShapeUtil::TupleElementCount(instr->shape());
+  CHECK(num_returns >= min_num_returns);
 
   TF_ASSIGN_OR_RETURN(BufferAllocation::Slice output_slice,
                       GetAllocationSliceForHlo(instr, {0}));
@@ -1275,45 +1255,231 @@ absl::Status IrEmitterUnnested::EmitFlashAttnFwdThunk(
   TF_ASSIGN_OR_RETURN(BufferAllocation::Slice rng_state_slice,
                       GetAllocationSliceForHlo(instr, {2}));
 
-  const Shape& output_shape =
-      ShapeUtil::GetTupleElementShape(instr->shape(), 0);
-  const Shape& softmax_lse_shape =
-      ShapeUtil::GetTupleElementShape(instr->shape(), 1);
+  int64_t ret_index = min_num_returns;
 
   BufferAllocation::Slice s_dmask_slice;
-  std::optional<Shape> s_dmask_shape;
+  // flash_attn_forward must have 'return_softmax' attribute.
   CHECK(config.has_return_softmax());
-  bool return_softmax = config.return_softmax();
+  const bool return_softmax = config.return_softmax();
   if (return_softmax) {
-    CHECK(xla::ShapeUtil::TupleElementCount(instr->shape()) == 4);
-    TF_ASSIGN_OR_RETURN(s_dmask_slice, GetAllocationSliceForHlo(instr, {3}));
-    s_dmask_shape = ShapeUtil::GetTupleElementShape(instr->shape(), 3);
+    CHECK(num_returns > ret_index);
+    TF_ASSIGN_OR_RETURN(s_dmask_slice,
+                        GetAllocationSliceForHlo(instr, {ret_index++}));
   }
 
-  TF_ASSIGN_OR_RETURN(
-      FlashAttnFwdConfig flash_attn_fwd_config,
-      FlashAttnFwdConfig::For(
-          query->shape(), key->shape(), value->shape(), cu_seqlens_query_shape,
-          cu_seqlens_key_shape, alibi_slopes_shape, output_shape,
-          softmax_lse_shape, s_dmask_shape, config.dropout_rate(),
-          config.scale(), config.is_causal(), max_seqlen_q, max_seqlen_k));
-  AddThunkToThunkSequence(std::make_unique<FlashAttnFwdThunk>(
-      Thunk::ThunkInfo::WithProfileAnnotation(instr),
-      std::move(flash_attn_fwd_config), query_slice, key_slice, value_slice,
-      cu_seqlens_query_slice, cu_seqlens_key_slice, alibi_slopes_slice,
-      output_accum_slice, softmax_lse_accum_slice, output_slice,
-      softmax_lse_slice, rng_state_slice, s_dmask_slice));
+  int64_t num_splits = 0;
+  const auto& attrs_map = instr->frontend_attributes().map();
+  if (attrs_map.contains("num_splits")) {
+    num_splits = std::stol(attrs_map.at("num_splits"));
+  }
+
+  BufferAllocation::Slice output_accum_slice;
+  BufferAllocation::Slice softmax_lse_accum_slice;
+  if (ret_index + 2 == num_returns) {
+    const Shape& output_accum_shape =
+        ShapeUtil::GetTupleElementShape(instr->shape(), ret_index);
+    CHECK(num_splits == output_accum_shape.dimensions(0));
+    TF_ASSIGN_OR_RETURN(output_accum_slice,
+                        GetAllocationSliceForHlo(instr, {ret_index++}));
+    TF_ASSIGN_OR_RETURN(softmax_lse_accum_slice,
+                        GetAllocationSliceForHlo(instr, {ret_index++}));
+  } else {
+    CHECK(num_splits <= 1);
+    CHECK(ret_index == num_returns);
+  }
+
+  const Shape& query_shape = query->shape();
+  const Shape& key_shape = key->shape();
+  FlashAttnConfig fa_config = {
+      .dtype = query_shape.element_type(),
+      .batch_size = query_shape.dimensions(0),
+      .seqlen_q = query_shape.dimensions(1),
+      .seqlen_k = key_shape.dimensions(1),
+      .num_heads = query_shape.dimensions(2),
+      .num_heads_k = key_shape.dimensions(2),
+      .head_size_og = query_shape.dimensions(3),
+      .head_size = RoundMultiple(query_shape.dimensions(3), 8),
+      .head_size_rounded = RoundMultiple(query_shape.dimensions(3), 32),
+      .alibi_slopes_batch_stride = alibi_slopes_batch_stride,
+      .dropout_p = config.dropout_p(),
+      .softmax_scale = config.softmax_scale(),
+      .causal = config.causal(),
+      .window_size_left = config.window_size_left(),
+      .window_size_right = config.window_size_right(),
+      .return_softmax = return_softmax,
+      .num_splits = num_splits,
+  };
+
+  AddThunkToThunkSequence(std::make_unique<FlashAttnForwardThunk>(
+      Thunk::ThunkInfo::WithProfileAnnotation(instr), std::move(fa_config),
+      query_slice, key_slice, value_slice, alibi_slopes_slice, output_slice,
+      softmax_lse_slice, rng_state_slice, s_dmask_slice, output_accum_slice,
+      softmax_lse_accum_slice));
   return absl::OkStatus();
 }
 
-absl::Status IrEmitterUnnested::EmitFlashAttnBwdThunk(
+absl::Status IrEmitterUnnested::EmitFlashAttnVarlenForwardThunk(
     const HloCustomCallInstruction* instr) {
-  int64_t num_operands = instr->operand_count();
-  CHECK(num_operands >= 7);
-
   TF_ASSIGN_OR_RETURN(const auto gpu_config,
                       instr->backend_config<xla::gpu::GpuBackendConfig>());
   const auto& config = gpu_config.flash_attn_backend_config();
+
+  constexpr int64_t min_num_operands = 4;
+  const int64_t num_operands = instr->operand_count();
+  CHECK(num_operands >= min_num_operands);
+
+  const HloInstruction* query = instr->operand(0);
+  const HloInstruction* key = instr->operand(1);
+  const HloInstruction* value = instr->operand(2);
+  const HloInstruction* key_padding_mask = instr->operand(3);
+
+  const Shape& query_shape = query->shape();
+  const Shape& key_shape = key->shape();
+  const int64_t seqlen_q = query_shape.dimensions(1);
+  const int64_t seqlen_k = key_shape.dimensions(1);
+
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice query_slice,
+                      GetAllocationSliceForHlo(query));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice key_slice,
+                      GetAllocationSliceForHlo(key));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice value_slice,
+                      GetAllocationSliceForHlo(value));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice key_padding_mask_slice,
+                      GetAllocationSliceForHlo(key_padding_mask));
+
+  int64_t arg_index = min_num_operands;
+
+  BufferAllocation::Slice query_padding_mask_slice;
+  CHECK(config.has_has_query_padding_mask());
+  const bool has_query_padding_mask = config.has_query_padding_mask();
+  if (has_query_padding_mask) {
+    CHECK(arg_index < num_operands);
+    const HloInstruction* query_padding_mask = instr->operand(arg_index++);
+    TF_ASSIGN_OR_RETURN(query_padding_mask_slice,
+                        GetAllocationSliceForHlo(query_padding_mask));
+  }
+
+  BufferAllocation::Slice alibi_slopes_slice;
+  int64_t alibi_slopes_batch_stride;
+  if (config.has_alibi_slopes()) {
+    CHECK(num_operands == arg_index + 1);
+    const HloInstruction* alibi_slopes = instr->operand(arg_index++);
+    TF_ASSIGN_OR_RETURN(alibi_slopes_slice,
+                        GetAllocationSliceForHlo(alibi_slopes));
+    const Shape& alibi_slopes_shape = alibi_slopes->shape();
+    alibi_slopes_batch_stride =
+        alibi_slopes_shape.rank() == 2 ? alibi_slopes_shape.dimensions(1) : 0;
+  } else {
+    CHECK(num_operands == arg_index);
+  }
+
+  constexpr int64_t min_num_returns = 10;
+  const int64_t num_returns = xla::ShapeUtil::TupleElementCount(instr->shape());
+  CHECK(num_returns >= min_num_returns);
+
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice output_slice,
+                      GetAllocationSliceForHlo(instr, {0}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice query_unpad_slice,
+                      GetAllocationSliceForHlo(instr, {1}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice key_unpad_slice,
+                      GetAllocationSliceForHlo(instr, {2}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice value_unpad_slice,
+                      GetAllocationSliceForHlo(instr, {3}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice output_unpad_slice,
+                      GetAllocationSliceForHlo(instr, {4}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice softmax_lse_slice,
+                      GetAllocationSliceForHlo(instr, {5}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice indices_k_slice,
+                      GetAllocationSliceForHlo(instr, {6}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice indices_len_k_slice,
+                      GetAllocationSliceForHlo(instr, {7}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice batch_seqlens_k_slice,
+                      GetAllocationSliceForHlo(instr, {8}));
+
+  int64_t ret_index = 9;
+
+  BufferAllocation::Slice indices_q_slice, indices_len_q_slice,
+      batch_seqlens_q_slice;
+  if (has_query_padding_mask) {
+    CHECK(ret_index + 3 <= num_returns);
+    TF_ASSIGN_OR_RETURN(indices_q_slice,
+                        GetAllocationSliceForHlo(instr, {ret_index++}));
+    TF_ASSIGN_OR_RETURN(indices_len_q_slice,
+                        GetAllocationSliceForHlo(instr, {ret_index++}));
+    TF_ASSIGN_OR_RETURN(batch_seqlens_q_slice,
+                        GetAllocationSliceForHlo(instr, {ret_index++}));
+  }
+
+  CHECK(ret_index < num_returns);
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice rng_state_slice,
+                      GetAllocationSliceForHlo(instr, {ret_index++}));
+
+  BufferAllocation::Slice s_dmask_slice;
+  CHECK(config.has_return_softmax());
+  const bool return_softmax = config.return_softmax();
+  if (return_softmax) {
+    CHECK(ret_index < num_returns);
+    TF_ASSIGN_OR_RETURN(s_dmask_slice,
+                        GetAllocationSliceForHlo(instr, {ret_index++}));
+  }
+
+  CHECK(ret_index + 2 <= num_returns);
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice cu_seqlens_k_slice,
+                      GetAllocationSliceForHlo(instr, {ret_index++}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice max_seqlen_k_slice,
+                      GetAllocationSliceForHlo(instr, {ret_index++}));
+  BufferAllocation::Slice cu_seqlens_q_slice, max_seqlen_q_slice;
+  if (has_query_padding_mask) {
+    CHECK(ret_index + 2 == num_returns);
+    TF_ASSIGN_OR_RETURN(cu_seqlens_q_slice,
+                        GetAllocationSliceForHlo(instr, {ret_index++}));
+    TF_ASSIGN_OR_RETURN(max_seqlen_q_slice,
+                        GetAllocationSliceForHlo(instr, {ret_index++}));
+  } else {
+    CHECK(ret_index == num_returns);
+  }
+
+  FlashAttnConfig fa_config = {
+      .dtype = query_shape.element_type(),
+      .batch_size = query_shape.dimensions(0),
+      .seqlen_q = seqlen_q,
+      .seqlen_k = seqlen_k,
+      .num_heads = query_shape.dimensions(2),
+      .num_heads_k = key_shape.dimensions(2),
+      .head_size_og = query_shape.dimensions(3),
+      .head_size = RoundMultiple(query_shape.dimensions(3), 8),
+      .head_size_rounded = RoundMultiple(query_shape.dimensions(3), 32),
+      .alibi_slopes_batch_stride = alibi_slopes_batch_stride,
+      .dropout_p = config.dropout_p(),
+      .softmax_scale = config.softmax_scale(),
+      .causal = config.causal(),
+      .window_size_left = config.window_size_left(),
+      .window_size_right = config.window_size_right(),
+      .has_query_padding_mask = has_query_padding_mask,
+      .return_softmax = return_softmax,
+  };
+
+  AddThunkToThunkSequence(std::make_unique<FlashAttnVarlenForwardThunk>(
+      Thunk::ThunkInfo::WithProfileAnnotation(instr), std::move(fa_config),
+      query_slice, key_slice, value_slice, key_padding_mask_slice,
+      query_padding_mask_slice, alibi_slopes_slice, output_slice,
+      query_unpad_slice, key_unpad_slice, value_unpad_slice, output_unpad_slice,
+      softmax_lse_slice, indices_k_slice, indices_len_k_slice,
+      batch_seqlens_k_slice, indices_q_slice, indices_len_q_slice,
+      batch_seqlens_q_slice, rng_state_slice, s_dmask_slice, cu_seqlens_k_slice,
+      max_seqlen_k_slice, cu_seqlens_q_slice, max_seqlen_q_slice));
+  return absl::OkStatus();
+}
+
+absl::Status IrEmitterUnnested::EmitFlashAttnBackwardThunk(
+    const HloCustomCallInstruction* instr) {
+  TF_ASSIGN_OR_RETURN(const auto gpu_config,
+                      instr->backend_config<xla::gpu::GpuBackendConfig>());
+  const auto& config = gpu_config.flash_attn_backend_config();
+
+  constexpr int64_t min_num_operands = 7;
+  const int64_t num_operands = instr->operand_count();
+  CHECK(num_operands >= min_num_operands);
 
   const HloInstruction* grad_output = instr->operand(0);
   const HloInstruction* query = instr->operand(1);
@@ -1322,7 +1488,6 @@ absl::Status IrEmitterUnnested::EmitFlashAttnBwdThunk(
   const HloInstruction* output = instr->operand(4);
   const HloInstruction* softmax_lse = instr->operand(5);
   const HloInstruction* rng_state = instr->operand(6);
-
   TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_output_slice,
                       GetAllocationSliceForHlo(grad_output));
   TF_ASSIGN_OR_RETURN(BufferAllocation::Slice query_slice,
@@ -1338,41 +1503,24 @@ absl::Status IrEmitterUnnested::EmitFlashAttnBwdThunk(
   TF_ASSIGN_OR_RETURN(BufferAllocation::Slice rng_state_slice,
                       GetAllocationSliceForHlo(rng_state));
 
-  int64_t cur_arg_idx = 7;
-
-  BufferAllocation::Slice cu_seqlens_query_slice, cu_seqlens_key_slice;
-  std::optional<Shape> cu_seqlens_query_shape, cu_seqlens_key_shape;
-  std::optional<int> max_seqlen_q, max_seqlen_k;
-  if (instr->custom_call_target() == kGpuFlashAttnVarLenBwdCallTarget) {
-    CHECK(num_operands >= cur_arg_idx + 2);
-    const HloInstruction* cu_seqlens_query = instr->operand(cur_arg_idx++);
-    const HloInstruction* cu_seqlens_key = instr->operand(cur_arg_idx++);
-    TF_ASSIGN_OR_RETURN(cu_seqlens_query_slice,
-                        GetAllocationSliceForHlo(cu_seqlens_query));
-    TF_ASSIGN_OR_RETURN(cu_seqlens_key_slice,
-                        GetAllocationSliceForHlo(cu_seqlens_key));
-    cu_seqlens_query_shape = cu_seqlens_query->shape();
-    cu_seqlens_key_shape = cu_seqlens_key->shape();
-    CHECK(config.has_max_seqlen_q() && config.has_max_seqlen_k());
-    max_seqlen_q = config.max_seqlen_q();
-    max_seqlen_k = config.max_seqlen_k();
-  }
+  int64_t arg_index = min_num_operands;
 
   BufferAllocation::Slice alibi_slopes_slice;
-  std::optional<Shape> alibi_slopes_shape;
+  int64_t alibi_slopes_batch_stride;
   if (config.has_alibi_slopes()) {
-    CHECK(num_operands >= cur_arg_idx + 1);
-    const HloInstruction* alibi_slopes = instr->operand(cur_arg_idx++);
+    CHECK(num_operands == arg_index + 1);
+    const HloInstruction* alibi_slopes = instr->operand(arg_index++);
     TF_ASSIGN_OR_RETURN(alibi_slopes_slice,
                         GetAllocationSliceForHlo(alibi_slopes));
-    alibi_slopes_shape = alibi_slopes->shape();
+    const Shape& alibi_slopes_shape = alibi_slopes->shape();
+    alibi_slopes_batch_stride =
+        alibi_slopes_shape.rank() == 2 ? alibi_slopes_shape.dimensions(1) : 0;
+  } else {
+    CHECK(num_operands == arg_index);
   }
 
-  CHECK(num_operands == cur_arg_idx + 1);
-  // This parameter is inserted by FlashAttnNormalization pass.
-  const HloInstruction* grad_query_accum = instr->operand(cur_arg_idx++);
-  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_query_accum_slice,
-                      GetAllocationSliceForHlo(grad_query_accum));
+  constexpr int64_t min_num_returns = 5;
+  const int64_t num_returns = xla::ShapeUtil::TupleElementCount(instr->shape());
 
   TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_query_slice,
                       GetAllocationSliceForHlo(instr, {0}));
@@ -1382,32 +1530,229 @@ absl::Status IrEmitterUnnested::EmitFlashAttnBwdThunk(
                       GetAllocationSliceForHlo(instr, {2}));
   TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_softmax_slice,
                       GetAllocationSliceForHlo(instr, {3}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_query_accum_slice,
+                      GetAllocationSliceForHlo(instr, {4}));
 
-  const Shape& grad_query_shape =
-      ShapeUtil::GetTupleElementShape(instr->shape(), 0);
-  const Shape& grad_key_shape =
-      ShapeUtil::GetTupleElementShape(instr->shape(), 1);
-  const Shape& grad_value_shape =
-      ShapeUtil::GetTupleElementShape(instr->shape(), 2);
-  const Shape& grad_softmax_shape =
-      ShapeUtil::GetTupleElementShape(instr->shape(), 3);
+  int64_t ret_index = min_num_returns;
 
-  TF_ASSIGN_OR_RETURN(
-      FlashAttnBwdConfig flash_attn_bwd_config,
-      FlashAttnBwdConfig::For(
-          grad_output->shape(), query->shape(), key->shape(), value->shape(),
-          output->shape(), softmax_lse->shape(), cu_seqlens_query_shape,
-          cu_seqlens_key_shape, alibi_slopes_shape, grad_query_shape,
-          grad_key_shape, grad_value_shape, grad_softmax_shape,
-          config.dropout_rate(), config.scale(), config.is_causal(),
-          config.deterministic(), max_seqlen_q, max_seqlen_k));
-  AddThunkToThunkSequence(std::make_unique<FlashAttnBwdThunk>(
-      Thunk::ThunkInfo::WithProfileAnnotation(instr),
-      std::move(flash_attn_bwd_config), grad_output_slice, query_slice,
-      key_slice, value_slice, output_slice, softmax_lse_slice, rng_state_slice,
-      cu_seqlens_query_slice, cu_seqlens_key_slice, alibi_slopes_slice,
-      grad_query_accum_slice, grad_query_slice, grad_key_slice,
-      grad_value_slice, grad_softmax_slice));
+  const Shape& query_shape = query->shape();
+  const Shape& key_shape = key->shape();
+  const int64_t num_heads = query_shape.dimensions(2);
+  const int64_t num_heads_k = key_shape.dimensions(2);
+  BufferAllocation::Slice grad_key_expanded_slice, grad_value_expanded_slice;
+  if (num_heads != num_heads_k) {
+    CHECK(ret_index + 2 == num_returns);
+    TF_ASSIGN_OR_RETURN(grad_key_expanded_slice,
+                        GetAllocationSliceForHlo(instr, {ret_index++}));
+    TF_ASSIGN_OR_RETURN(grad_value_expanded_slice,
+                        GetAllocationSliceForHlo(instr, {ret_index++}));
+  } else {
+    CHECK(ret_index == num_returns);
+  }
+
+  const bool deterministic = config.deterministic();
+  int64_t dq_accum_split_stride = 0;
+  if (deterministic) {
+    const Shape& grad_query_accum_shape =
+        ShapeUtil::GetTupleElementShape(instr->shape(), {4});
+    CHECK(grad_query_accum_shape.rank() == 5);
+    dq_accum_split_stride = grad_query_accum_shape.dimensions(1) *
+                            grad_query_accum_shape.dimensions(2) *
+                            grad_query_accum_shape.dimensions(3) *
+                            grad_query_accum_shape.dimensions(4);
+  }
+  FlashAttnConfig fa_config = {
+      .dtype = query_shape.element_type(),
+      .batch_size = query_shape.dimensions(0),
+      .seqlen_q = query_shape.dimensions(1),
+      .seqlen_k = key_shape.dimensions(1),
+      .num_heads = num_heads,
+      .num_heads_k = num_heads_k,
+      .head_size_og = query_shape.dimensions(3),
+      .head_size = RoundMultiple(query_shape.dimensions(3), 8),
+      .head_size_rounded = RoundMultiple(query_shape.dimensions(3), 32),
+      .alibi_slopes_batch_stride = alibi_slopes_batch_stride,
+      .dropout_p = config.dropout_p(),
+      .softmax_scale = config.softmax_scale(),
+      .causal = config.causal(),
+      .window_size_left = config.window_size_left(),
+      .window_size_right = config.window_size_right(),
+      .deterministic = deterministic,
+      .dq_accum_split_stride = dq_accum_split_stride,
+  };
+
+  AddThunkToThunkSequence(std::make_unique<FlashAttnBackwardThunk>(
+      Thunk::ThunkInfo::WithProfileAnnotation(instr), std::move(fa_config),
+      grad_output_slice, query_slice, key_slice, value_slice, output_slice,
+      softmax_lse_slice, rng_state_slice, alibi_slopes_slice, grad_query_slice,
+      grad_key_slice, grad_value_slice, grad_softmax_slice,
+      grad_query_accum_slice, grad_key_expanded_slice,
+      grad_value_expanded_slice));
+  return absl::OkStatus();
+}
+
+absl::Status IrEmitterUnnested::EmitFlashAttnVarlenBackwardThunk(
+    const HloCustomCallInstruction* instr) {
+  TF_ASSIGN_OR_RETURN(const auto gpu_config,
+                      instr->backend_config<xla::gpu::GpuBackendConfig>());
+  const auto& config = gpu_config.flash_attn_backend_config();
+
+  constexpr int64_t min_num_operands = 10;
+  int64_t num_operands = instr->operand_count();
+  CHECK(num_operands >= min_num_operands);
+
+  const HloInstruction* grad_output = instr->operand(0);
+  const HloInstruction* query_unpad = instr->operand(1);
+  const HloInstruction* key_unpad = instr->operand(2);
+  const HloInstruction* value_unpad = instr->operand(3);
+  const HloInstruction* output_unpad = instr->operand(4);
+  const HloInstruction* softmax_lse = instr->operand(5);
+  const HloInstruction* indices_k = instr->operand(6);
+  const HloInstruction* indices_len_k = instr->operand(7);
+  const HloInstruction* batch_seqlens_k = instr->operand(8);
+
+  const Shape& query_shape = query_unpad->shape();
+  const Shape& key_shape = key_unpad->shape();
+  const int64_t seqlen_q = query_shape.dimensions(1);
+  const int64_t seqlen_k = key_shape.dimensions(1);
+
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_output_slice,
+                      GetAllocationSliceForHlo(grad_output));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice query_unpad_slice,
+                      GetAllocationSliceForHlo(query_unpad));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice key_unpad_slice,
+                      GetAllocationSliceForHlo(key_unpad));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice value_unpad_slice,
+                      GetAllocationSliceForHlo(value_unpad));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice output_unpad_slice,
+                      GetAllocationSliceForHlo(output_unpad));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice softmax_lse_slice,
+                      GetAllocationSliceForHlo(softmax_lse));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice indices_k_slice,
+                      GetAllocationSliceForHlo(indices_k));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice indices_len_k_slice,
+                      GetAllocationSliceForHlo(indices_len_k));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice batch_seqlens_k_slice,
+                      GetAllocationSliceForHlo(batch_seqlens_k));
+
+  int64_t arg_index = 9;
+
+  BufferAllocation::Slice indices_q_slice, indices_len_q_slice,
+      batch_seqlens_q_slice;
+  CHECK(config.has_has_query_padding_mask());
+  const bool has_query_padding_mask = config.has_query_padding_mask();
+  if (has_query_padding_mask) {
+    CHECK(arg_index + 3 <= num_operands);
+    const HloInstruction* indices_q = instr->operand(arg_index++);
+    const HloInstruction* indices_len_q = instr->operand(arg_index++);
+    const HloInstruction* batch_seqlens_q = instr->operand(arg_index++);
+    TF_ASSIGN_OR_RETURN(indices_q_slice, GetAllocationSliceForHlo(indices_q));
+    TF_ASSIGN_OR_RETURN(indices_len_q_slice,
+                        GetAllocationSliceForHlo(indices_len_q));
+    TF_ASSIGN_OR_RETURN(batch_seqlens_q_slice,
+                        GetAllocationSliceForHlo(batch_seqlens_q));
+  }
+
+  CHECK(arg_index < num_operands);
+  const HloInstruction* rng_state = instr->operand(arg_index++);
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice rng_state_slice,
+                      GetAllocationSliceForHlo(rng_state));
+
+  BufferAllocation::Slice alibi_slopes_slice;
+  int64_t alibi_slopes_batch_stride;
+  if (config.has_alibi_slopes()) {
+    CHECK(num_operands == arg_index + 1);
+    const HloInstruction* alibi_slopes = instr->operand(arg_index++);
+    TF_ASSIGN_OR_RETURN(alibi_slopes_slice,
+                        GetAllocationSliceForHlo(alibi_slopes));
+    const Shape& alibi_slopes_shape = alibi_slopes->shape();
+    alibi_slopes_batch_stride =
+        alibi_slopes_shape.rank() == 2 ? alibi_slopes_shape.dimensions(1) : 0;
+  } else {
+    CHECK(num_operands == arg_index);
+  }
+
+  const int64_t min_num_returns = has_query_padding_mask ? 13 : 11;
+  int64_t num_returns = xla::ShapeUtil::TupleElementCount(instr->shape());
+  CHECK(num_returns >= min_num_returns);
+
+  int64_t ret_index = 0;
+
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_query_slice,
+                      GetAllocationSliceForHlo(instr, {ret_index++}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_key_slice,
+                      GetAllocationSliceForHlo(instr, {ret_index++}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_value_slice,
+                      GetAllocationSliceForHlo(instr, {ret_index++}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_softmax_slice,
+                      GetAllocationSliceForHlo(instr, {ret_index++}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice cu_seqlens_k_slice,
+                      GetAllocationSliceForHlo(instr, {ret_index++}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice max_seqlen_k_slice,
+                      GetAllocationSliceForHlo(instr, {ret_index++}));
+  BufferAllocation::Slice cu_seqlens_q_slice, max_seqlen_q_slice;
+  if (has_query_padding_mask) {
+    TF_ASSIGN_OR_RETURN(cu_seqlens_q_slice,
+                        GetAllocationSliceForHlo(instr, {ret_index++}));
+    TF_ASSIGN_OR_RETURN(max_seqlen_q_slice,
+                        GetAllocationSliceForHlo(instr, {ret_index++}));
+  }
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_query_unpad_slice,
+                      GetAllocationSliceForHlo(instr, {ret_index++}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_key_unpad_slice,
+                      GetAllocationSliceForHlo(instr, {ret_index++}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_value_unpad_slice,
+                      GetAllocationSliceForHlo(instr, {ret_index++}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_output_unpad_slice,
+                      GetAllocationSliceForHlo(instr, {ret_index++}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice grad_query_accum_slice,
+                      GetAllocationSliceForHlo(instr, {ret_index++}));
+
+  const int64_t num_heads = query_shape.dimensions(2);
+  const int64_t num_heads_k = key_shape.dimensions(2);
+  BufferAllocation::Slice grad_key_expanded_slice, grad_value_expanded_slice;
+  if (num_heads != num_heads_k) {
+    CHECK(ret_index + 2 == num_returns);
+    TF_ASSIGN_OR_RETURN(grad_key_expanded_slice,
+                        GetAllocationSliceForHlo(instr, {ret_index++}));
+    TF_ASSIGN_OR_RETURN(grad_value_expanded_slice,
+                        GetAllocationSliceForHlo(instr, {ret_index++}));
+  } else {
+    CHECK(ret_index == num_returns);
+  }
+
+  FlashAttnConfig fa_config = {
+      .dtype = query_shape.element_type(),
+      .batch_size = query_shape.dimensions(0),
+      .seqlen_q = seqlen_q,
+      .seqlen_k = seqlen_k,
+      .num_heads = num_heads,
+      .num_heads_k = num_heads_k,
+      .head_size_og = query_shape.dimensions(3),
+      .head_size = RoundMultiple(query_shape.dimensions(3), 8),
+      .head_size_rounded = RoundMultiple(query_shape.dimensions(3), 32),
+      .alibi_slopes_batch_stride = alibi_slopes_batch_stride,
+      .dropout_p = config.dropout_p(),
+      .softmax_scale = config.softmax_scale(),
+      .causal = config.causal(),
+      .window_size_left = config.window_size_left(),
+      .window_size_right = config.window_size_right(),
+      .has_query_padding_mask = has_query_padding_mask,
+      .deterministic = config.deterministic(),
+  };
+
+  AddThunkToThunkSequence(std::make_unique<FlashAttnVarlenBackwardThunk>(
+      Thunk::ThunkInfo::WithProfileAnnotation(instr), std::move(fa_config),
+      grad_output_slice, query_unpad_slice, key_unpad_slice, value_unpad_slice,
+      output_unpad_slice, softmax_lse_slice, indices_k_slice,
+      indices_len_k_slice, batch_seqlens_k_slice, indices_q_slice,
+      indices_len_q_slice, batch_seqlens_q_slice, rng_state_slice,
+      alibi_slopes_slice, grad_query_slice, grad_key_slice, grad_value_slice,
+      grad_softmax_slice, cu_seqlens_k_slice, max_seqlen_k_slice,
+      cu_seqlens_q_slice, max_seqlen_q_slice, grad_query_unpad_slice,
+      grad_key_unpad_slice, grad_value_unpad_slice, grad_output_unpad_slice,
+      grad_query_accum_slice, grad_key_expanded_slice,
+      grad_value_expanded_slice));
   return absl::OkStatus();
 }
 
@@ -3105,11 +3450,17 @@ absl::Status IrEmitterUnnested::EmitHloInstruction(
       if (IsBwdCustomCallTofMHA(*instr)) {
         return EmitFusedMHABackwardThunk(custom_call);
       }
-      if (IsFwdCustomCallToFlashAttn(*instr)) {
-        return EmitFlashAttnFwdThunk(custom_call);
+      if (IsCustomCallToFlashAttnForward(*instr)) {
+        return EmitFlashAttnForwardThunk(custom_call);
       }
-      if (IsBwdCustomCallToFlashAttn(*instr)) {
-        return EmitFlashAttnBwdThunk(custom_call);
+      if (IsCustomCallToFlashAttnVarlenForward(*instr)) {
+        return EmitFlashAttnVarlenForwardThunk(custom_call);
+      }
+      if (IsCustomCallToFlashAttnBackward(*instr)) {
+        return EmitFlashAttnBackwardThunk(custom_call);
+      }
+      if (IsCustomCallToFlashAttnVarlenBackward(*instr)) {
+        return EmitFlashAttnVarlenBackwardThunk(custom_call);
       }
 #endif  // GOOGLE_CUDA
       if (IsCustomCallToTopK(*instr)) {

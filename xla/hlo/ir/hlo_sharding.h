@@ -128,6 +128,9 @@ class HloSharding {
   static HloSharding Tile1D(const Shape& input_shape, int64_t num_tiles,
                             absl::Span<const OpMetadata> metadata = {});
 
+  // Creates a new sharding for a tuple type.
+  static HloSharding Tuple(std::vector<HloSharding> shardings);
+
   // Creates a new sharding for a tuple type. The given ShapeTree must have
   // elements for every leaf shape contained in the tuple.
   static HloSharding Tuple(const ShapeTree<HloSharding>& sub_shardings);

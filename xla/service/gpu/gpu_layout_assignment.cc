@@ -257,11 +257,13 @@ absl::Status GpuLayoutAssignment::AddBackendConstraintsToFlashAttnCustomCall(
     HloCustomCallInstruction* instr, LayoutConstraints* constraints) {
   // Make sure flash attn's operands and output are all contiguous
   for (int64_t i = 0; i < instr->operand_count(); ++i) {
-    Shape op_shape = instr->operand(i)->shape();
-    LayoutUtil::SetToDefaultLayout(&op_shape);
-    TF_RETURN_IF_ERROR(SetOperandLayout(op_shape, instr, i));
+    Shape operand_shape = instr->operand(i)->shape();
+    LayoutUtil::SetToDefaultLayout(&operand_shape);
+    TF_RETURN_IF_ERROR(SetOperandLayout(operand_shape, instr, i));
   }
-  TF_RETURN_IF_ERROR(SetInstructionLayout(instr->shape(), instr));
+  Shape shape = instr->shape();
+  LayoutUtil::SetToDefaultLayout(&shape);
+  TF_RETURN_IF_ERROR(SetInstructionLayout(shape, instr));
   return absl::OkStatus();
 }
 

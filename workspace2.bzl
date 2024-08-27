@@ -111,13 +111,13 @@ def _tf_repositories():
         strip_prefix = "pybind11_protobuf-80f3440cd8fee124e077e2e47a8a17b78b451363",
     )
 
-    # v3.4.1
+    # v3.5.0
     tf_http_archive(
         name = "cutlass_for_flash_attn",
         build_file = "//third_party:cutlass.BUILD",
-        sha256 = "9fa1da6be3d2d9207b801d5768cbced59c202444a8c84b82325b0670f47f9d48",
-        strip_prefix = "cutlass-bbe579a9e3beb6ea6626d9227ec32d0dae119a49",
-        urls = tf_mirror_urls("https://github.com/NVIDIA/cutlass/archive/bbe579a9e3beb6ea6626d9227ec32d0dae119a49.tar.gz"),
+        sha256 = "851966176ee88d71e060ba7d11c2f5ecbe826d169dadb20303078b12b21e7195",
+        strip_prefix = "cutlass-7d49e6c7e2f8896c47f586706e67e1fb215529dc",
+        urls = tf_mirror_urls("https://github.com/NVIDIA/cutlass/archive/7d49e6c7e2f8896c47f586706e67e1fb215529dc.tar.gz"),
     )
 
 # buildifier: disable=function-docstring

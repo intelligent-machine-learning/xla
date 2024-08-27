@@ -1,5 +1,4 @@
-
-/* Copyright 2019 The OpenXLA Authors.
+/* Copyright 2024 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,8 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef XLA_SERVICE_GPU_GPU_FLASH_ATTN_NORMALIZATION_H_
-#define XLA_SERVICE_GPU_GPU_FLASH_ATTN_NORMALIZATION_H_
+#ifndef XLA_SERVICE_GPU_GPU_FLASH_ATTN_REWRITER_H_
+#define XLA_SERVICE_GPU_GPU_FLASH_ATTN_REWRITER_H_
 
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/statusor.h"
@@ -28,12 +27,12 @@ limitations under the License.
 namespace xla {
 namespace gpu {
 
-class GpuFlashAttnNormalization : public HloModulePass {
+class GpuFlashAttnRewriter : public HloModulePass {
  public:
-  GpuFlashAttnNormalization() = default;
+  GpuFlashAttnRewriter() = default;
 
   absl::string_view name() const override {
-    return "gpu_flash_attn_normalization";
+    return "gpu_flash_attn_rewriter";
   }
 
   using HloPassInterface::Run;
@@ -42,10 +41,10 @@ class GpuFlashAttnNormalization : public HloModulePass {
       const absl::flat_hash_set<absl::string_view>& execution_threads) override;
 
  private:
-  static absl::StatusOr<bool> RunOnFwdFlashAttn(HloComputation* computation,
+  static absl::StatusOr<bool> RunOnFlashAttnForward(HloComputation* computation,
                                                 HloInstruction* instr,
                                                 bool is_varlen);
-  static absl::StatusOr<bool> RunOnBwdFlashAttn(HloComputation* computation,
+  static absl::StatusOr<bool> RunOnFlashAttnBackward(HloComputation* computation,
                                                 HloInstruction* instr,
                                                 bool is_varlen);
 };
@@ -53,4 +52,4 @@ class GpuFlashAttnNormalization : public HloModulePass {
 }  // namespace gpu
 }  // namespace xla
 
-#endif  // XLA_SERVICE_GPU_GPU_FLASH_ATTN_NORMALIZATION_H_
+#endif  // XLA_SERVICE_GPU_GPU_FLASH_ATTN_REWRITER_H_

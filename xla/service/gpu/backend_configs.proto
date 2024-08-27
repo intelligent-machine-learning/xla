@@ -231,25 +231,26 @@ message CudnnfMHABackendConfig {
 }
 
 message FlashAttnBackendConfig {
-  float dropout_rate = 2;
-
-  float scale = 3;
-
-  bool is_causal = 4;
-
-  bool deterministic = 5;
-
   // Whether there is 'alibi_slopes' in the input arguments
-  bool has_alibi_slopes = 6;
+  bool has_alibi_slopes = 1;
 
-  // Max sequence length of query in variable-length flash-attention
-  optional int32 max_seqlen_q = 7;
+  float dropout_p = 2;
 
-  // Max sequence length of key in variable-length flash-attention
-  optional int32 max_seqlen_k = 8;
+  float softmax_scale = 3;
+
+  bool causal = 4;
+
+  int32 window_size_left = 5;
+
+  int32 window_size_right = 6;
+
+  bool deterministic = 7;
+
+  // Whether to use query padding mask in forward varlen flash-attention
+  optional bool has_query_padding_mask = 8;
 
   // Whether to return softmax in forward flash-attention
-  optional bool return_softmax = 9; 
+  optional bool return_softmax = 9;
 }
 
 // Generic backend config for XLA:GPU

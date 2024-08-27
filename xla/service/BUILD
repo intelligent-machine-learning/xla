@@ -3577,6 +3577,7 @@ cc_library(
     deps = [
         ":hlo_pass",
         "//xla/hlo/ir:hlo",
+        "//xla/service/gpu:gpu_flash_attn",
     ],
 )
 
