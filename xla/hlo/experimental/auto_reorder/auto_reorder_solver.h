@@ -21,7 +21,7 @@
 #include "tsl/platform/human_readable_json.h"
 #include "tsl/platform/subprocess.h"
 #include "absl/status/status.h"
-#include "xla/service/latency_hiding_scheduler.h"
+
 #include "xla/hlo/experimental/auto_reorder/instr_profile_info.pb.h"
 #include "tools/cpp/runfiles/runfiles.h"
 
@@ -130,7 +130,7 @@ class LPContainer {
   const std::string GetName() const { return inner_element_->ToShortString(); }
   const int UUID() { return inner_element_->unique_id(); }
 
-  CostType GetCost() const { return std::max(cost_, static_cast<CostType>(1)); }
+  CostType GetCost() const { return cost_; }
   void SetStart(CostType start) { startat_ = start; }
   CostType GetStart() { return startat_; }
   // speed up reorder, we can set a hint start time
@@ -280,7 +280,7 @@ class LinearProgramScheduler {
   Status AddConstraint(ContainerType* node);
   // solve the LP problem
   // Status Solve();
-  Status Solve(SolveMethod solve_method, HloCostAnalysis::ShapeSizeFunction shape_size_bytes, const HloAliasAnalysis* alias_analysis, const BufferInfoTracker& buffer_info_tracker, const MemoryPressureTracker::MemoryPressureState& memory_pressure_state);
+  Status Solve(SolveMethod solve_method);
   // find instruction,if not exist, return error
   StatusOr<ContainerType*> FindInstructionLPNode(ElementType instruction);
   // find LPNode by instruction,if not exist,create it
@@ -303,7 +303,7 @@ class LinearProgramScheduler {
   StatusOr<TaskType> AddNodeToTask(ContainerType* node);
   Status MergeGraph();
  private:
-  Status SolveUsingORTools(HloCostAnalysis::ShapeSizeFunction shape_size_bytes, const HloAliasAnalysis* alias_analysis, const BufferInfoTracker& buffer_info_tracker, const MemoryPressureTracker::MemoryPressureState& memory_pressure_state);
+  Status SolveUsingORTools();
   Status SolveUsingAntOPT(SolveMethod solve_method);
   StatusOr<bool> AddEdgesNoOverlap(ContainerType* node);
   CpModelBuilder cp_model_;

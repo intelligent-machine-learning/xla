@@ -36,7 +36,6 @@ cc_library(
     srcs = ["heap_simulator.cc"],
     hdrs = ["heap_simulator.h"],
     deps = [
-        "//xla/hlo/utils:common_ortools_deps",
         ":allocation_block",
         "//xla:comparison_util",
         "//xla:status",
