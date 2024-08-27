@@ -252,14 +252,14 @@ LPSchedulerFunc(tsl::Status)::SolveUsingAntOPT(SolveMethod solve_method) {
   }
   return OkStatus();
 }
-LPSchedulerFunc(tsl::Status)::Solve(SolveMethod solve_method) {
+LPSchedulerFunc(tsl::Status)::Solve(SolveMethod solve_method, HloCostAnalysis::ShapeSizeFunction shape_size_bytes, const HloAliasAnalysis* alias_analysis, const BufferInfoTracker& buffer_info_tracker, const MemoryPressureTracker::MemoryPressureState& memory_pressure_state) {
   if (solve_method == SolveMethod::kORTools) {
-    return SolveUsingORTools();
+    return SolveUsingORTools(shape_size_bytes, alias_analysis, buffer_info_tracker, memory_pressure_state);
   } else {
     return SolveUsingAntOPT(solve_method);
   }
 }
-LPSchedulerFunc(tsl::Status)::SolveUsingORTools() {
+LPSchedulerFunc(tsl::Status)::SolveUsingORTools(HloCostAnalysis::ShapeSizeFunction shape_size_bytes, const HloAliasAnalysis* alias_analysis, const BufferInfoTracker& buffer_info_tracker, const MemoryPressureTracker::MemoryPressureState& memory_pressure_state) {
   uint32_t max_execution_time = 0;
   for (auto node : nodes_) {
     node->Freeze();
@@ -270,6 +270,7 @@ LPSchedulerFunc(tsl::Status)::SolveUsingORTools() {
     };
   }
   SetHorizon(reorder::get_horizon(max_execution_time));
+  VLOG(0) << "horizon:" << horizon_;
   // nodes_ is added by post order,so we should add it before its deps;
   for (auto node : nodes_) {
     VLOG(3) << "Add to scheduler" << node->GetName();
@@ -295,6 +296,9 @@ LPSchedulerFunc(tsl::Status)::SolveUsingORTools() {
        it != channel_to_intervals_.end(); it++) {
     cp_model_.AddNoOverlap(it->second);
   }
+  
+  std::vector<operations_research::sat::IntVar> need_diff;
+  need_diff.reserve(nodes_.size() * 2);
   // for communicate stream, edge also should no overlap
   std::map<NodeType, std::vector<IntervalVar>> no_overlap_edges;
   // std::vector<IntervalVar> no_overlap_edges;
@@ -323,15 +327,179 @@ LPSchedulerFunc(tsl::Status)::SolveUsingORTools() {
       cp_model_.AddNoOverlap(it->second);
     }
   }
+  
+  operations_research::sat::IntVar obj_mem;
+  int64_t sum_size = 0;
+  int64_t param_size = 0;
+  absl::flat_hash_map<const HloBuffer::Id, std::tuple<operations_research::sat::IntVar, operations_research::sat::IntVar>> buffer_to_var;
+  std::vector<operations_research::sat::LinearExpr> wgsum;
+  if (auto p = std::getenv("MEM_LIMIT"); p != nullptr) {
 
+    auto get_round_size = [](int64_t size) {
+      int round_bit = std::getenv("ROUND_BIT") ? std::stoi(std::getenv("ROUND_BIT")) : 6;
+      return (size >> round_bit) + ((size % (1 << round_bit)) != 0);
+    };
+    int64_t max_mem = get_round_size(std::atoll(p));
+    
+
+    // int64_t initial_mem_pressure = 0;
+    // if (!memory_pressure_state.live_ids_at_bottom.empty()) {
+    //   for (HloBuffer::Id id : memory_pressure_state.live_ids_at_bottom) {
+    //     auto& buffer = buffer_info_tracker.GetBufferInfo(id);
+    //     if (buffer.value->values()[0]->shape().IsTuple() && buffer.value->values()[0]->shape().layout().memory_space() != 0) {
+    //       continue;
+    //     }
+    //     initial_mem_pressure += buffer.buffer_size;
+    //   }
+    // }
+
+    // the end of live out buffer can be fixed
+
+    
+    int64_t live_out_size = 0;
+    absl::flat_hash_map<const HloBuffer::Id, std::vector<operations_research::sat::IntVar>> buffer_ends;
+    absl::flat_hash_map<const HloBuffer::Id, bool> buffer_live_out;
+    for (auto& buffer : alias_analysis->buffers()) {
+      VLOG(10) << "buffer:" << buffer.ToString();
+      auto instr = buffer.values()[0]->instruction();
+      for (auto node : nodes_) {
+        if (node->GetValues().at(0) == instr) {
+          auto task_start = std::get<1>(node_to_task_.at(node->UUID())).start;
+          
+          if (instr->opcode() != HloOpcode::kParameter) {
+            sum_size += get_round_size(buffer_info_tracker.GetBufferInfo(buffer.id()).buffer_size);
+            if (absl::c_any_of(buffer.values(), [&](const HloValue* value) {
+              return value->live_out_of_module();
+            })) {
+              live_out_size += get_round_size(buffer_info_tracker.GetBufferInfo(buffer.id()).buffer_size);
+              buffer_to_var.emplace(buffer.id(), std::make_tuple(task_start, cp_model_.NewConstant(horizon_)));
+              buffer_live_out[buffer.id()] = true;
+            } else {
+              buffer_to_var.emplace(buffer.id(), std::make_tuple(task_start, cp_model_.NewIntVar({0, horizon_})));
+            }
+            buffer_ends[buffer.id()].push_back(std::get<1>(node_to_task_.at(node->UUID())).end);
+          } else {
+            param_size += get_round_size(buffer_info_tracker.GetBufferInfo(buffer.id()).buffer_size);
+          }
+          break;
+        }
+      }
+    }
+    
+    for (auto [buffer_id, vars] : buffer_to_var) {
+      auto info = buffer_info_tracker.GetBufferInfo(buffer_id);
+      VLOG(10) << "buffer in buffer info:"<<  info.value->ToString();
+      VLOG(10) << "buffer size:" << info.buffer_size;
+    }
+
+    
+    for (auto [buffer_id, vars] : buffer_to_var) {
+      if (buffer_live_out.contains(buffer_id)) {
+        continue;
+      }
+      for (auto value : buffer_info_tracker.GetBufferInfo(buffer_id).value->values()) {
+        for (auto use : value->GetUses()) {
+          auto instr = use.instruction;
+          for (auto node : nodes_) {
+            if (node->GetValues().at(0) == instr) {
+              buffer_ends[buffer_id].push_back(std::get<1>(node_to_task_.at(node->UUID())).end);
+              VLOG(10) << "buffer" << buffer_id << "may end at: " << instr->ToString();
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    for (auto [buffer_id, vars] : buffer_to_var) {
+      if (buffer_live_out.contains(buffer_id)) {
+        continue;
+      }
+      cp_model_.AddMaxEquality(std::get<1>(vars), buffer_ends[buffer_id]);
+    }
+
+    VLOG(0) << "max mem:" << max_mem;
+    VLOG(0) << "sum size:" << sum_size;
+    VLOG(0) << "param size:" << param_size;
+    VLOG(0) << "buffer num:"<<buffer_to_var.size();
+    VLOG(0) << "node num:"<<nodes_.size();
+    VLOG(0) << "live out size:" << live_out_size;
+    
+    max_mem -= param_size;
+    obj_mem = cp_model_.NewIntVar({std::max(sum_size - max_mem, static_cast<int64_t>(0)), sum_size - live_out_size});
+    std::vector<std::vector<operations_research::sat::BoolVar>> left_and_right(buffer_to_var.size(), std::vector<operations_research::sat::BoolVar>(buffer_to_var.size()));
+    int i = 0;
+    for (auto [value1, vars1] : buffer_to_var) {
+      auto start1 = std::get<0>(vars1);
+      auto end1 = std::get<1>(vars1);
+      int j = -1;
+      for (auto [value2, vars2] : buffer_to_var) {
+        j++;
+        if (i == j) continue;
+        auto start2 = std::get<0>(vars2);
+        auto end2 = std::get<1>(vars2);
+        if (!buffer_live_out.contains(value2)) {
+          left_and_right[i][j] = cp_model_.NewBoolVar().WithName("left_and_right_" + std::to_string(i) + "_" + std::to_string(j));
+          cp_model_.AddLessOrEqual(end2, start1 + (1 - left_and_right[i][j]) * 2 *  horizon_);
+        }
+      }
+
+      i++;
+    }
+    i = 0;
+
+    wgsum.reserve(buffer_to_var.size());
+    for (auto [value1, vars1] : buffer_to_var) {
+      auto size1 = get_round_size(buffer_info_tracker.GetBufferInfo(value1).buffer_size);
+      auto start1 = std::get<0>(vars1);
+      auto end1 = std::get<1>(vars1);
+      int j = -1;
+      std::vector<int64_t> weights;
+      weights.reserve(2 * (buffer_to_var.size() - 1));
+      std::vector<operations_research::sat::BoolVar> vars;
+      vars.reserve(2 * (buffer_to_var.size() - 1));
+      for (auto [value2, vars2] : buffer_to_var) {
+        j++;
+        if (i == j) continue;
+        if (!buffer_live_out.contains(value2) && !buffer_live_out.contains(value1)) {
+          cp_model_.AddLessOrEqual(left_and_right[i][j] + left_and_right[j][i], 1);
+        }
+      }
+      j = -1;
+      for (auto [value2, vars2] : buffer_to_var) {
+        j++;
+        if (i == j) continue;
+        auto size2 = get_round_size(buffer_info_tracker.GetBufferInfo(value2).buffer_size);
+        if (!buffer_live_out.contains(value2)) {
+          weights.push_back(size2);
+          vars.push_back(left_and_right[i][j]);
+        }
+        if (!buffer_live_out.contains(value1)) {
+          weights.push_back(size2);
+          vars.push_back(left_and_right[j][i]);
+        }
+      }
+      auto weighted_sum = operations_research::sat::LinearExpr::WeightedSum(vars, weights);
+      cp_model_.AddGreaterOrEqual(weighted_sum, sum_size - max_mem);
+      cp_model_.AddLessOrEqual(weighted_sum, sum_size - live_out_size);
+      wgsum.push_back(weighted_sum);
+      i++;
+    }
+    cp_model_.AddMinEquality(obj_mem, wgsum);
+  }
   //  objective.
   IntVar obj_var = cp_model_.NewIntVar({0, horizon_}).WithName("makespan");
   std::vector<IntVar> ends;
+  
   for (auto it = node_to_task_.begin(); it != node_to_task_.end(); it++) {
     ends.push_back(std::get<1>(it->second).end);
   }
   cp_model_.AddMaxEquality(obj_var, ends);
-  cp_model_.Minimize(obj_var);
+  if (std::getenv("MEM_LIMIT") != nullptr && std::getenv("MIN_MEM") != nullptr) {
+    cp_model_.Maximize(obj_mem);
+  } else {
+    cp_model_.Minimize(obj_var);
+  }
   // cp_model_.
   // VLOG(2)<<"Number of variables:"<<cp_model_.NumVariables()<<" Number of
   // constraint:"<<cp_model_.NumConstraints();
@@ -342,7 +510,8 @@ LPSchedulerFunc(tsl::Status)::SolveUsingORTools() {
   // Currently, at level 1 we detect them in presolve and try
   // to fix Booleans. At level 2, we also do some form of dynamic symmetry
   // breaking during search.(default=2)
-  parameters.set_symmetry_level(2);
+  parameters.set_symmetry_level(std::getenv("symmetry_level") ? std::stoi(std::getenv("symmetry_level")) : 2);
+  parameters.set_cp_model_presolve(std::getenv("cp_model_presolve") ? std::stoi(std::getenv("cp_model_presolve")) : 1);
   if (reorder::solve_debug) {
     parameters.set_log_to_stdout(true);
     parameters.set_log_search_progress(true);
@@ -361,8 +530,26 @@ LPSchedulerFunc(tsl::Status)::SolveUsingORTools() {
 
   if (response.status() == operations_research::sat::CpSolverStatus::OPTIMAL ||
       response.status() == operations_research::sat::CpSolverStatus::FEASIBLE) {
-    VLOG(2) << "Optimal objective value:" << response.objective_value()
+    VLOG(0) << "Optimal objective value:" << response.objective_value()
             << " status:" << response.status();
+    VLOG(0) << "Minimize memory:" << (sum_size + param_size - response.objective_value()) * 128;
+    if (std::getenv("MEM_LIMIT") != nullptr && std::getenv("MIN_MEM") != nullptr) {
+      int cnt = 0;
+      for (auto wg : wgsum) {
+        VLOG(10) << "wg" << cnt << "=" << operations_research::sat::SolutionIntegerValue(response, wg);
+        cnt++;
+      }
+      for (auto [value, vars] : buffer_to_var) {
+        VLOG(10) << "buffer" << value << "start=" << operations_research::sat::SolutionIntegerValue(response, std::get<0>(vars)) << " end=" << operations_research::sat::SolutionIntegerValue(response, std::get<1>(vars));
+      }
+
+    }
+          for (auto kv : node_to_task_) {
+        auto node_task_tuple = std::get<1>(kv);
+        auto node = std::get<0>(node_task_tuple);
+        auto task = std::get<1>(node_task_tuple);
+        VLOG(10) << "node" << node->GetName() << "start=" << operations_research::sat::SolutionIntegerValue(response, task.start) << " end=" << operations_research::sat::SolutionIntegerValue(response, task.end);
+      }
     for (auto kv : node_to_task_) {
       auto node_task_tuple = std::get<1>(kv);
       auto node = std::get<0>(node_task_tuple);
