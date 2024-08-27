@@ -533,6 +533,33 @@ void BFCAllocator::AddTraceMe(absl::string_view traceme_name,
             const auto region_type = annotation.pending_region_type
                                          ? annotation.pending_region_type
                                          : "(null)";
+            char* path = std::getenv("BFC_MEM_DUMP_FILE");
+            if (path != nullptr) {
+              do {
+              
+                std::string fname = string(path)+'/' + this->name_ + ".txt";
+                std::string str = absl::StrCat(
+                  stats_.DebugString(),
+                  "fragmentation: ", GetFragmentation(),
+                  "\nallocation_bytes: ", alloc_bytes,
+                  "\nrequested_bytes: ", req_bytes,
+                  "\ncurrent_pool: ",  stats_.pool_bytes.value(),
+                  "\npeak_pool_bytes: ", stats_.peak_pool_bytes.value(),
+                  "\n------------------------------------------------\n"
+                );
+                VLOG(5) << str;
+                std::unique_ptr<WritableFile> file;
+                auto s = tsl::Env::Default()->NewAppendableFile(fname, &file);
+                if (!s.ok()) {
+                  break;
+                } 
+                s = file->Append(str);
+                if (s.ok()) {
+                  s = file->Close();
+                }
+              } while (0);
+            }
+
             return tsl::profiler::TraceMeEncode(
                 traceme_name, {{"allocator_name", name_},
                                {"bytes_reserved", stats_.bytes_reserved},
