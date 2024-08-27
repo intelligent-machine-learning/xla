@@ -48,7 +48,6 @@ cc_library(
         "auto_reorder_solver.h",
     ],
     deps = [
-        "//xla/service:latency_hiding_scheduler",
         "//xla:statusor",
         "//xla:util",
         "//xla/hlo/ir:hlo",
@@ -165,7 +164,6 @@ xla_cc_test(
         "//xla/service:latency_hiding_scheduler",
         "//xla/service/gpu:gpu_hlo_schedule",
         "//xla/service:gpu_plugin",
-        "//xla/service:async_collective_creator",
         "//xla/service/gpu:gpu_device_info_for_tests",
         "@com_google_absl//absl/log",
         "@com_google_googletest//:gtest",

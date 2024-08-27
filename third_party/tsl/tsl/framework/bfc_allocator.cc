@@ -547,7 +547,7 @@ void BFCAllocator::AddTraceMe(absl::string_view traceme_name,
                   "\npeak_pool_bytes: ", stats_.peak_pool_bytes.value(),
                   "\n------------------------------------------------\n"
                 );
-                VLOG(5) << str;
+                VLOG(0) << str;
                 std::unique_ptr<WritableFile> file;
                 auto s = tsl::Env::Default()->NewAppendableFile(fname, &file);
                 if (!s.ok()) {
