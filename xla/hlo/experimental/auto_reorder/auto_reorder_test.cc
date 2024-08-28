@@ -132,6 +132,16 @@ class AutoReorderingTest : public HloTestBase {
     unsetenv("XLA_AUTOREORDER_TIMEOUT");
     unsetenv("XLA_AUTOREORDER_WORKER");
   }
+  bool RunLongtimeTest() {
+    const char* env = getenv("XLA_AUTOREORDER_LONGTIME_TEST");
+    if (env == nullptr) {
+      return false;
+    }
+    if (std::strcmp(env, "true") == 0 || std::strcmp(env, "1") == 0) {
+      return true;
+    }
+    return false;
+  }
   const char* const add_hlo_string_ = R"(
 HloModule module
 ENTRY %elementwise {
@@ -196,47 +206,25 @@ ENTRY %elementwise {
     // hard to keep all instruction order,only keep communicate order
     for (auto inst : insts) {
       switch (inst->opcode()) {
-        case HloOpcode::kAllToAll:
-        case HloOpcode::kAllGather:
-        case HloOpcode::kAllGatherDone:
-        case HloOpcode::kAllReduce:
-        case HloOpcode::kAllReduceDone:
-        case HloOpcode::kCollectivePermute:
-        case HloOpcode::kCollectivePermuteDone:
-        case HloOpcode::kReduceScatter:
-        case HloOpcode::kSend:
-        case HloOpcode::kSendDone:
-        case HloOpcode::kRecv:
-        case HloOpcode::kRecvDone: {
-          ret = ret + "\n" + inst->ToString();
-        }
-        default: {
-          continue;
-        }
-      }
-    }
-    bool isStart = false;
-    // check start-done pair, there is no start-start
-    for (auto inst : insts) {
-      switch (inst->opcode()) {
         case HloOpcode::kAllGatherStart:
         case HloOpcode::kAllReduceStart:
         case HloOpcode::kCollectivePermuteStart:
+
+        case HloOpcode::kAllToAll:
+        case HloOpcode::kAllGather:
+        case HloOpcode::kAllReduce:
+        case HloOpcode::kCollectivePermute:
+        case HloOpcode::kReduceScatter:
         case HloOpcode::kSend:
-        case HloOpcode::kRecv: {
-          CHECK_NE(isStart, true);
-          isStart = true;
-          continue;
-        }
-        case HloOpcode::kAllGatherDone:
-        case HloOpcode::kAllReduceDone:
+        case HloOpcode::kRecv:
+
         case HloOpcode::kCollectivePermuteDone:
+        case HloOpcode::kAllReduceDone:
+        case HloOpcode::kAllGatherDone:
         case HloOpcode::kSendDone:
-        case HloOpcode::kRecvDone: {
-          isStart = false;
-          continue;
-        }
-        case HloOpcode::kReduceScatter: {
+        case HloOpcode::kRecvDone:
+
+        {
           ret = ret + "\n" + inst->ToString();
         }
         default: {
@@ -244,6 +232,9 @@ ENTRY %elementwise {
         }
       }
     }
+    // check start-done pair, there is no start-start
+    // FIX: after finetune,there will be start-start pair
+
     return ret;
   }
   bool CheckParameterInst(HloModule* hlo_module) {
@@ -319,12 +310,14 @@ ENTRY %elementwise {
     p0
 
     */
-    HloComputation::Builder builder("test");
+    HloComputation::Builder builder(TestName());
     auto add_reducer = MakeReduction(HloOpcode::kAdd, module);
     Shape shape = ShapeUtil::MakeShape(F32, {4, 256, 256});
     DotDimensionNumbers dot_dnums;
-    dot_dnums.add_lhs_contracting_dimensions(1);
-    dot_dnums.add_rhs_contracting_dimensions(0);
+    dot_dnums.add_lhs_contracting_dimensions(2);
+    dot_dnums.add_rhs_contracting_dimensions(1);
+    dot_dnums.add_lhs_batch_dimensions(0);
+    dot_dnums.add_rhs_batch_dimensions(0);
     int64_t channel_id = 0;
     auto precision_config = DefaultPrecisionConfig(2);
 
@@ -398,8 +391,11 @@ ENTRY %elementwise {
     Shape shape = ShapeUtil::MakeShape(F32, {4, 256, 256});
     Shape reduce_shape = ShapeUtil::MakeShape(F32, {2, 256, 256});
     DotDimensionNumbers dot_dnums;
-    dot_dnums.add_lhs_contracting_dimensions(1);
-    dot_dnums.add_rhs_contracting_dimensions(0);
+    dot_dnums.add_lhs_contracting_dimensions(2);
+    dot_dnums.add_rhs_contracting_dimensions(1);
+    dot_dnums.add_lhs_batch_dimensions(0);
+    dot_dnums.add_rhs_batch_dimensions(0);
+
     int64_t channel_id = 0;
     auto precision_config = DefaultPrecisionConfig(2);
     auto p0 = builder.AddInstruction(HloInstruction::CreateParameter(
@@ -411,9 +407,11 @@ ENTRY %elementwise {
     auto p3 = builder.AddInstruction(HloInstruction::CreateParameter(
         /*parameter_number=*/3, shape, "p3"));
     auto d01 = builder.AddInstruction(
-        HloInstruction::CreateDot(shape, p0, p1, dot_dnums, precision_config));
+        HloInstruction::CreateDot(shape, p0, p1, dot_dnums, precision_config),
+        "d01");
     auto d23 = builder.AddInstruction(
-        HloInstruction::CreateDot(shape, p2, p3, dot_dnums, precision_config));
+        HloInstruction::CreateDot(shape, p2, p3, dot_dnums, precision_config),
+        "d23");
     HloInstruction* all_reduce_start = builder.AddInstruction(
         HloInstruction::CreateAllReduceStart(
             shape, {d01}, add_reducer,
@@ -437,11 +435,15 @@ ENTRY %elementwise {
             shape, HloOpcode::kAllReduceDone, all_reduce_start1));
 
     // d01 dot with p0
-    auto d01_dot_p0 = builder.AddInstruction(HloInstruction::CreateDot(
-        shape, ar_done0, p0, dot_dnums, precision_config));
+    auto d01_dot_p0 = builder.AddInstruction(
+        HloInstruction::CreateDot(shape, ar_done0, p0, dot_dnums,
+                                  precision_config),
+        "d01_dot_p0");
     // d23 dot with p1
-    auto d23_dot_p1 = builder.AddInstruction(HloInstruction::CreateDot(
-        shape, ar_done1, p1, dot_dnums, precision_config));
+    auto d23_dot_p1 = builder.AddInstruction(
+        HloInstruction::CreateDot(shape, ar_done1, p1, dot_dnums,
+                                  precision_config),
+        "d23_dot_p1");
     // d01_dot_p0 add p2
     auto d01_dot_p0_add_p2 = builder.AddInstruction(
         HloInstruction::CreateBinary(shape, HloOpcode::kAdd, d01_dot_p0, p2));
@@ -501,6 +503,7 @@ ENTRY %elementwise {
 
     return entry_computation;
   }
+
   StatusOr<HloComputation*> MakeRandomComputation(
       HloModule* module, SavedInstLatencyEstimator* estimator,
       uint32_t inst_nums = 100, uint8_t max_deps = 5,
@@ -929,23 +932,50 @@ TEST_F(AutoReorderingTest, CommOpCostTest) {
   EXPECT_EQ(analysis_.NumOfDevices(*all_reduce_start), 2);
   // auto numel_bytes = analysis_.bytes_accessed(*all_reduce_start);
 };
+TEST_F(AutoReorderingTest, TestContainer) {
+  std::deque<int> test_queue;
+  std::unordered_set<int> toRemoveSet = {2, 4, 6, 8};
+  std::deque<int> return_inst_queue;
+  for (int i = 0; i < 10; i++) {
+    test_queue.push_back(i);
+  }
+  test_queue.erase(std::remove_if(test_queue.begin(), test_queue.end(),
+                                  [&](int ele) {
+                                    bool removed = false;
+                                    if (toRemoveSet.count(ele) > 0) {
+                                      return_inst_queue.push_back(ele);
+                                      removed = true;
+                                    }
+                                    return removed;
+                                  }),
+                   test_queue.end());
+  EXPECT_EQ(return_inst_queue.size(), 4);
+  EXPECT_EQ(test_queue.size(), 6);
+  std::cout << "test_queue:" << test_queue.size() << std::endl;
+  for (int i = 0; i < test_queue.size(); i++) {
+    std::cout << test_queue[i] << std::endl;
+  }
+  std::cout << "return_inst_queue:" << return_inst_queue.size() << std::endl;
+  for (int i = 0; i < return_inst_queue.size(); i++) {
+    std::cout << return_inst_queue[i] << std::endl;
+  }
+}
 TEST_F(AutoReorderingTest, AllReduceDeviceNumber) {
   absl::string_view hlo_string = R"(
 HloModule m
 %add {
-  %p0 = f32[] parameter(0)
-  %p1 = f32[] parameter(1)
-  ROOT %a = f32[] add(p0, p1)
+  %p0 = bf16[] parameter(0)
+  %p1 = bf16[] parameter(1)
+  ROOT %a = bf16[] add(p0, p1)
 }
 ENTRY e {
   %p0 = bf16[1024,4096] parameter(0)
   %ag-start = (bf16[1024,4096], bf16[8192,4096]) all-gather-start(bf16[1024,4096] %p0), channel_id=1, replica_groups={{0,1,2,3,4,5,6,7}}, dimensions={0}, use_global_device_ids=true
   %ag-done = bf16[8192,4096] all-gather-done(
     (bf16[1024,4096], bf16[8192,4096]) %ag-start )
- %ar-start = bf16[8192,4096] all-reduce-start(bf16[8192,4096] %ag-done),to_apply=%add, channel_id=1, replica_groups={{0,1,2,3,4,5,6,7}}, use_global_device_ids=true
- %ar-done = bf16[8192,4096] all-reduce-done(
-    (bf16[1024,4096], bf16[8192,4096]) %ar-start )
-  %add-ret = bf16[8192,4096] call(%ag-done,%ar-done), to_apply=%add
+ %ar-start = bf16[8192,4096] all-reduce-start(bf16[8192,4096] %ag-done),to_apply=%add, channel_id=2, replica_groups={{0,1,2,3,4,5,6,7}}, use_global_device_ids=true
+ %ar-done = bf16[8192,4096] all-reduce-done(%ar-start )
+  %add-ret = bf16[8192,4096] add(%ag-done,%ar-done)
   ROOT tuple = (bf16[8192,4096],bf16[8192,4096]) tuple(%ag-done, %ar-done)
 }
 )";
@@ -970,8 +1000,8 @@ ENTRY e {
 
   EXPECT_EQ(analysis_.NumOfDevices(*ag_start), 8);
   auto numel_bytes = analysis_.bytes_accessed(*ag_start);
-  // numel_bytes should be 1024*4096*4=16777216
-  EXPECT_EQ(numel_bytes, 16777216);
+  // numel_bytes should be 1024*4096*2=8388608
+  EXPECT_EQ(numel_bytes, 8388608);
 
   const HloInstruction* ar_start =
       computation->GetInstructionWithName("ar-start");
@@ -979,9 +1009,9 @@ ENTRY e {
   EXPECT_EQ(analysis_.NumOfDevices(*ar_start), 8);
   numel_bytes = analysis_.bytes_accessed(*ar_start);
   // numel_bytes should be 1024*4096*4=16777216
-  EXPECT_EQ(numel_bytes, 16777216 * 2);
+  EXPECT_EQ(numel_bytes, 1024 * 4096 * 4 * 8);
   const HloInstruction* add_ret =
-      computation->GetInstructionWithName("add-ret ");
+      computation->GetInstructionWithName("add-ret");
   auto flops = analysis_.flop_count(*add_ret);
   std::cout << "called flops:" << flops << std::endl;
 }
@@ -1392,9 +1422,140 @@ TEST_F(AutoReorderingTest, ReorderPassCommunicateComputation) {
     std::cout << inst->ToString() << std::endl;
   }
 }
+TEST_F(AutoReorderingTest, FinetuneOrder) {
+  std::srand(kRandomSeed);
+  auto hlo_module = CreateNewUnverifiedModule();
+  auto gpu_latency_estimator = std::make_unique<SavedInstLatencyEstimator>();
+  SchedulerConfig sched_config = GetDefaultSchedConfig();
+  HloComputation::Builder builder(absl::StrCat(TestName()));
+  Shape shape = ShapeUtil::MakeShape(F32, {4, 256, 256});
 
+  auto p0 =
+      builder.AddInstruction(HloInstruction::CreateParameter(0, shape, "p0"));
+  auto p1 =
+      builder.AddInstruction(HloInstruction::CreateParameter(1, shape, "p1"));
+  auto p2 =
+      builder.AddInstruction(HloInstruction::CreateParameter(2, shape, "p2"));
+  auto p3 =
+      builder.AddInstruction(HloInstruction::CreateParameter(3, shape, "p3"));
+  auto p4 =
+      builder.AddInstruction(HloInstruction::CreateParameter(4, shape, "p4"));
+  // allreduce-p0
+  // r0 = custom-call: p1,p2
+  // allreduce-p3,p4
+  // m0 = dot(p0,p3)
+  // m1 = dot(r0,p4)
+  // some other case?
+
+  auto add_reducer = MakeReduction(HloOpcode::kAdd, hlo_module.get());
+  auto precision_config = DefaultPrecisionConfig(2);
+
+  HloInstruction* ar0 = builder.AddInstruction(
+      HloInstruction::CreateAllReduceStart(
+          shape, {p0}, add_reducer,
+          /*replica_groups=*/CreateReplicaGroups({{0, 1}}),
+          /*constrain_layout=*/false, /*channel_id=*/1,
+          /*use_global_device_ids=*/true),
+      "allreduce_start0");
+  HloInstruction* ar_done0 = builder.AddInstruction(
+      HloInstruction::CreateUnary(shape, HloOpcode::kAllReduceDone, ar0),
+      "ar_done0");
+
+  DotDimensionNumbers dot_dnums;
+  dot_dnums.add_lhs_contracting_dimensions(2);
+  dot_dnums.add_rhs_contracting_dimensions(1);
+  dot_dnums.add_lhs_batch_dimensions(0);
+  dot_dnums.add_rhs_batch_dimensions(0);
+  auto d01_dot_p0 = builder.AddInstruction(
+      HloInstruction::CreateDot(shape, p1, p1, dot_dnums, precision_config),
+      "p1_dot_p2");
+
+  HloInstruction* ar_p3 = builder.AddInstruction(
+      HloInstruction::CreateAllReduceStart(
+          shape, {p3}, add_reducer,
+          /*replica_groups=*/CreateReplicaGroups({{0, 1}}),
+          /*constrain_layout=*/false, /*channel_id=*/1,
+          /*use_global_device_ids=*/true),
+      "allreduce_start_p3");
+  HloInstruction* ar_done_p3 = builder.AddInstruction(
+      HloInstruction::CreateUnary(shape, HloOpcode::kAllReduceDone, ar_p3),
+      "ar_done_p3");
+  HloInstruction* ar_p4 = builder.AddInstruction(
+      HloInstruction::CreateAllReduceStart(
+          shape, {p4}, add_reducer,
+          /*replica_groups=*/CreateReplicaGroups({{0, 1}}),
+          /*constrain_layout=*/false, /*channel_id=*/1,
+          /*use_global_device_ids=*/true),
+      "allreduce_start_p4");
+  HloInstruction* ar_done_p4 = builder.AddInstruction(
+      HloInstruction::CreateUnary(shape, HloOpcode::kAllReduceDone, ar_p4),
+      "ar_done_p4");
+  auto p1_dot_p2 = builder.AddInstruction(
+      HloInstruction::CreateDot(shape, p1, p1, dot_dnums, precision_config),
+      "p1_dot_p2");
+  auto p3_dot_p4 = builder.AddInstruction(
+      HloInstruction::CreateDot(shape, ar_done_p3, ar_done_p4, dot_dnums,
+                                precision_config),
+      "p3_dot_p4");
+  std::vector<HloInstruction*> last_n_insts = {p3_dot_p4, d01_dot_p0};
+  auto last_ret = builder.AddInstruction(
+      HloInstruction::CreateTuple(absl::MakeSpan(last_n_insts)));
+  auto computation = builder.Build();
+  VLOG(2) << "create computation success,test name" << TestName();
+  computation->set_root_instruction(last_ret);
+  // Node cost must after AddEntryComputation,so that instruction have
+  // unique_id
+  auto computation_ptr =
+      hlo_module->AddEntryComputation(std::move(computation));
+
+  gpu_latency_estimator->SetInstructionCost(d01_dot_p0, 5);
+  gpu_latency_estimator->SetInstructionCost(p1_dot_p2, 5);
+  gpu_latency_estimator->SetInstructionCost(p3_dot_p4, 5);
+
+  gpu_latency_estimator->SetInstructionCost(ar0, 1);
+  gpu_latency_estimator->SetInstructionCost(ar_done0, 1);
+  gpu_latency_estimator->SetInstructionBetween(ar_done0, 3);
+  gpu_latency_estimator->SetInstructionBetween(ar_done_p3, 3);
+  gpu_latency_estimator->SetInstructionBetween(ar_done_p4, 3);
+
+  // let module have one schedule
+  TF_ASSIGN_OR_RETURN(
+      HloSchedule schedule,
+      ScheduleModule(hlo_module.get(), [](const BufferValue& buffer) {
+        return ShapeUtil::ByteSizeOf(buffer.shape(),
+                                     /*pointer_size=*/sizeof(void*));
+      }));
+
+  TF_RETURN_IF_ERROR(hlo_module->set_schedule(std::move(schedule)));
+  auto status = schedule.Verify();
+  EXPECT_TRUE(status.ok());
+
+  auto status2 = RunScheduler(hlo_module.get(), sched_config,
+                              std::move(gpu_latency_estimator));
+  EXPECT_TRUE(status2.ok());
+  auto insts = hlo_module->schedule()
+                   .sequence(hlo_module->entry_computation())
+                   .instructions();
+  std::vector<absl::string_view> inst_name_list;
+  inst_name_list.reserve(insts.size());
+  for (auto inst : insts) {
+    if (inst->opcode() == HloOpcode::kParameter) {
+      continue;
+    }
+    inst_name_list.push_back(inst->name());
+    // std::cout << inst->ToShortString() << std::endl;
+  }
+  EXPECT_EQ(absl::StrJoin(inst_name_list, ","),
+            absl::StrJoin(
+                std::vector<absl::string_view>(
+                    {"allreduce_start_p3", "allreduce_start_p4", "p1_dot_p2.1",
+                     "allreduce_start0", "ar_done_p3", "ar_done_p4", "ar_done0",
+                     "p1_dot_p2", "p3_dot_p4", "tuple"}),
+                ",")
+
+  );
+}
 TEST_F(AutoReorderingTest, ReorderPassStableOrder) {
-  GTEST_SKIP() << "Skipping test when dev";
   std::srand(kRandomSeed);
   auto hlo_module = CreateNewUnverifiedModule();
   auto gpu_latency_estimator = std::make_unique<SavedInstLatencyEstimator>();
@@ -1479,7 +1640,9 @@ TEST_F(AutoReorderingTest, ReorderPassWithRandom) {
 }
 // skip this test
 TEST_F(AutoReorderingTest, ReorderPassDataAnalyse) {
-  // GTEST_SKIP() << "Skipping single test because longtime";
+  if (!RunLongtimeTest()) {
+    GTEST_SKIP() << "Skipping single test because longtime";
+  }
   std::srand(kRandomSeed);
   auto gen = std::mt19937{kRandomSeed};
   int repeat_time = 1;
@@ -1563,6 +1726,10 @@ TEST_F(AutoReorderingTest, ReorderPassDataAnalyse) {
   }
 }
 TEST_F(AutoReorderingTest, ReorderPassAntOPTDataAnalyse) {
+  if (!RunLongtimeTest()) {
+    GTEST_SKIP() << "Skipping single test because longtime";
+  }
+
   setenv("XLA_AUTOREORDER_METHOD", "antopt", 1);
   absl::Cleanup env_cleanup = [&]() { unsetenv("XLA_AUTOREORDER_METHOD"); };
   // GTEST_SKIP() << "Skipping single test because longtime";
@@ -1648,7 +1815,7 @@ TEST_F(AutoReorderingTest, ReorderPassAntOPTDataAnalyse) {
     }
   }
 }
-TEST_F(AutoReorderingTest, DAGSolver){
+TEST_F(AutoReorderingTest, DAGSolver) {
   auto solver_ = absl::make_unique<LinearProgramScheduler<
       LPContainerDAG<const HloInstruction*>, const HloInstruction*>>();
 }

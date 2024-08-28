@@ -189,6 +189,23 @@ xla_cc_test(
         ":common",
     ],
 )
+xla_cc_test(
+    name = "fusion_cast_test",
+    srcs = ["fusion_cast_test.cc"],
+    deps = [
+        "//xla/hlo/ir:hlo",
+        "//xla/tests:xla_internal_test_main",
+        "//xla/tests:hlo_test_base",
+        "@com_google_absl//absl/status",
+        "@com_google_googletest//:gtest",
+        "@tsl//tsl/lib/core:status_test_util",
+        "@tsl//tsl/platform:statusor",
+        "//xla/service/gpu:gpu_hlo_schedule",
+        "//xla/pjrt/gpu:se_gpu_pjrt_client",
+        "//xla/pjrt:utils",
+        ":common",
+    ],
+)
 xla_cc_binary(
     name="convert_xplane_tools",
     compatible_with = get_compatible_with_libtpu_portable(),
@@ -199,13 +216,14 @@ xla_cc_binary(
     ],
     deps=[
     ":convert_xplane",
+        "//xla/service",
+        "//xla/service:interpreter_plugin",
         "//xla/service/gpu:executable_proto_cc",
         "//xla/service/gpu:gpu_compiler",
         "//xla/service/gpu:nvptx_compiler",
         "//xla/service/gpu:nvptx_compiler_impl",
         "//xla/stream_executor",
         "//xla/stream_executor/gpu:gpu_init",
-        "//xla/stream_executor/cuda:cuda_platform",
     ] + if_cuda([
         "//xla/stream_executor/cuda:cublas_plugin",
     ]) + xla_symbol_repository_deps(),

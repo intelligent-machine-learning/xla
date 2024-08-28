@@ -10,3 +10,18 @@ diff --git a/src/ortools/base/file.cc b/src/ortools/base/file.cc
    return absl::Status(absl::StatusCode::kInvalidArgument,
                        absl::StrCat("Could not read from '", filename, "'."));
  }
+diff --git a/src/ortools/sat/cp_model_lns.cc b/src/ortools/sat/cp_model_lns.cc
+index 73d757d..056eaa8 100644
+--- a/ortools/sat/cp_model_lns.cc
++++ b/ortools/sat/cp_model_lns.cc
+@@ -1610,7 +1610,9 @@ Neighborhood SchedulingResourceWindowsNeighborhoodGenerator::Generate(
+   for (const std::vector<int>& intervals : intervals_in_constraints_) {
+     const std::vector<int> selected = SelectIntervalsInRandomTimeWindow(
+         intervals, helper_.ModelProto(), initial_solution, difficulty, random);
+-    intervals_to_relax_.insert(selected.begin(), selected.end());
++    if(!selected.empty()){
++      intervals_to_relax_.insert(selected.begin(), selected.end());
++    }
+   }
+ 
+   if (intervals_to_relax_.empty()) return helper_.FullNeighborhood();

@@ -25,6 +25,20 @@
 namespace xla {
 class OfflineSqlitePGLETestcase : public HloTestBase {
  public:
+  HloModuleConfig GetModuleConfig(bool enable_latency_hiding_scheduler,
+                                  bool enable_gpu_async_tracker = false,
+                                  absl::string_view fdo_profile = "") {
+    HloModuleConfig config;
+    DebugOptions debug_options = GetDebugOptionsForTest();
+    debug_options.set_xla_gpu_enable_latency_hiding_scheduler(
+        enable_latency_hiding_scheduler);
+    debug_options.set_xla_gpu_lhs_enable_gpu_async_tracker(
+        enable_gpu_async_tracker);
+    config.set_debug_options(debug_options);
+    *config.mutable_fdo_profile() = fdo_profile;
+    return config;
+  }
+
   HloComputation* MakeReduction(const HloOpcode type, HloModule* module) {
     HloComputation::Builder sum_builder(HloOpcodeString(type));
     auto x = sum_builder.AddInstruction(HloInstruction::CreateParameter(
@@ -51,7 +65,7 @@ class OfflineSqlitePGLETestcase : public HloTestBase {
     return reduction;
   }
   StatusOr<HloComputation*> MakeTestComputation(HloModule* module) {
-    HloComputation::Builder builder("test");
+    HloComputation::Builder builder(TestName());
     auto add_reducer = MakeReduction(HloOpcode::kAdd, module);
     Shape shape = ShapeUtil::MakeShape(F32, {4, 256, 256});
     DotDimensionNumbers dot_dnums;
@@ -184,6 +198,118 @@ TEST_F(OfflineSqlitePGLETestcase, ReorderJSON) {
     }
   }
 }
+TEST_F(OfflineSqlitePGLETestcase, PGLEWithCustomCall) {
+  const char* hlo_text = R"(
+  HloModule AsyncAR,is_scheduled=true
+  apply_op {
+    x = f32[] parameter(0)
+    y = f32[] parameter(1)
+    ROOT apply_op = f32[] add(x, y)
+  }
+
+  ENTRY ar {
+    p0 = f32[32] parameter(0)
+    p1 = f32[32, 32] parameter(1)
+    p2 = f32[32, 32] parameter(2)
+    p3 = f32[32] parameter(3)
+
+    dot0 = f32[32,32]{1,0} custom-call(p1, p2), custom_call_target="__cublas$gemm"
+    dot1 = f32[32,32]{1,0} custom-call(dot0, p2), custom_call_target="__cublas$gemm"
+    dot2 = f32[32,32]{1,0} custom-call(dot1, p2), custom_call_target="__cublas$gemm"
+    dot3 = f32[32,32]{1,0} custom-call(dot2, p2), custom_call_target="__cublas$gemm"
+    dot4 = f32[32,32]{1,0} custom-call(dot3, p2), custom_call_target="__cublas$gemm"
+    dot5 = f32[32,32]{1,0} custom-call(dot4, p2), custom_call_target="__cublas$gemm"
+    dot6 = f32[32,32]{1,0} custom-call(dot5, p2), custom_call_target="__cublas$gemm"
+
+    ar-start = f32[32] all-reduce-start(p0), to_apply=apply_op
+    ar-done = f32[32] all-reduce-done(ar-start)
+
+    ar-start1 = f32[32] all-reduce-start(p3), to_apply=apply_op
+    ar-done1 = f32[32] all-reduce-done(ar-start1)
+
+    add0 = f32[32,32] add(dot0, dot1)
+    add1 = f32[32,32] add(add0, dot2)
+    add2 = f32[32,32] add(add1, dot3)
+    add3 = f32[32,32] add(add2, dot4)
+    add4 = f32[32,32] add(add3, dot5)
+    add5 = f32[32,32] add(add4, dot6)
+
+    ROOT t = (f32[32], f32[32], f32[32,32]) tuple(ar-done, ar-done1, add5)
+  })";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto hlo_module,
+                          ParseAndReturnVerifiedModule(hlo_text));
+  auto gpu_latency_estimator = std::make_unique<GpuLatencyEstimator>();
+  int64_t memory_limit = 80 * 1000 * 1000;
+  SchedulerConfig sched_config = GetSchedulerConfig(memory_limit);
+
+  HloComputation* entry_computation = hlo_module->entry_computation();
+  absl::flat_hash_map<std::string, xla::auto_reorder::InstrProfileInfo>
+      hlo_module_info;
+  std::unique_ptr<xla::auto_reorder::OfflineSQLitePgle> dbbase_pgle =
+      std::make_unique<xla::auto_reorder::OfflineSQLitePgle>(
+          sched_config, std::move(gpu_latency_estimator), ":memory:");
+  auto status = dbbase_pgle->CreateDB();
+  EXPECT_TRUE(status.ok());
+
+  std::cout << "get instructions success" << std::endl;
+
+  // from computation,save it to hlo_module_info
+  status = xla::auto_reorder::OfflineSQLitePgle::ParseToInstProfileInfo(
+      entry_computation, &hlo_module_info);
+  EXPECT_TRUE(status.ok()) << "parse to inst profile info failed"
+                           << status.message();
+
+  std::vector<xla::auto_reorder::InstrProfileInfo> waiting_insert_profile;
+  for (auto& [name, info] : hlo_module_info) {
+    info.set_cost(10.0);
+    waiting_insert_profile.push_back(info);
+  }
+  status = dbbase_pgle->BatchInsertInstrProfileInfo(waiting_insert_profile);
+  EXPECT_TRUE(status.ok());
+
+  status = dbbase_pgle->SaveMemoryDBToFile("/tmp/test.db");
+  EXPECT_TRUE(status.ok());
+
+  EXPECT_TRUE(status.ok());
+  auto gpu_latency_estimator2 = std::make_unique<GpuLatencyEstimator>();
+  std::unique_ptr<xla::auto_reorder::OfflineSQLitePgle> dbbase_pgle_file =
+      std::make_unique<xla::auto_reorder::OfflineSQLitePgle>(
+          sched_config, std::move(gpu_latency_estimator2), "/tmp/test.db");
+  status = dbbase_pgle_file->LoadFileDBToMemory();
+  EXPECT_TRUE(status.ok());
+
+  // query
+  for (const xla::HloInstruction* inst : entry_computation->instructions()) {
+    absl::StatusOr<double> cost_or_status =
+        dbbase_pgle_file->QueryInstCost(*inst);
+    EXPECT_TRUE(cost_or_status.ok()) << " query" << inst->ToShortString();
+    EXPECT_DOUBLE_EQ(cost_or_status.value(), 10.0);
+  }
+  HloCostAnalysis::ShapeSizeFunction shape_size_bytes =
+      [&shape_size_bytes](const Shape& shape) -> int64_t {
+    int64_t shape_size = 0;
+    if (shape.IsTuple()) {
+      for (auto& sub_shape : shape.tuple_shapes()) {
+        shape_size += shape_size_bytes(sub_shape);
+      }
+      return shape_size;
+    }
+    return ShapeUtil::ByteSizeOfElements(shape);
+  };
+  // use pass
+  auto async_tracker = std::make_unique<AsyncTracker>(sched_config);
+  auto scheduler_core = std::make_unique<DefaultSchedulerCore>(
+      shape_size_bytes, async_tracker.get(), dbbase_pgle_file.get(),
+      sched_config);
+
+  auto test_pass =
+      AutoReorderPass(std::move(dbbase_pgle_file), std::move(async_tracker),
+                      std::move(scheduler_core), shape_size_bytes);
+  StatusOr<bool> success_or_status = test_pass.Run(hlo_module.get());
+  EXPECT_TRUE(success_or_status.ok());
+  EXPECT_TRUE(success_or_status.value());
+}
 TEST_F(OfflineSqlitePGLETestcase, SQLitePGLEWithAutoReorderTest) {
   auto gpu_latency_estimator = std::make_unique<GpuLatencyEstimator>();
   int64_t memory_limit = 80 * 1000 * 1000;
@@ -232,7 +358,7 @@ TEST_F(OfflineSqlitePGLETestcase, SQLitePGLEWithAutoReorderTest) {
   for (const xla::HloInstruction* inst : entry_computation->instructions()) {
     absl::StatusOr<double> cost_or_status =
         dbbase_pgle_file->QueryInstCost(*inst);
-    EXPECT_TRUE(cost_or_status.ok());
+    EXPECT_TRUE(cost_or_status.ok()) << " query" << inst->ToShortString();
     EXPECT_DOUBLE_EQ(cost_or_status.value(), 10.0);
   }
   HloCostAnalysis::ShapeSizeFunction shape_size_bytes =

@@ -10,12 +10,14 @@
 #include "xla/service/hlo_pass_interface.h"
 #include "xla/service/latency_hiding_scheduler.h"
 #include "xla/hlo/experimental/auto_reorder/common.h"
-
+#include <functional>
+#include <queue>
+#include <deque> //c++11
 // #include "xla/statusor.h"
 namespace xla {
 NodeType GetEdgeTypeOfInst(const HloInstruction& hlo) {
   auto op = GpuGetCanonicalAsyncOp(hlo);
-  if (op.outer == HloOpcode::kAsyncDone){
+  if (op.outer == HloOpcode::kAsyncDone) {
     if (hlo.IsAsynchronous() &&
         hlo.async_execution_thread() != hlo.parent()->execution_thread()) {
       return NodeType::kAsynchronous;
@@ -28,12 +30,13 @@ NodeType GetEdgeTypeOfInst(const HloInstruction& hlo) {
         return NodeType::kCommunication;
       default:
         return NodeType::kAsynchronous;
-        
     }
   }
   // If there are parallel thread computations, always schedule.
-  
-  VLOG(2)<<"edge from:"<<hlo.ToString()<<","<<hlo.IsAsynchronous()<<" thread="<<hlo.async_execution_thread()<<" parent="<<hlo.parent()->execution_thread();
+
+  VLOG(2) << "edge from:" << hlo.ToString() << "," << hlo.IsAsynchronous()
+          << " thread=" << hlo.async_execution_thread()
+          << " parent=" << hlo.parent()->execution_thread();
   return NodeType::kCommunication;
 }
 class AutoReorderPass : public HloModulePass {
@@ -87,6 +90,10 @@ class AutoReorderPass : public HloModulePass {
   // std::unique_ptr<LinearProgramScheduler> solver_;
   int64_t move_cost_threshold_in_bytes_;
   HloCostAnalysis::ShapeSizeFunction shape_size_bytes_;
+  std::vector<LPContainer<const HloInstruction*>*> FunetuneNodeOrder(
+      std::vector<LPContainer<const HloInstruction*>*> sorted_nodes);
+  void SaveOrder(std::vector<LPContainer<const HloInstruction*>*> sorted_nodes,
+                 std::string filename);
 };
 
 // CanonicalAsyncOp GpuGetCanonicalAsyncOp(const HloInstruction& hlo);

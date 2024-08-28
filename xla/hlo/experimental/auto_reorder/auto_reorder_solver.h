@@ -24,11 +24,12 @@
 
 #include "xla/hlo/experimental/auto_reorder/instr_profile_info.pb.h"
 #include "tools/cpp/runfiles/runfiles.h"
-
+#include <functional>
 namespace xla {
 using IntVar = operations_research::sat::IntVar;
 using CpModelBuilder = operations_research::sat::CpModelBuilder;
 using IntervalVar = operations_research::sat::IntervalVar;
+// using SearchMonitor=operations_research::SearchMonitor;
 enum class SolveMethod {
   kORTools = 0,
   kAntOpt = 1,
@@ -53,6 +54,7 @@ enum class NodeType {
   kCompute = 0,
   kCommunication = 1,
   kAsynchronous = 2,
+  kCopy = 3,
   kUnknown = 99,
 };
 
@@ -64,6 +66,9 @@ std::string NodeTypeToString(NodeType nodetype) {
       return "communication";
     case NodeType::kAsynchronous:
       return "asynchronous";
+    //memory copy, there is no d2h and h2d
+    case NodeType::kCopy:
+      return "copy";
     default:
       return "unknown";
   }
@@ -75,6 +80,9 @@ NodeType StringToNodeType(std::string s) {
     return NodeType::kCommunication;
   } else if (s == "asynchronous") {
     return NodeType::kAsynchronous;
+  }
+  else if (s == "copy") {
+    return NodeType::kCopy;
   }
   return NodeType::kUnknown;
 }
@@ -92,25 +100,51 @@ struct TaskType {
 using CostType = int64_t;  // we can change it to double?
 
 // TODO: using LPNode to abstract LPContainer and LPContainerDAG
-template <typename ElementType>
 class LPNode {
  public:
+  LPNode(CostType cost, NodeType type):cost_(cost), type_(type){
+
+  }
+  ~LPNode() { deps_.clear(); };
   virtual const std::string GetName() const = 0;
   virtual const int UUID() = 0;
-  virtual CostType GetCost() const = 0;
-  virtual void SetStart(CostType start) = 0;
-  virtual CostType GetStart() = 0;
-  virtual bool IsComputation() const = 0;
-  virtual bool IsCommunication() const = 0;
-  virtual NodeType GetType() const = 0;
-  virtual bool HasValue() const = 0;
-  virtual ElementType GetValue() const = 0;
-  virtual void AddDep(LPNode* dep, CostType cost) = 0;
-  virtual const std::vector<std::tuple<LPNode*, CostType>> GetDeps() const = 0;
-  virtual void Freeze() = 0;
+  void AddDep(LPNode* dep, CostType cost,NodeType nodetype);
+  const std::vector<std::tuple<LPNode*, CostType, NodeType>> GetDeps()
+      const {
+    return deps_;
+  }
+  bool CanMerge(){return false;};
+  CostType GetCost() { return cost_; }
+  bool HasDep(LPNode* dep) {
+    for (auto d : deps_) {
+      if (std::get<0>(d) == dep) {
+        return true;
+      }
+    }
+    return false;
+  }
+  bool ReplaceDep(LPNode* old_dep, LPNode* new_dep, CostType cost, NodeType nodetype);
+  void Freeze() { frozen_ = true; }
+  // Get the type of the container: compute or communication
+  bool IsComputation() const{ return type_ == NodeType::kCompute; }
+  bool IsCommunication() const{ return type_ == NodeType::kCommunication; }
+  CostType GetStart() { return startat_; }
+  void SetStart(CostType start) { startat_ = start; }
+  CostType GetHintStart() { return hint_start_; }
+  void SetHintStart(CostType start) { hint_start_ = start; }
+  HloOpcode GetOpcode() {return opcode_;};
+  void SetOpcode(HloOpcode opcode) { opcode_ = opcode; }
 
- private:
-  std::vector<std::tuple<LPNode*, CostType>> deps_;
+  NodeType GetType() const{ return type_; }
+ protected:
+  std::vector<std::tuple<LPNode*, CostType, NodeType>> deps_;
+  bool frozen_ = false;
+  CostType cost_;
+  NodeType type_;
+  CostType startat_;
+  HloOpcode opcode_;
+  CostType hint_start_ = -1;
+
 };
 
 // LPContainer is a template class, it can be used to store any type of data
@@ -119,139 +153,106 @@ class LPNode {
 // instructions,decrese lp hard
 // 3. LPContainer<const Stage>; maybe we can use it to store a pipeline stage
 template <typename ElementType>
-class LPContainer {
+class LPContainer: public LPNode {
  public:
   // create a LPContainer with inner_element, cost and type
   LPContainer(ElementType inner_element, CostType cost, NodeType type)
-      : inner_element_(inner_element), cost_(cost), type_(type) {
+      : inner_element_(inner_element), LPNode(cost, type) {
+        
     uuid_ = reinterpret_cast<uintptr_t>(this);
   };
-  ~LPContainer() { deps_.clear(); };
   const std::string GetName() const { return inner_element_->ToShortString(); }
-  const int UUID() { return inner_element_->unique_id(); }
-
-  CostType GetCost() const { return cost_; }
-  void SetStart(CostType start) { startat_ = start; }
-  CostType GetStart() { return startat_; }
+  const int UUID(){ return inner_element_->unique_id(); }
+  static bool SupportMerge(){return false;}
   // speed up reorder, we can set a hint start time
-  CostType GetHintStart() { return hint_start_; }
-  void SetHintStart(CostType start) { hint_start_ = start; }
-
-  // Get the type of the container: compute or communication
-  bool IsComputation() const { return type_ == NodeType::kCompute; }
-  bool IsCommunication() const { return type_ == NodeType::kCommunication; }
-
-  NodeType GetType() const { return type_; }
-
-  const bool HasValue() { return inner_element_ != nullptr; }
-  const std::vector<ElementType> GetValues() {
+  std::vector<LPContainer<ElementType>* > MergeUntilImpossible(std::function<Status(LPContainer*,LPContainer*)> callback
+  ){return std::vector<LPContainer* >{};}
+  
+  const bool HasValue(){ return inner_element_ != nullptr; }
+  const std::vector<ElementType> GetValues(){
     return std::vector<ElementType>{inner_element_};
   }
-  // Add a dep of this container, cost is the cost of the edge; this Container
-  // will be executed after dep
-  void AddDep(LPContainer* dep, CostType cost, NodeType nodetype);
-  // Get all deps of the container
-  const std::vector<std::tuple<LPContainer*, CostType, NodeType>> GetDeps()
-      const {
-    return deps_;
-  }
-  /**
-   * Checks if the given dependency in this container.
-   *
-   * @param dep The dependency to check.
-   * @return True if the dependency in this container, false otherwise.
-   */
-  bool HasDep(LPContainer* dep) {
-    for (auto d : deps_) {
-      if (std::get<0>(d) == dep) {
-        return true;
-      }
-    }
-    return false;
-  }
-  // when a container is frozen, it can not be add deps
-  void Freeze() { frozen_ = true; }
+  
 
  private:
-  CostType cost_;
-  CostType startat_;
-  CostType hint_start_ = -1;
-  NodeType type_;
   ElementType inner_element_;
   // deps store the edge
-  std::vector<std::tuple<LPContainer*, CostType, NodeType>> deps_;
-  bool frozen_ =
-      false;  // if it is frozen, it can not be changed,such as add deps
   uintptr_t uuid_;
   std::string name_;  // edge need a name
 };
 // LPContainerDAG is a graph of container, it can be used to store the DAG of
 // container be used as a atomic unit of LPContainer
 template <typename ElementType>
-class LPContainerDAG : public LPContainer<ElementType> {
+class LPContainerDAG : public LPNode {
   // we can use InstructionDAG to get memory effect order
  public:
-  // maintain a DAG of inner elements
+  // maintain a DAG of deps elements
   struct DAGEdge {
-    LPContainer<ElementType>* from;
-    LPContainer<ElementType>* to;
+    ElementType from;
+    ElementType to;
     CostType cost;
+    NodeType edgetype;
   };
   // create a  LPContainerDAG with one element
   LPContainerDAG(ElementType inner_element, CostType cost, NodeType type)
-      : LPContainer<ElementType>(inner_element, cost, type) {
-    // TODO: there should not create element?
-    auto ele = new LPContainer<ElementType>(inner_element, cost, type);
-    // for(auto opera: inner_element->operands()){
-    //   operands_.add(opera)
-    // }
-    // for(auto user: inner_element->users()){
-    //   users_.add(user)
-    // }
-    inner_elements.push_back(ele);
+      : LPNode(cost, type){
+    
+    inner_elements.push_back(inner_element);
   };
-  bool IsIn(LPContainer<ElementType>* a);
+  //if 
+  bool IsIn(ElementType a);
   // which container can be put together:1. they have the same type 2. they have
   // dep between them
   // static bool CanFused(LPContainerDAG<ElementType>* a,
   // LPContainerDAG<ElementType>* b);
 
   // override LPContainer
-  const std::string GetName() {
+  const std::string GetName() const{
     std::string name = "LPContainerDAG{";
     for (auto ele : inner_elements) {
-      name += ele->GetName();
+      name += ele->ToShortString();
       name += "\n";
     }
     name += "}";
     return name;
   }
-  const int UUID() { return inner_elements[0]->UUID(); }
+  const int UUID() { return inner_elements[0]->unique_id(); }
   const bool HasValue() { return inner_elements.size() > 0; }
+  static bool SupportMerge(){return true;}
+  bool CanMerge();
   const std::vector<ElementType> GetValues() {
-    std::vector<ElementType> values;
-    for (auto ele : inner_elements) {
-      for (auto inst : ele->GetValues()) {
-        values.push_back(inst);
-      }
-    }
-    return values;
+    return inner_elements;
   }
-  // AddChild, child should maintain the deps before
-  void AddToDAG(LPContainer<ElementType>* child);
-  const std::vector<LPContainer<ElementType>*> GetInnerElements() const {
+  void AddDep(LPNode* dep, CostType cost,NodeType nodetype);
+  std::vector<LPContainerDAG<ElementType>* > MergeUntilImpossible(std::function<Status(LPContainerDAG*,LPContainerDAG*)> callback);
+  
+
+  const std::vector<ElementType> GetInnerElements() const {
     return inner_elements;
   }
   // merge other LPContainerDAG to this LPContainerDAG,then destroy other
   // LPContainerDAG
   Status MergeFrom(LPContainerDAG<ElementType>* other);
-
+  
  private:
+ //Merge request three function:
+  //1. let outer edge move to inner
+  void MoveOuterEdgeIn();
+  // 2. move dep node to inner elements
+  void AddInnerElements(LPNode* dep);
+  // 3. make dep's dep become node's outer edge. dep's inner_edges_ to this inner_edge
+  void MergeEdge(LPNode* dep);
+  std::vector<DAGEdge> GetOuterEdges(){return outer_edges_;}
+  std::vector<DAGEdge> GetInnerEdges(){return inner_edges_;};
+
+  bool ChangeDepEdge();
+  //nodes: inner_elements and deps(outer_elements)
+  //edge:inner_edges and outer_edges
   std::set<ElementType> operands_;
-  std::set<ElementType> users_;
-  std::vector<LPContainer<ElementType>*> inner_elements;
+  std::vector<ElementType> inner_elements;
   // maintain edges between inner_elements
-  std::vector<DAGEdge> edges_;
+  std::vector<DAGEdge> inner_edges_;
+  std::vector<DAGEdge> outer_edges_;
   CostType cost_;
   CostType startat_;
   NodeType type_;
@@ -302,13 +303,20 @@ class LinearProgramScheduler {
   void AddNodeToTask(ContainerType* node, TaskType task);
   StatusOr<TaskType> AddNodeToTask(ContainerType* node);
   Status MergeGraph();
+  static std::string GetNodeName(ContainerType* node);
  private:
   Status SolveUsingORTools();
   Status SolveUsingAntOPT(SolveMethod solve_method);
   StatusOr<bool> AddEdgesNoOverlap(ContainerType* node);
+  void IninContainerUsers();
+  Status MergeIfPossible();
+  //make it callback by MergeIfPossible
+  Status ReplaceNodeUser(ContainerType* old_node,ContainerType* new_node);
   CpModelBuilder cp_model_;
   bool verbose_ = false;
   std::unordered_map<int, ContainerType*> uuid2container;
+  // this container is used by other users
+  std::unordered_map<int, std::vector<ContainerType*>> container_users_;
   std::vector<ContainerType*> nodes_;
   uint32_t horizon_ = std::numeric_limits<uint32_t>::max();
   absl::flat_hash_map<int, std::tuple<ContainerType*, TaskType>>
@@ -318,5 +326,15 @@ class LinearProgramScheduler {
   std::map<NodeType, std::vector<IntervalVar>> channel_to_intervals_;
   std::map<int, int64_t> node_starttime_;
 };
+// class BoundMonitor:public SearchMonitor{
+
+//   /// This method is called when a valid solution is found. If the
+//   /// return value is true, then search will resume after. If the result
+//   /// is false, then search will stop there.
+//   bool AtSolution(){
+//       return true;
+//   };
+// }
+
 }  // namespace xla
 #endif  // XLA_AUTO_REORDER_H_

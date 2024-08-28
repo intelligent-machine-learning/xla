@@ -46,12 +46,12 @@ xla::SolveMethod get_solve_method() {
   }
   // kORTools
   // kAntOpt
-  if (std::strcmp(env, "antopt") == 0) {
-    VLOG(2) << "using SolveMethod: antopt";
-    return SolveMethod::kAntOpt;
-  } else if(std::strcmp(env, "antoptremote") == 0) {
+  if (std::strcmp(env, "antoptremote") == 0) {
     VLOG(2) << "using SolveMethod: antoptremote";
     return SolveMethod::kAntOptRemote;
+  } else if (std::strcmp(env, "antopt") == 0) {
+    VLOG(2) << "using SolveMethod: antopt";
+    return SolveMethod::kAntOpt;
   }
   VLOG(2) << "using SolveMethod: ortools";
   return SolveMethod::kORTools;
@@ -77,6 +77,7 @@ template <typename ContainerType, typename ElementType>
 LinearProgramScheduler<ContainerType, ElementType>::~LinearProgramScheduler() {
   uuid2container.clear();
   node_to_task_.clear();
+  container_users_.clear();
   channel_to_intervals_.clear();
   // destroy nodes
   for (auto node : nodes_) {
@@ -84,9 +85,7 @@ LinearProgramScheduler<ContainerType, ElementType>::~LinearProgramScheduler() {
   }
   nodes_.clear();
 };
-template <class T>
-void LPContainer<T>::AddDep(LPContainer<T>* dep, CostType cost,
-                            NodeType edgetype) {
+void LPNode::AddDep(LPNode* dep, CostType cost, NodeType edgetype) {
   if (frozen_) {
     LOG(FATAL) << "Can not add dep to a frozen node";
     // raise exception
@@ -95,7 +94,23 @@ void LPContainer<T>::AddDep(LPContainer<T>* dep, CostType cost,
   // every node should start after dep+cost
   deps_.push_back(std::make_tuple(dep, cost, edgetype));
 };
-
+bool LPNode::ReplaceDep(LPNode* old_dep, LPNode* new_dep, CostType cost,
+                        NodeType nodetype) {
+  if (frozen_) {
+    LOG(FATAL) << "Can not change dep to a frozen node";
+    // raise exception
+    return false;
+  }
+  for (size_t i = 0; i < deps_.size(); ++i) {
+    auto dep_tuple = deps_[i];
+    auto dep_node = std::get<0>(dep_tuple);
+    if (dep_node == old_dep) {
+      deps_[i] = std::make_tuple(new_dep, cost, nodetype);
+      return true;
+    }
+  }
+  return false;
+}
 LPSchedulerFunc(StatusOr<ContainerType*>)::FindInstructionLPNode(
     ElementType instruction) {
   auto it = uuid2container.find(instruction->unique_id());
@@ -164,10 +179,13 @@ LPSchedulerFunc(tsl::Status)::SolveUsingAntOPT(SolveMethod solve_method) {
 
   // if it's in torch_xla env, we need using module;otherwise this script point
   // to workdir
-  std::vector<std::string> args = {"python3", "-m",};
-  if(solve_method==SolveMethod::kAntOptRemote){
+  std::vector<std::string> args = {
+      "python3",
+      "-m",
+  };
+  if (solve_method == SolveMethod::kAntOptRemote) {
     args.push_back("lynx.tools.solve_remote");
-  }else{
+  } else {
     args.push_back("lynx.tools.solve_local");
   }
   args.push_back(input_filename);
@@ -252,7 +270,33 @@ LPSchedulerFunc(tsl::Status)::SolveUsingAntOPT(SolveMethod solve_method) {
   }
   return OkStatus();
 }
+LPSchedulerFunc(void)::IninContainerUsers() {
+  // who is user of this node
+  for (auto node : nodes_) {
+    for (auto dep_pair : node->GetDeps()) {
+      auto dep_node = std::get<0>(dep_pair);
+      container_users_[dep_node->UUID()].emplace_back(node);
+    }
+  }
+}
+LPSchedulerFunc(tsl::Status)::MergeIfPossible() {
+  // for(auto node : nodes_){
+
+  //   std::vector<ContainerType*> merged_nodes =
+  //   node->MergeUntilImpossible(ReplaceNodeUser);
+  // }
+  return OkStatus();
+}
+
 LPSchedulerFunc(tsl::Status)::Solve(SolveMethod solve_method) {
+  if (ContainerType::SupportMerge()) {
+    // 1. maintain container_users_
+    IninContainerUsers();
+    auto status = MergeIfPossible();
+    if (!status.ok()) {
+      return status;
+    }
+  }
   if (solve_method == SolveMethod::kORTools) {
     return SolveUsingORTools();
   } else {
@@ -277,10 +321,13 @@ LPSchedulerFunc(tsl::Status)::SolveUsingORTools() {
   }
   for (auto node : nodes_) {
     auto node_task = std::get<1>(node_to_task_.at(node->UUID()));
+    if (node->GetCost() >= 1) {  // side effect
+      channel_to_intervals_[node->GetType()].push_back(node_task.interval);
+    }
 
-    channel_to_intervals_[node->GetType()].push_back(node_task.interval);
     for (auto dep_pair : node->GetDeps()) {
-      auto dep_node = std::get<0>(dep_pair);
+      ContainerType* dep_node =
+          dynamic_cast<ContainerType*>(std::get<0>(dep_pair));
       auto cost = std::get<1>(dep_pair);
       TaskType dep_task;
       VLOG(3) << node->GetName() << "should start after" << dep_node->GetName()
@@ -299,6 +346,7 @@ LPSchedulerFunc(tsl::Status)::SolveUsingORTools() {
   std::map<NodeType, std::vector<IntervalVar>> no_overlap_edges;
   // std::vector<IntervalVar> no_overlap_edges;
   for (auto node : nodes_) {
+    // async and communication edge can't overlap
     if (!node->IsCommunication()) {
       continue;
     }
@@ -309,7 +357,7 @@ LPSchedulerFunc(tsl::Status)::SolveUsingORTools() {
       auto edge_cost = std::get<1>(dep_tuple);
       auto dep_type = std::get<2>(dep_tuple);
 
-      if (IsSingleChannel(dep_type)) {
+      if (IsSingleChannel(dep_type) && edge_cost > 1) {
         auto dep_task = std::get<1>(node_to_task_.at(dep_node->UUID()));
         // interval
         IntervalVar interval =
@@ -352,7 +400,6 @@ LPSchedulerFunc(tsl::Status)::SolveUsingORTools() {
   // model is operations_research::sat::CpModelProto type
   // need operations_research::MPModelProto& type, so we need to convert it
   // model
-
   const operations_research::sat::CpSolverResponse response =
       operations_research::sat::SolveWithParameters(model, parameters);
   uint64_t solve_time = response.wall_time();
@@ -404,6 +451,7 @@ LPSchedulerFunc(std::vector<ContainerType*>)::GetSortedNodes() const {
   return sorted_nodes;
 }
 LPSchedulerFunc(std::string)::SaveJSON(std::string filename) const {
+  /* save json, this always use before solve, to define graph */
   std::string json_file = absl::StrCat("/tmp/", filename, ".json");
   std::ofstream json_out(json_file);
   json_out << "{" << std::endl;
@@ -415,14 +463,14 @@ LPSchedulerFunc(std::string)::SaveJSON(std::string filename) const {
     std::string name = NodeTypeToString(node->GetType());
     if (node_count > 0) {
       json_out << ",\n{ \"uuid\": \"" << node->UUID() << "\",\"typename\": \""
-               << name << "\", \"name\": \""
-               << ReplaceUnusedChar(node->GetName(), "'")
-               << "\", \"cost\": " << node->GetCost() << " }";
+               << name << "\", \"name\": " << GetNodeName(node)
+               << ", \"cost\": " << node->GetCost() << ", \"opcode\": \""
+               << node->GetOpcode() << "\"}";
     } else {
       json_out << "{ \"uuid\": \"" << node->UUID() << "\",\"typename\": \""
-               << name << "\", \"name\": \""
-               << ReplaceUnusedChar(node->GetName(), "'")
-               << "\", \"cost\": " << node->GetCost() << " }";
+               << name << "\", \"name\": " << GetNodeName(node)
+               << ", \"cost\": " << node->GetCost() << ", \"opcode\": \""
+               << node->GetOpcode() << "\" }";
     }
     node_count++;
   }
@@ -454,6 +502,9 @@ LPSchedulerFunc(std::string)::SaveJSON(std::string filename) const {
   json_out.close();
   return json_file;
 }
+LPSchedulerFunc(std::string)::GetNodeName(ContainerType* node) {
+  return "\"" + ReplaceUnusedChar(node->GetName(), "%") + "\"";
+}
 LPSchedulerFunc(void)::SaveGraphviz(std::string filename) const {
   // write a dot file
   std::string dot_file = absl::StrCat("/tmp/", filename, ".dot");
@@ -461,9 +512,6 @@ LPSchedulerFunc(void)::SaveGraphviz(std::string filename) const {
   out << "digraph G {\n";
   VLOG(4) << "write node number:" << nodes_.size() << " to /tmp/" << filename
           << ".dot" << std::endl;
-  auto get_node_name = [](const ContainerType* node) {
-    return "\"" + ReplaceUnusedChar(node->GetName(), "%") + "\"";
-  };
   bool draw_start_time = (node_starttime_.size() > 0);
   for (auto node : nodes_) {
     std::string color;
@@ -473,24 +521,26 @@ LPSchedulerFunc(void)::SaveGraphviz(std::string filename) const {
       color = "green";
     }
     if (draw_start_time) {
-      out << get_node_name(node) << "[label=\""
+      out << GetNodeName(node) << "[label=\""
           << ReplaceUnusedChar(node->GetName(), "") << "\\n"
           << "cost=" << node->GetCost()
           << "\nstart=" << node_starttime_.at(node->UUID())
           << "\",shape=box,color=" << color << "];\n";
     } else {
-      out << get_node_name(node) << "[label=\""
+      out << GetNodeName(node) << "[label=\""
           << ReplaceUnusedChar(node->GetName(), "") << "\\n"
           << "cost=" << node->GetCost() << "\",shape=box,color=" << color
           << "];\n";
     }
 
     for (auto dep_pair : node->GetDeps()) {
-      auto dep_node = std::get<0>(dep_pair);
+      ContainerType* dep_node =
+          dynamic_cast<ContainerType*>(std::get<0>(dep_pair));
+
       auto dep_cost = std::get<1>(dep_pair);
       // draw edge
-      out << get_node_name(dep_node) << "->" << get_node_name(node)
-          << "[label=\"" << dep_cost << "\"];\n";
+      out << GetNodeName(dep_node) << "->" << GetNodeName(node) << "[label=\""
+          << dep_cost << "\"];\n";
     }
   }
   out << "}\n";
@@ -504,71 +554,121 @@ LPSchedulerFunc(void)::SaveGraphviz(std::string filename) const {
 }
 LPSchedulerFunc(void)::SaveGantt(std::string filename) const {
   // https://g2.antv.antgroup.com/en/examples/storytelling/storytelling/#gantt
-  // { name: 'compute',label:'kernel name1', startTime: 1, endTime: 4 },
+  /* save json, this always use after solve, to show solve result, use
+   * lynx.tools.convert_xla2chrome_trace, change to chrome format */
+  // { "typename": "compute","label":"kernel name1", startTime: 1, endTime: 4
+  // ,"uuid":"1234"},
   VLOG(4) << "write node number:" << nodes_.size() << " to /tmp/" << filename
-          << ".js" << std::endl;
+          << ".json" << std::endl;
   auto get_node_name = [](const ContainerType* node) {
-    return ReplaceUnusedChar(node->GetName(), "'");
+    return ReplaceUnusedChar(ReplaceUnusedChar(node->GetName(), "'"), "\"");
   };
-  bool draw_start_time = (node_starttime_.size() > 0);
-  std::string csv_file = absl::StrCat("/tmp/", filename, ".js");
+  bool first_line = true;
+  std::string csv_file = absl::StrCat("/tmp/", filename, ".json");
   std::ofstream csv_out(csv_file);
-  csv_out << R"(import { Chart } from '@antv/g2'; 
-  const events = [ )";
+  csv_out << "{\"nodes\":[";
   for (auto node : this->GetSortedNodes()) {
     std::string name = NodeTypeToString(node->GetType());
-    if (draw_start_time) {
-      csv_out << "{ name: \"" << name << "\",label:'"
-              << ReplaceUnusedChar(node->GetName(), "'")
-              << "', startTime: " << node_starttime_.at(node->UUID())
-              << ", endTime: "
-              << node_starttime_.at(node->UUID()) + node->GetCost() << " },\n";
+    if (first_line) {
+      csv_out << "{ \"typename\": \"" << name << "\", \"name\":\""
+              << get_node_name(node) << "\", \"uuid\": \"" << node->UUID()
+              << "\", \"startTime\": " << node_starttime_.at(node->UUID())
+              << ", \"endTime\": "
+              << node_starttime_.at(node->UUID()) + node->GetCost() << " }";
+      first_line = false;
+    } else {
+      csv_out << ",\n{ \"typename\": \"" << name << "\", \"name\":\""
+              << get_node_name(node) << "\", \"uuid\": \"" << node->UUID()
+              << "\", \"startTime\": " << node_starttime_.at(node->UUID())
+              << ", \"endTime\": "
+              << node_starttime_.at(node->UUID()) + node->GetCost() << " }";
     }
   }
-  csv_out << "];";
+  csv_out << "]}";
+}
+LPContainerDAGFunc(std::vector<LPContainerDAG<ElementType>*>)::
+    MergeUntilImpossible(std::function<Status(LPContainerDAG<ElementType>*,
+                                              LPContainerDAG<ElementType>*)>
+                             replace_callback) {
+  while (CanMerge()) {
+    //  merge its' deps
+    // 1. let outer edge move to inner
+    // 2. move dep node to inner elements
+    // 3. make dep's dep become node's outer edge
+    auto origin_deps = GetDeps();
+    MoveOuterEdgeIn();
+    // set origin deps' deps to this node's deps
+    for (auto dep_pair : origin_deps) {
+      LPNode* dep_node = std::get<0>(dep_pair);
+      auto dep_cost = std::get<1>(dep_pair);
+      auto dep_type = std::get<2>(dep_pair);
 
-  csv_out << R"(
-  const chart = new Chart({
-    container: 'container',
-    autoFit: true,
-  });
-
-  chart.coordinate({ transform: [{ type: 'transpose' }] });
-
-  chart
-    .interval()
-    .data(events)
-    .encode('x', 'name')
-    .encode('y', ['endTime', 'startTime'])
-    .encode('color', 'name')
-    .label({
-      text: 'label',
-      position: 'inside',
-      transform: [{ type: 'overflowHide' }],
-    })
-    .encode('enterDuration', (d) => d.endTime - d.startTime)
-    .encode('enterDelay', 'startTime')
-    .scale('enterDuration', {
-      zero: true,
-      range: [0, 3000],
-    });
-
-  chart.render();)";
+      AddInnerElements(dep_node);
+      MergeEdge(dep_node);
+      // replace_callback(dep_node, this);
+      // let a node which dep dep_node,move to this node
+      // dep_node->ReplaceDep(dep_node,this,dep_cost,dep_type);
+    }
+  }
+}
+LPContainerDAGFunc(void)::MergeEdge(LPNode* dep) {
+  // make dep's dep become node's outer edge. dep's inner_edges_ to this
+  // inner_edge
+  LPContainerDAG<ElementType>* dep_dag_container =
+      dynamic_cast<LPContainerDAG<ElementType>*>(dep);
+  for (auto dep_outer_edge : dep_dag_container->GetOuterEdges()) {
+    outer_edges_.push_back(dep_outer_edge);
+  };
+  for (auto dep_inner_edge : dep_dag_container->GetInnerEdges()) {
+    inner_edges_.push_back(dep_inner_edge);
+  };
 }
 
-LPContainerDAGFunc(bool)::IsIn(LPContainer<ElementType>* a) {
-  return operands_.find(a) != operands_.end();
-};
-LPContainerDAGFunc(void)::AddToDAG(LPContainer<ElementType>* child) {
-  inner_elements.push_back(child);
-  if (IsIn(child)) {
-    operands_.erase(child);
+LPContainerDAGFunc(void)::AddInnerElements(LPNode* dep) {
+  LPContainerDAG<ElementType>* dep_dag_container =
+      dynamic_cast<LPContainerDAG<ElementType>*>(dep);
+  for (auto dep_inner_ele : dep_dag_container->GetInnerElements()) {
+    inner_elements.push_back(dep_inner_ele);
   }
-  for (auto dep_pair : child->GetDeps()) {
-    auto dep = std::get<0>(dep_pair);
-    auto cost = std::get<1>(dep_pair);  // if cost  need store ?
-    operands_.insert(dep);
+}
+LPContainerDAGFunc(void)::MoveOuterEdgeIn() {
+  while (outer_edges_.size() > 0) {
+    auto edge = outer_edges_.back();
+    inner_edges_.push_back(edge);
+    outer_edges_.pop_back();
   }
+}
+LPContainerDAGFunc(void)::AddDep(LPNode* dep, CostType cost,
+                                 NodeType nodetype) {
+  LPNode::AddDep(dep, cost, nodetype);
+  if (inner_elements.size() != 1) {
+    LOG(ERROR) << "can't add dep when this dag is merged";
+    return;
+  }
+  LPContainerDAG* dep_dag_container = dynamic_cast<LPContainerDAG*>(dep);
+  if (dep_dag_container->GetValues().size() != 1) {
+    LOG(ERROR) << "can't add dep when this depency dag is merged";
+    return;
+  }
+  // first call, now this is only one element
+  LPContainerDAG::DAGEdge edge = {
+      inner_elements[0], dep_dag_container->GetValues()[0], cost, nodetype};
+  outer_edges_.push_back(edge);
+}
+LPContainerDAGFunc(bool)::CanMerge() {
+  if (!IsComputation()) {
+    return false;
+  }
+  // only merge computation graph
+  for (auto dep_pair : GetDeps()) {
+    LPContainerDAG* dep_node =
+        dynamic_cast<LPContainerDAG*>(std::get<0>(dep_pair));
+    // only merge computation graph
+    if (!dep_node->IsComputation()) {
+      return false;
+    }
+  }
+  return true;
 }
 LPContainerDAGFunc(Status)::MergeFrom(LPContainerDAG<ElementType>* other) {
   /*
@@ -578,57 +678,16 @@ LPContainerDAGFunc(Status)::MergeFrom(LPContainerDAG<ElementType>* other) {
 
   // maintain this LPContainerDAG inner_elements's deps,so that can create inner
   // edge after merge {dep: [<element1, cost>,<element2, cost>]}
-  std::unordered_map<
-      int, std::vector<std::tuple<LPContainer<ElementType>*, CostType>>>
-      dep_operands2element;
 
-  for (LPContainer<ElementType>* element : GetInnerElements()) {
-    // from operate to element, there are outer edge,maybe convert to inner edge
-    for (auto dep_pair : element->GetDeps()) {
-      auto dep = std::get<0>(dep_pair);
-      auto cost = std::get<1>(dep_pair);
-      if (dep_operands2element.find(dep->UUID()) ==
-          dep_operands2element.end()) {
-        dep_operands2element[dep->UUID()] =
-            std::vector<std::tuple<LPContainer<ElementType>*, CostType>>();
-      }
-      dep_operands2element[dep->UUID()].push_back(
-          std::make_tuple(element, cost));
-    }
-  }
-  // other
-  for (auto child : other->GetInnerElements()) {
-    // there child must in inner_elements_deps
-    TF_RET_CHECK(dep_operands2element.find(child->UUID()) ==
-                 dep_operands2element.end())
-        << "child is not in dep_operands2element";
-    for (auto dep_pair : dep_operands2element[child->UUID()]) {
-      auto dep = std::get<0>(dep_pair);
-      auto cost = std::get<1>(dep_pair);
-      if (dep_operands2element.find(dep->UUID()) !=
-          dep_operands2element.end()) {
-        for (auto element_pair : dep_operands2element[dep->UUID()]) {
-          auto element = std::get<0>(element_pair);
-          auto cost = std::get<1>(element_pair);
-          // create edge between element and child
-          DAGEdge edge;
-          edge.from = element;
-          edge.to = child;
-          edge.cost = cost;
-          edges_.push_back(edge);
-        }
-      }
-    }
-
-    AddToDAG(child);
-  };
+  other->GetDeps();
+  return OkStatus();
 }
 template class LPContainer<const HloInstruction*>;
 template class LinearProgramScheduler<LPContainer<const HloInstruction*>,
                                       const HloInstruction*>;
 
-// template class LPContainerDAG<const HloInstruction*>;
-// template class LinearProgramScheduler<LPContainerDAG<const HloInstruction*>,
-// const HloInstruction*>;
+template class LPContainerDAG<const HloInstruction*>;
+template class LinearProgramScheduler<LPContainerDAG<const HloInstruction*>,
+                                      const HloInstruction*>;
 
 }  // namespace xla

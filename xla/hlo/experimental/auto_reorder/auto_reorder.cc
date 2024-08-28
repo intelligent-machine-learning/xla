@@ -80,13 +80,20 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
     };
 
     CostType cost = std::ceil(instr_node.GetCost());
-    // there are 2 type now: 1. compute 2. communication
+    // there are 3 type node: 1. compute 2. communication 3. copy
+    // 3 type edges:  1. compute 2. communication 3. async
     if (async_tracker_->IsSupportedAsyncStart(*instr) ||
         async_tracker_->IsSupportedAsyncDone(*instr)) {
       // communication
       // GetCost return float, floor to int
+      NodeType node_type;
+      if (instr->IsAsynchronous()) {
+        node_type = NodeType::kAsynchronous;
+      } else {
+        node_type = NodeType::kCommunication;
+      }
       auto current_inst_lp_node =
-          solver_->FindLPNodeOrCreate(instr, cost, NodeType::kCommunication);
+          solver_->FindLPNodeOrCreate(instr, cost, node_type);
       // add current node as constraint
 
       if (async_tracker_->IsSupportedAsyncDone(*instr)) {
@@ -106,7 +113,6 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
           TF_RET_CHECK(is_success)
               << "operand_lp_node not found:" << operand_inst->ToShortString();
         }
-        instr->control_predecessors();
         for (auto control_inst : instr->control_predecessors()) {
           // if it's communication, if control_inst is communicate op,this type
           // should be kCommunication?
@@ -121,7 +127,26 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
       if (reorder::is_keep_communicate_order()) {
         comm_lp_nodes.push_back(current_inst_lp_node);
       }
-    } else {  // compute
+    } else {
+      // TODO: copy_fusion need more work, analyse copy in fusion
+      // NodeType node_type;
+      // NodeType edge_type = NodeType::kCompute;
+      // if(instr->opcode() == HloOpcode::kCopy){
+      //   node_type=NodeType::kCopy;
+      // }
+      // else if(instr->opcode() == HloOpcode::kCopyStart || instr->opcode() ==
+      // HloOpcode::kCopyDone){
+      //   node_type=NodeType::kCopy;
+      //   if(instr->opcode() == HloOpcode::kCopyDone){
+      //     edge_type = NodeType::kCopy;
+      //   }
+      // }
+      // else if(instr->opcode() == HloOpcode::kFusion){
+      //   //only when fusion is all copy
+      // }
+      // else{
+      //   node_type=NodeType::kCompute;
+      // }
       auto current_inst_lp_node =
           solver_->FindLPNodeOrCreate(instr, cost, NodeType::kCompute);
       // when adding edge node, current node have no add to Constraint?
@@ -146,6 +171,7 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
 
   // set hint, using post order
   std::reverse(post_order_instructions.begin(), post_order_instructions.end());
+  // for debug,show which type cost
   for (HloInstruction* instr : post_order_instructions) {
     auto lp_node = solver_->FindInstructionLPNode(instr);
     if (!lp_node.ok()) {
@@ -153,6 +179,7 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
       continue;
     }
     auto operand_lp_node = lp_node.value();
+    operand_lp_node->SetOpcode(instr->opcode());
     CostType start_at = -1;
     for (auto dep_pair : operand_lp_node->GetDeps()) {
       CostType cost = std::get<1>(dep_pair);
@@ -183,7 +210,13 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
     std::vector<HloInstruction*> new_schedule_params;
     std::vector<HloInstruction*> new_schedule;
     auto sorted_nodes = solver_->GetSortedNodes();
-    for (auto node : sorted_nodes) {
+    SaveOrder(sorted_nodes, absl::StrCat("origin_order_", computation->name()));
+
+    std::vector<LPContainer<const HloInstruction*>*> finetune_ordered_queue =
+        FunetuneNodeOrder(sorted_nodes);
+    SaveOrder(finetune_ordered_queue,
+              absl::StrCat("finetune_order_", computation->name()));
+    for (auto node : finetune_ordered_queue) {
       auto insts = node->GetValues();
       for (auto inst : insts) {
         // extra check: param inst must move to head;
@@ -205,6 +238,180 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
   }
   TF_RET_CHECK(status.ok()) << "Solver error:" << status.message();
   return status;
+}
+std::vector<LPContainer<const HloInstruction*>*>
+AutoReorderPass::FunetuneNodeOrder(
+    std::vector<LPContainer<const HloInstruction*>*> sorted_nodes) {
+  /*
+  Why need this function, LP will solve multi inst queue, but xla accept one
+inst queue, we must adapt, so inst will execute at two queue too. there are
+rule:
+  1. if `.start` node start time less than compute node finish time, it will
+schedule before compute
+  2. if start and compute node's deps in post_schedule_queue,then clear
+post_schedule_queue.
+  3.  `.done` put into post_schedule_queue
+*/
+  std::deque<LPContainer<const HloInstruction*>*> compute_queue;
+  std::deque<LPContainer<const HloInstruction*>*> communicate_queue;
+  std::vector<LPContainer<const HloInstruction*>*> return_inst_queue;
+
+  //  std::vector<LPContainer<const HloInstruction*>*> pre_schedule_queue;
+  std::deque<LPContainer<const HloInstruction*>*> post_schedule_queue;
+
+  return_inst_queue.reserve(sorted_nodes.size());
+  auto clean_post_queue = [&post_schedule_queue, &return_inst_queue]() {
+    // let current holded_compute_node push into queue
+    while (!post_schedule_queue.empty()) {
+      return_inst_queue.push_back(post_schedule_queue.front());
+      post_schedule_queue.pop_front();
+    }
+  };
+  auto let_done_nodes_schedule_soon =
+      [&post_schedule_queue, &return_inst_queue](
+          std::deque<LPContainer<const HloInstruction*>*> dep_done_nodes) {
+        // O(m+n)
+        std::unordered_set<int> toRemoveSet;
+        for (auto dep_node : dep_done_nodes) {
+          toRemoveSet.insert(dep_node->UUID());
+        }
+        post_schedule_queue.erase(
+            std::remove_if(post_schedule_queue.begin(),
+                           post_schedule_queue.end(),
+                           [&](LPContainer<const HloInstruction*>* node) {
+                             bool removed = false;
+                             if (toRemoveSet.count(node->UUID()) > 0) {
+                               return_inst_queue.push_back(node);
+                               removed = true;
+                             }
+                             return removed;
+                           }),
+            post_schedule_queue.end());
+      };
+  // step 1:O(n),init compute_queue and communicate_queue FIFO, head will first
+  // execute.
+  for (auto node : sorted_nodes) {
+    // insert and pop_back
+    if (node->IsComputation()) {
+      compute_queue.push_back(node);
+    } else {
+      communicate_queue.push_back(node);
+    }
+  }
+  CostType current_compute_time = 0;
+  CostType current_communicate_time = 0;
+  while (!communicate_queue.empty() || !compute_queue.empty()) {
+    if (communicate_queue.empty()) {  // all other is compute queue
+      clean_post_queue();
+      while (!compute_queue.empty()) {
+        return_inst_queue.push_back(compute_queue.front());
+        compute_queue.pop_front();
+      }
+      break;
+    }
+    if (compute_queue.empty()) {
+      clean_post_queue();
+      while (!communicate_queue.empty()) {
+        return_inst_queue.push_back(communicate_queue.front());
+        communicate_queue.pop_front();
+      }
+      break;
+    }
+
+    auto next_communicate_node = communicate_queue.front();
+    auto next_compute_node = compute_queue.front();
+    // case 1: let communicate.start go before compute.
+    bool all_inst_is_start = true;
+    bool all_inst_is_done = true;
+    auto insts = next_communicate_node->GetValues();
+
+    const int MAX_HOLDED_SIZE = 20;
+
+    for (auto instr : insts) {
+      if (!async_tracker_->IsSupportedAsyncStart(*instr)) {
+        all_inst_is_start = false;
+      }
+      if (!async_tracker_->IsSupportedAsyncDone(*instr)) {
+        all_inst_is_done = false;
+      }
+    }
+    if (all_inst_is_start) {
+      // if start
+      bool all_deps_finish = true;
+      std::deque<LPContainer<const HloInstruction*>*> deps_queue;
+      for (auto dep_pair : next_communicate_node->GetDeps()) {
+        LPContainer<const HloInstruction*>* dep_node =
+            dynamic_cast<LPContainer<const HloInstruction*>*>(
+                std::get<0>(dep_pair));
+        deps_queue.push_back(dep_node);
+        if (dep_node->GetStart() + dep_node->GetCost() >
+            next_compute_node->GetStart()) {
+          all_deps_finish = false;
+        }
+      }
+
+      // start need before compute
+      if (all_deps_finish &&
+          next_communicate_node->GetStart() > next_compute_node->GetStart() &&
+          next_communicate_node->GetStart() <
+              next_compute_node->GetStart() + next_compute_node->GetCost()) {
+        let_done_nodes_schedule_soon(deps_queue);
+        return_inst_queue.push_back(next_communicate_node);
+        current_communicate_time = next_communicate_node->GetStart() +
+                                   next_communicate_node->GetCost();
+        communicate_queue.pop_front();
+        continue;
+      }
+      // goto commoncase;
+    } else if (all_inst_is_done) {
+      // done schedule until next_compute_node need it
+      // otherwise put into post_schedule_queue
+      // let all done node put into post_schedule_queue
+      post_schedule_queue.push_back(next_communicate_node);
+      communicate_queue.pop_front();
+      continue;
+    }
+    // commoncase:
+    if (next_compute_node->GetStart() < next_communicate_node->GetStart()) {
+      std::deque<LPContainer<const HloInstruction*>*> deps_queue;
+      for (auto dep_pair : next_compute_node->GetDeps()) {
+        LPContainer<const HloInstruction*>* dep_node =
+            dynamic_cast<LPContainer<const HloInstruction*>*>(
+                std::get<0>(dep_pair));
+        deps_queue.push_back(dep_node);
+      }
+      let_done_nodes_schedule_soon(deps_queue);
+
+      return_inst_queue.push_back(next_compute_node);
+      compute_queue.pop_front();
+    } else {
+      std::deque<LPContainer<const HloInstruction*>*> deps_queue;
+
+      for (auto dep_pair : next_communicate_node->GetDeps()) {
+        LPContainer<const HloInstruction*>* dep_node =
+            dynamic_cast<LPContainer<const HloInstruction*>*>(
+                std::get<0>(dep_pair));
+        deps_queue.push_back(dep_node);
+      }
+      let_done_nodes_schedule_soon(deps_queue);
+
+      return_inst_queue.push_back(next_communicate_node);
+      communicate_queue.pop_front();
+    }
+  }  // end for
+  clean_post_queue();
+
+  return return_inst_queue;
+}
+void AutoReorderPass::SaveOrder(
+    std::vector<LPContainer<const HloInstruction*>*> sorted_nodes,
+    std::string filename) {
+  std::string json_file = absl::StrCat("/tmp/", filename, ".json");
+  std::ofstream json_out(json_file);
+  for (auto node : sorted_nodes) {
+    json_out << node->GetName() << std::endl;
+  }
+  json_out.close();
 }
 tsl::Status AutoReorderPass::MoveInstruction(HloComputation* src_computation,
                                              absl::string_view src_name,

@@ -18,6 +18,7 @@ std::string get_offline_sqlite_pgle_path() {
   }
   return env;
 };
+HloLatencyStats OfflineSQLitePgle::stats;
 OfflineSQLitePgle::OfflineSQLitePgle(
     const SchedulerConfig& config,
     std::unique_ptr<LatencyEstimator> latency_estimator,
@@ -37,8 +38,15 @@ OfflineSQLitePgle::OfflineSQLitePgle(
     VLOG(5) << "Move DB to memory fail: " << move_status.message();
     throw std::runtime_error("Move DB to memory fail");
   }
+  ResetStats();
 }
-OfflineSQLitePgle::~OfflineSQLitePgle() {}
+OfflineSQLitePgle::~OfflineSQLitePgle() {
+  VLOG(5) << "destroy OfflineSQLitePgle instance,status";
+  VLOG(5) << "node_hits:" << OfflineSQLitePgle::stats.node_hits
+          << " node_misses:" << OfflineSQLitePgle::stats.node_misses
+          << " edge_hits:" << OfflineSQLitePgle::stats.edge_hits
+          << " edge_misses:" << OfflineSQLitePgle::stats.edge_misses;
+}
 
 absl::Status OfflineSQLitePgle::ParseToInstProfileInfo(
     HloComputation* computation,
@@ -84,8 +92,7 @@ absl::Status OfflineSQLitePgle::ParseToInstProfileInfo(
     }
     // result_types
     instr_info.add_result_types(PrimitiveType_Name(shape.element_type()));
-    instr_info.set_operand_hash(
-        xla::auto_reorder::OfflineSQLitePgle::InstOperandHash(*instr));
+
     // TODO: set hw info; for now, we don't have hw info
     //  instr_info.set_hwinfo
 
@@ -165,8 +172,12 @@ absl::Status OfflineSQLitePgle::ParseToInstProfileInfo(
         break;
 
     }  // end switch
+    instr_info.set_operand_hash(
+        xla::auto_reorder::OfflineSQLitePgle::InstOperandHash(*instr));
     hlo_module_info->emplace(instr_origin_proto.name(), instr_info);
+
   }  // end for instrs
+  //
   return absl::OkStatus();
 }
 absl::Status OfflineSQLitePgle::SaveMemoryDBToFile(const std::string& db_path) {
@@ -310,8 +321,8 @@ absl::Status OfflineSQLitePgle::BatchInsertInstrProfileInfo(
     return absl::InternalError(absl::StrCat("Can't prepare statement:",
                                             sqlite3_errmsg(client_.get())));
   }
-  VLOG(5) << "finish prepare stmt, it have parameters: "
-          << sqlite3_bind_parameter_count(stmt);
+  VLOG(10) << "finish prepare stmt, it have parameters: "
+           << sqlite3_bind_parameter_count(stmt);
   size_t index = 0;
   for (auto info : infos) {
     auto st = BindInstInfoToSql(info, stmt, index);
@@ -320,7 +331,7 @@ absl::Status OfflineSQLitePgle::BatchInsertInstrProfileInfo(
   }
 
   EXPECT_SQL_EQ(sqlite3_step(stmt), SQLITE_DONE);
-  VLOG(5) << "insert sql:" << params_sql << "sucess";
+  VLOG(10) << "insert sql:" << params_sql << "sucess";
   EXPECT_SQL_EQ(sqlite3_reset(stmt), SQLITE_OK);
   sqlite3_finalize(stmt);
 
@@ -538,6 +549,57 @@ absl::StatusOr<double> OfflineSQLitePgle::QueryInstCostByCode(
   }
   return cost;
 }
+absl::StatusOr<double> OfflineSQLitePgle::QueryCustomInstCost(
+    const xla::HloInstruction& inst) const {
+  /*
+  for gemm,there is issue: one op will have most 30% speed up when there is no
+  overlap with any communication so we give priority to those custom_call op
+  with the same name
+  */
+  std::string hash = OfflineSQLitePgle::InstOperandHash(inst);
+  HloInstructionProto instr_origin_proto = inst.ToProto();
+  HloOpcode code = inst.opcode();
+  std::string sql =
+      absl::StrCat("select avg(cost) from inst_profiler where opcode=", code,
+                   " and operand_hash='", hash, "'", " and name=?",
+                   " and customCallTarget=?",
+
+                   ";");
+  sqlite3_stmt* stmt;
+
+  int sqlcode = sqlite3_prepare_v2(client_.get(), sql.c_str(), -1, &stmt, 0);
+  if (sqlcode != SQLITE_OK) {
+    sqlite3_finalize(stmt);
+
+    return absl::InternalError(absl::StrCat("Can't prepare statement:",
+                                            sqlite3_errmsg(client_.get())));
+  }
+  EXPECT_SQL_EQ(sqlite3_bind_text(stmt, 1, instr_origin_proto.name().c_str(),
+                                  -1, SQLITE_TRANSIENT),
+                SQLITE_OK);
+  EXPECT_SQL_EQ(sqlite3_bind_text(stmt, 2, inst.custom_call_target().c_str(),
+                                  -1, SQLITE_TRANSIENT),
+                SQLITE_OK);
+
+  sqlcode = sqlite3_step(stmt);
+  if (sqlcode != SQLITE_ROW) {
+    VLOG(5) << "Can't query table: " << sql << " code:" << sqlcode;
+    sqlite3_finalize(stmt);
+
+    return absl::NotFoundError(absl::StrCat("Can't find inst in table", sql));
+  }
+  double cost = sqlite3_column_double(stmt, 0);
+  VLOG(10) << "QueryCustomInstCost:" << sql
+           << " name:" << instr_origin_proto.name()
+           << " customCallTarget:" << inst.custom_call_target()
+           << " cost:" << cost;
+  sqlite3_finalize(stmt);
+  // if there is no cost,it will be 0. so we return error
+  if (cost < kLowLatency) {
+    return QueryInstCostByCode(code, hash);
+  }
+  return cost;
+}
 absl::StatusOr<double> OfflineSQLitePgle::QueryInstCost(
     const xla::HloInstruction& inst) const {
   /*
@@ -547,6 +609,9 @@ absl::StatusOr<double> OfflineSQLitePgle::QueryInstCost(
   */
   std::string hash = OfflineSQLitePgle::InstOperandHash(inst);
   HloOpcode code = inst.opcode();
+  if (code == HloOpcode::kCustomCall) {
+    return QueryCustomInstCost(inst);
+  }
   return QueryInstCostByCode(code, hash);
 }
 // reference: xla/service/profile_guided_latency_estimator.cc
@@ -561,6 +626,7 @@ LatencyEstimator::TimeCost OfflineSQLitePgle::GetLatencyBetween(
   const HloOpcode from_op = from.GetInstr().opcode();
   if (!config_.schedule_send_recvs &&
       (from_op == HloOpcode::kSend || from_op == HloOpcode::kRecv)) {
+    OfflineSQLitePgle::stats.edge_misses++;
     return kLowLatency;
   }
   // sqlite comm cost is on async-start,like this:
@@ -576,24 +642,33 @@ LatencyEstimator::TimeCost OfflineSQLitePgle::GetLatencyBetween(
 
     cost_or_status = QueryInstCost(*wrapped_inst);
     if (!cost_or_status.ok()) {
-      VLOG(5) << "using backup estimator for edge latency: "
-              << wrapped_inst->name() << " to " << target.GetInstr().name();
-      return latency_estimator_->GetLatencyBetween(from, target);
+      auto cost = latency_estimator_->GetLatencyBetween(from, target);
+
+      VLOG(10) << "using backup estimator for edge latency: "
+               << wrapped_inst->name() << " to " << target.GetInstr().name()
+               << " cost=" << cost;
+      OfflineSQLitePgle::stats.edge_misses++;
+      return cost;
     }
     VLOG(5) << "PGLE found latency 1 between " << wrapped_inst->name()
             << " and " << target.GetInstr().name()
             << "cost: " << cost_or_status.value() * CyclesPerMicrosecond();
+    OfflineSQLitePgle::stats.edge_hits++;
+
     return cost_or_status.value() * CyclesPerMicrosecond();
   }
 
   if (!cost_or_status.ok()) {
-    VLOG(5) << "using backup estimator for edge latency: "
-            << from.GetInstr().name() << " to " << target.GetInstr().name();
-    return latency_estimator_->GetLatencyBetween(from, target);
+    auto cost = latency_estimator_->GetLatencyBetween(from, target);
+    VLOG(10) << "using backup estimator for edge latency: "
+             << from.GetInstr().name() << " to " << target.GetInstr().name()
+             << " cost=" << cost;
+    OfflineSQLitePgle::stats.edge_misses++;
+    return cost;
   } else {
     VLOG(5) << "PGLE found latency 1 start from:" << from.GetInstr().name()
             << ":" << cost_or_status.value() * CyclesPerMicrosecond()
-            << "but go target";
+            << " but go target";
   }
 
   // Ohh..query target will cause extra edge cost
@@ -608,6 +683,7 @@ LatencyEstimator::TimeCost OfflineSQLitePgle::GetLatencyBetween(
       VLOG(5) << "PGLE found latency 2 between " << from.GetInstr().name()
               << " and " << target.GetInstr().name()
               << "cost: " << cost_or_status2.value() * CyclesPerMicrosecond();
+      OfflineSQLitePgle::stats.edge_hits++;
       return cost_or_status2.value() * CyclesPerMicrosecond();
     }
   }
@@ -619,12 +695,13 @@ LatencyEstimator::TimeCost OfflineSQLitePgle::GetLatencyBetween(
             << " and (assumed)" << target.GetInstr().name()
             << " in instruction costs:"
             << cost_or_status.value() * CyclesPerMicrosecond();
+    OfflineSQLitePgle::stats.edge_hits++;
     return cost_or_status.value() * CyclesPerMicrosecond();
   }
 
-  VLOG(5) << from.GetInstr().name() << "using backup estimator for latency "
-          << " to " << target.GetInstr().name();
-  ;
+  VLOG(10) << from.GetInstr().name() << " using backup estimator for latency "
+           << " to " << target.GetInstr().name();
+  OfflineSQLitePgle::stats.edge_misses++;
   return latency_estimator_->GetLatencyBetween(from, target);
 }
 LatencyEstimator::TimeCost OfflineSQLitePgle::NodeCost(
@@ -632,18 +709,21 @@ LatencyEstimator::TimeCost OfflineSQLitePgle::NodeCost(
   if (hlo_query::IsAsyncCollectiveStartOp(instr, /*include_send_recv=*/true) ||
       hlo_query::IsAsyncCollectiveDoneOp(instr, /*include_send_recv=*/true)) {
     static constexpr TimeCost kLowCost = 1.0;
+    OfflineSQLitePgle::stats.node_misses++;
     return kLowCost;
   }
-
+  std::string hash = OfflineSQLitePgle::InstOperandHash(*instr);
   const absl::StatusOr<double> cost_or_status = QueryInstCost(*instr);
   if (cost_or_status.ok()) {
-    VLOG(5) << "NodeCost: " << instr->ToShortString()
+    VLOG(5) << "NodeCost: " << instr->ToShortString() << " hash: " << hash
             << " success cost: " << cost_or_status.value();
+    OfflineSQLitePgle::stats.node_hits++;
     return cost_or_status.value() * CyclesPerMicrosecond();
   }
   auto cost = latency_estimator_->NodeCost(instr);
-  VLOG(5) << "NodeCost: " << instr->ToShortString()
+  VLOG(5) << "NodeCost: " << instr->ToShortString() << " hash: " << hash
           << " fail. use backup estimator cost:" << cost;
+  OfflineSQLitePgle::stats.node_misses++;
   return cost;
 }
 }  // namespace auto_reorder

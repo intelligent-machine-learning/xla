@@ -54,6 +54,7 @@ void GetXPlaneLatencyInfo(
       };
       xevent.Metadata().ForEachStat(for_each_stat);
       xevent.ForEachStat(for_each_stat);
+      // ns/1000= us
       double latency = static_cast<double>(xevent.DurationNs()) / 1e3;
       if (!hlo_name.has_value()) {
         // why some hlo have no name?
@@ -182,10 +183,10 @@ Status ConvertXplaneToOfflineSQLitePgle(
     auto profile_it = hlo_instr_profile_info.find(iter.first);
     if (profile_it == hlo_instr_profile_info.end()) {
       VLOG(4) << "No instr info found for instr: " << iter.first;
-      stats.misses++;
+      stats.node_misses++;
       continue;
     } else {
-      stats.hits++;
+      stats.node_hits++;
     }
 
     auto_reorder::InstrProfileInfo cost = profile_it->second;
@@ -213,8 +214,8 @@ Status ConvertXplaneToOfflineSQLitePgle(
     }
     waiting_insert_profile.clear();
   }
-  VLOG(4) << "Lookup inst profiler, Hits: " << stats.hits
-          << " Misses: " << stats.misses;
+  VLOG(4) << "Lookup inst profiler, Hits: " << stats.node_hits
+          << " Misses: " << stats.node_misses;
   return OkStatus();
 }
 Status ConvertXplaneUnderLogdirToOfflineSQLitePgle(

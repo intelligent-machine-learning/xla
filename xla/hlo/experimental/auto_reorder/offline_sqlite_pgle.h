@@ -37,8 +37,10 @@ struct SqliteDeleter {
 using SqlitePtr = std::unique_ptr<sqlite3, SqliteDeleter>;
 
 struct HloLatencyStats {
-  uint32_t hits = 0;
-  uint32_t misses = 0;
+  uint32_t node_hits = 0;
+  uint32_t edge_hits = 0;
+  uint32_t node_misses = 0;
+  uint32_t edge_misses = 0;
 };
 static const std::string kSQLCreate = R"(create table inst_profiler (
             name string,
@@ -85,6 +87,14 @@ class OfflineSQLitePgle : public LatencyEstimator {
   static std::string InstOperandHash(const xla::HloInstruction& inst);
   // Create a new table and create it's indexes
   absl::Status CreateDB();
+  static HloLatencyStats stats;
+
+  void ResetStats() {
+    OfflineSQLitePgle::stats.node_hits = 0;
+    OfflineSQLitePgle::stats.edge_hits = 0;
+    OfflineSQLitePgle::stats.node_misses = 0;
+    OfflineSQLitePgle::stats.edge_misses = 0;
+  }
   // Open a db for read/write
   absl::Status OpenDB(const std::string& db_path);
   absl::Status SaveMemoryDBToFile(const std::string& db_path);
@@ -139,11 +149,12 @@ class OfflineSQLitePgle : public LatencyEstimator {
       size_t index);
   absl::StatusOr<double> QueryInstCostByCode(HloOpcode code,
                                              std::string hash) const;
+  absl::StatusOr<double> QueryCustomInstCost(
+      const xla::HloInstruction& inst) const;
 
  protected:
   bool is_memory_db_;
   SqlitePtr client_;
-  HloLatencyStats stats;
 };
 }  // namespace auto_reorder
 }  // namespace xla
