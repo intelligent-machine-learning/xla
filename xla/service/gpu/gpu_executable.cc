@@ -843,9 +843,12 @@ absl::StatusOr<ExecutionOutput> GpuExecutable::ExecuteAsyncOnStreamImpl(
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
   // Force synchronous execution if the allocator requires it.
-  const bool block_host_until_done =
+  bool block_host_until_done =
       !memory_allocator->AllowsAsynchronousDeallocation();
-
+  if (std::getenv("SYNC")) {
+    VLOG(0) << "SYNC";
+    block_host_until_done = true;
+  }
   // Lock the GPU with a shared lock so that we don't interfere with autotuning
   // that may be running during JIT compilation while allowing multiple XLA
   // computations to use the same GPU simultaneously. We do not add locking for
