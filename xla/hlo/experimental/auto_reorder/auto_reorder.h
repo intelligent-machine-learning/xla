@@ -15,7 +15,7 @@
 #include <deque> //c++11
 // #include "xla/statusor.h"
 namespace xla {
-NodeType GetEdgeTypeOfInst(const HloInstruction& hlo) {
+inline NodeType GetEdgeTypeOfInst(const HloInstruction& hlo) {
   auto op = GpuGetCanonicalAsyncOp(hlo);
   if (op.outer == HloOpcode::kAsyncDone) {
     if (hlo.IsAsynchronous() &&

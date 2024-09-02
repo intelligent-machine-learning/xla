@@ -5,7 +5,7 @@
 
 namespace xla {
 constexpr int kMaxConcurrentAsyncCollectivePermutes = 5;
-SchedulerConfig GetSchedulerConfig(int64_t memory_limit) {
+inline SchedulerConfig GetSchedulerConfig(int64_t memory_limit) {
   SchedulerConfig config;
   config.all_reduce_overlap_limit = 1;
   config.collective_permute_overlap_limit = 1;
@@ -15,7 +15,7 @@ SchedulerConfig GetSchedulerConfig(int64_t memory_limit) {
   config.memory_limit = memory_limit;
   return config;
 }
-SchedulerConfig GetDefaultSchedConfig() {
+inline SchedulerConfig GetDefaultSchedConfig() {
   SchedulerConfig sched_cfg;
   sched_cfg.collective_permute_overlap_limit =
       kMaxConcurrentAsyncCollectivePermutes;
@@ -23,7 +23,7 @@ SchedulerConfig GetDefaultSchedConfig() {
   return sched_cfg;
 }
 
-CanonicalAsyncOp GpuGetCanonicalAsyncOp(const HloInstruction& hlo) {
+inline CanonicalAsyncOp GpuGetCanonicalAsyncOp(const HloInstruction& hlo) {
   switch (hlo.opcode()) {
     case HloOpcode::kSend:
       return {HloOpcode::kAsyncStart, HloOpcode::kSend};

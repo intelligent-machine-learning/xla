@@ -58,7 +58,7 @@ enum class NodeType {
   kUnknown = 99,
 };
 
-std::string NodeTypeToString(NodeType nodetype) {
+inline std::string NodeTypeToString(NodeType nodetype) {
   switch (nodetype) {
     case NodeType::kCompute:
       return "compute";
@@ -73,7 +73,7 @@ std::string NodeTypeToString(NodeType nodetype) {
       return "unknown";
   }
 }
-NodeType StringToNodeType(std::string s) {
+inline NodeType StringToNodeType(std::string s) {
   if (s == "compute") {
     return NodeType::kCompute;
   } else if (s == "communication") {
