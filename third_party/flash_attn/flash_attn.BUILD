@@ -87,7 +87,6 @@ cuda_library(
     strip_include_prefix = "csrc/flash_attn/src",
     deps = [
         "@torch//:headers",
-        "@torch//:runtime_headers",
         "@torch//:libtorch",
         "@torch//:libc10",
         "@cutlass_for_flash_attn//:cutlass",
