@@ -50,9 +50,25 @@ class CostGenerator {
   };
   int operator()() { return std::max(1, static_cast<int>(dist_(gen_))); }
 
- private:
+ protected:
   std::mt19937 gen_;
   std::normal_distribution<float> dist_;
+};
+class CostZeroGenrator : public CostGenerator {
+ public:
+  CostZeroGenrator(int mean, int std, int seed)
+      : CostGenerator(mean, std, seed), mean_(mean), std_(std) {}
+  int operator()() {
+    int value = CostGenerator::operator()();
+    if (value < mean_ - std_) {  // 1 delta
+      return 0;
+    }
+    return value;
+  }
+
+ private:
+  int mean_;
+  int std_;
 };
 
 class SavedInstLatencyEstimator : public GpuLatencyEstimator {
@@ -1580,6 +1596,65 @@ TEST_F(AutoReorderingTest, ReorderPassStableOrder) {
   EXPECT_TRUE(status.ok());
   EXPECT_EQ(comm_op_1, comm_op_2);
   EXPECT_TRUE(CheckParameterInst(hlo_module.get()));
+}
+TEST_F(AutoReorderingTest, ReorderPassWithRandomZero) {
+  // GTEST_SKIP() << "Skipping single test";
+  std::srand(kRandomSeed);
+  auto hlo_module = CreateNewUnverifiedModule();
+  auto gpu_latency_estimator = std::make_unique<SavedInstLatencyEstimator>();
+  SchedulerConfig sched_config = GetDefaultSchedConfig();
+  auto st = MakeRandomComputation(hlo_module.get(), gpu_latency_estimator.get(),
+                                  /*inst num*/ 200,
+                                  /*max deps*/ 5,
+                                  /*communication rate*/ 0.2,
+                                  std::mt19937{kRandomSeed},
+                                  CostZeroGenrator(50, 5, kRandomSeed));
+  // std::cout<<hlo_module->ToString()<<std::endl;
+  EXPECT_TRUE(st.ok());
+  VLOG(2) << "finish random computation make" << std::endl;
+  auto gpu_latency_estimator2 = gpu_latency_estimator->clone();
+  auto gpu_latency_estimator3 = gpu_latency_estimator->clone();
+  // run AutoReorder for compare
+
+  auto status = RunScheduler(hlo_module.get(), sched_config,
+                             std::move(gpu_latency_estimator));
+  EXPECT_TRUE(status.ok());
+
+  auto statics = GetModuleCost(hlo_module.get(), sched_config,
+                               gpu_latency_estimator2.get());
+  EXPECT_TRUE(statics.ok());
+  EXPECT_TRUE(CheckParameterInst(hlo_module.get()));
+  auto auto_reorder_cost = statics.value().total_cycles;
+  std::cout << "ReorderPassWithRandom:" << auto_reorder_cost << std::endl;
+
+  // compare post order vs reorder
+  auto post_insts_order =
+      hlo_module->entry_computation()->MakeInstructionPostOrder();
+  hlo_module->schedule().set_sequence(hlo_module->entry_computation(),
+                                      post_insts_order);
+
+  statics = GetModuleCost(hlo_module.get(), sched_config,
+                          gpu_latency_estimator2.get());
+  EXPECT_TRUE(statics.ok());
+  auto post_order_cost = statics.value().total_cycles;
+  EXPECT_TRUE(CheckParameterInst(hlo_module.get()));
+  std::cout << "MakeInstructionPostOrder:" << post_order_cost << std::endl;
+
+  // run LatencyHidingScheduler for compare
+  // NOTICE:  DO NOT using gpu_latency_estimator after
+  // std::move(gpu_latency_estimator)
+  auto lhs_status = RunLatencyHidingScheduler(
+      hlo_module.get(), sched_config, std::move(gpu_latency_estimator3));
+  EXPECT_TRUE(lhs_status.ok());
+  EXPECT_TRUE(CheckParameterInst(hlo_module.get()));
+  statics = GetModuleCost(hlo_module.get(), sched_config,
+                          gpu_latency_estimator2.get());
+
+  EXPECT_TRUE(statics.ok());
+  auto xla_lhs_cost = statics.value().total_cycles;
+  std::cout << "RunLatencyHidingScheduler:" << xla_lhs_cost << std::endl;
+  EXPECT_LE(auto_reorder_cost, post_order_cost);
+  EXPECT_LE(auto_reorder_cost, xla_lhs_cost);
 }
 TEST_F(AutoReorderingTest, ReorderPassWithRandom) {
   // GTEST_SKIP() << "Skipping single test";

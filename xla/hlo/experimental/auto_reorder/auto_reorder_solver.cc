@@ -446,6 +446,26 @@ LPSchedulerFunc(std::vector<ContainerType*>)::GetSortedNodes() const {
       // std::sort(
       sorted_nodes.begin(), sorted_nodes.end(),
       [this](ContainerType* a, ContainerType* b) {
+        if(a->GetStart() == b->GetStart()){
+          std::unordered_set<int> a_deps;
+          a_deps.reserve(a->GetDeps().size());
+          for(auto dep : a->GetDeps()){
+            a_deps.insert(std::get<0>(dep)->UUID());
+          }
+          if(a_deps.count(b->UUID()) > 0){
+            return false; // b need before a
+          }
+          std::unordered_set<int> b_deps;
+          b_deps.reserve(b->GetDeps().size());
+          for(auto dep : b->GetDeps()){
+            b_deps.insert(std::get<0>(dep)->UUID());
+          }
+          if(b_deps.count(a->UUID()) > 0){
+            return false;
+          }
+          //else, any order is ok
+          return true;
+        }
         return a->GetStart() < b->GetStart();
       });
   return sorted_nodes;

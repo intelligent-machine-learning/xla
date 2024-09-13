@@ -19,7 +19,9 @@ bazel run --compilation_mode=dbg xla/hlo/experimental/auto_reorder:offline_sqlit
 --incompatible_strict_action_env --action_env=USE_CUDA --action_env=XLA_CUDA --jobs=8
 ```
 
-
+build auto reorder tools
+1. convert xplane to sqlite file
+2. convert xplane to chrome_trace_json
 
 ## Convert Profiler file to sqlite file
 build auto reorder tools, convert xplane to sqlite file
@@ -32,7 +34,7 @@ convert_xplane_tools <xplane_dir> <output_filename>
 convert_xplane_tools is build by bazel:
 
 ```
-bazel build   xla/hlo/experimental/auto_reorder:convert_xplane_tools
+bazel build xla/hlo/experimental/auto_reorder:convert_xplane_tools --incompatible_strict_action_env --action_env=USE_CUDA --action_env=XLA_CUDA --jobs=8  --config=monolithic
 ```
 
 

@@ -239,6 +239,18 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
   TF_RET_CHECK(status.ok()) << "Solver error:" << status.message();
   return status;
 }
+bool AutoReorderPass::NodeHaveDep(
+    LPContainer<const HloInstruction*>* node,
+    LPContainer<const HloInstruction*>* maybe_deps_node) {
+  // node's deps have left
+  for (auto dep_pair : node->GetDeps()) {
+    auto dep_node = std::get<0>(dep_pair);
+    if (maybe_deps_node->UUID() == dep_node->UUID()) {
+      return true;
+    }
+  }
+  return false;
+}
 std::vector<LPContainer<const HloInstruction*>*>
 AutoReorderPass::FunetuneNodeOrder(
     std::vector<LPContainer<const HloInstruction*>*> sorted_nodes) {
@@ -259,39 +271,56 @@ post_schedule_queue.
   //  std::vector<LPContainer<const HloInstruction*>*> pre_schedule_queue;
   std::deque<LPContainer<const HloInstruction*>*> post_schedule_queue;
 
+  std::set<int> scheduled_node_set;
   return_inst_queue.reserve(sorted_nodes.size());
-  auto clean_post_queue = [&post_schedule_queue, &return_inst_queue]() {
+
+  auto ensure_node_be_schedule = [&scheduled_node_set, &return_inst_queue](
+                                     LPContainer<const HloInstruction*>* node) {
+    if (scheduled_node_set.count(node->UUID()) == 0) {
+      // where dep nodes is not schedule
+      scheduled_node_set.insert(node->UUID());
+      return_inst_queue.push_back(node);
+    }
+  };
+  auto clean_post_queue = [&post_schedule_queue, &return_inst_queue,
+                           ensure_node_be_schedule]() {
     // let current holded_compute_node push into queue
     while (!post_schedule_queue.empty()) {
-      return_inst_queue.push_back(post_schedule_queue.front());
+      ensure_node_be_schedule(post_schedule_queue.front());
       post_schedule_queue.pop_front();
     }
   };
-  auto let_done_nodes_schedule_soon =
-      [&post_schedule_queue, &return_inst_queue](
+  auto let_deps_node_schduler_soon =
+      [&post_schedule_queue, &return_inst_queue, ensure_node_be_schedule](
           std::deque<LPContainer<const HloInstruction*>*> dep_done_nodes) {
         // O(m+n)
         std::unordered_set<int> toRemoveSet;
         for (auto dep_node : dep_done_nodes) {
           toRemoveSet.insert(dep_node->UUID());
         }
+        // 1. from post_schedule_queue clear deps node
         post_schedule_queue.erase(
             std::remove_if(post_schedule_queue.begin(),
                            post_schedule_queue.end(),
                            [&](LPContainer<const HloInstruction*>* node) {
                              bool removed = false;
                              if (toRemoveSet.count(node->UUID()) > 0) {
-                               return_inst_queue.push_back(node);
+                               ensure_node_be_schedule(node);
                                removed = true;
                              }
                              return removed;
                            }),
             post_schedule_queue.end());
+        // 2. ensure all deps node have scheduled
+        for (auto dep_node : dep_done_nodes) {
+          ensure_node_be_schedule(dep_node);
+        }
       };
   // step 1:O(n),init compute_queue and communicate_queue FIFO, head will first
   // execute.
   for (auto node : sorted_nodes) {
     // insert and pop_back
+
     if (node->IsComputation()) {
       compute_queue.push_back(node);
     } else {
@@ -304,7 +333,7 @@ post_schedule_queue.
     if (communicate_queue.empty()) {  // all other is compute queue
       clean_post_queue();
       while (!compute_queue.empty()) {
-        return_inst_queue.push_back(compute_queue.front());
+        ensure_node_be_schedule(compute_queue.front());
         compute_queue.pop_front();
       }
       break;
@@ -312,7 +341,7 @@ post_schedule_queue.
     if (compute_queue.empty()) {
       clean_post_queue();
       while (!communicate_queue.empty()) {
-        return_inst_queue.push_back(communicate_queue.front());
+        ensure_node_be_schedule(communicate_queue.front());
         communicate_queue.pop_front();
       }
       break;
@@ -335,6 +364,36 @@ post_schedule_queue.
         all_inst_is_done = false;
       }
     }
+    if (NodeHaveDep(next_communicate_node, next_compute_node)) {
+      // next_compute_node should be scheduler first
+      std::deque<LPContainer<const HloInstruction*>*> deps_queue;
+      for (auto dep_pair : next_compute_node->GetDeps()) {
+        LPContainer<const HloInstruction*>* dep_node =
+            dynamic_cast<LPContainer<const HloInstruction*>*>(
+                std::get<0>(dep_pair));
+        deps_queue.push_back(dep_node);
+      }
+      let_deps_node_schduler_soon(deps_queue);
+      ensure_node_be_schedule(next_compute_node);
+
+      compute_queue.pop_front();
+      continue;
+    }
+    if (NodeHaveDep(next_compute_node, next_communicate_node)) {
+      // next_communicate_node should be scheduler first
+      std::deque<LPContainer<const HloInstruction*>*> deps_queue;
+      for (auto dep_pair : next_communicate_node->GetDeps()) {
+        LPContainer<const HloInstruction*>* dep_node =
+            dynamic_cast<LPContainer<const HloInstruction*>*>(
+                std::get<0>(dep_pair));
+        deps_queue.push_back(dep_node);
+      }
+      let_deps_node_schduler_soon(deps_queue);
+      ensure_node_be_schedule(next_communicate_node);
+      communicate_queue.pop_front();
+      continue;
+    }
+
     if (all_inst_is_start) {
       // if start
       bool all_deps_finish = true;
@@ -355,10 +414,8 @@ post_schedule_queue.
           next_communicate_node->GetStart() > next_compute_node->GetStart() &&
           next_communicate_node->GetStart() <
               next_compute_node->GetStart() + next_compute_node->GetCost()) {
-        let_done_nodes_schedule_soon(deps_queue);
-        return_inst_queue.push_back(next_communicate_node);
-        current_communicate_time = next_communicate_node->GetStart() +
-                                   next_communicate_node->GetCost();
+        let_deps_node_schduler_soon(deps_queue);
+        ensure_node_be_schedule(next_communicate_node);
         communicate_queue.pop_front();
         continue;
       }
@@ -380,9 +437,8 @@ post_schedule_queue.
                 std::get<0>(dep_pair));
         deps_queue.push_back(dep_node);
       }
-      let_done_nodes_schedule_soon(deps_queue);
-
-      return_inst_queue.push_back(next_compute_node);
+      let_deps_node_schduler_soon(deps_queue);
+      ensure_node_be_schedule(next_compute_node);
       compute_queue.pop_front();
     } else {
       std::deque<LPContainer<const HloInstruction*>*> deps_queue;
@@ -393,9 +449,8 @@ post_schedule_queue.
                 std::get<0>(dep_pair));
         deps_queue.push_back(dep_node);
       }
-      let_done_nodes_schedule_soon(deps_queue);
-
-      return_inst_queue.push_back(next_communicate_node);
+      let_deps_node_schduler_soon(deps_queue);
+      ensure_node_be_schedule(next_communicate_node);
       communicate_queue.pop_front();
     }
   }  // end for

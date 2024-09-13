@@ -12,7 +12,7 @@
 #include "xla/hlo/experimental/auto_reorder/common.h"
 #include <functional>
 #include <queue>
-#include <deque> //c++11
+#include <deque>  //c++11
 // #include "xla/statusor.h"
 namespace xla {
 inline NodeType GetEdgeTypeOfInst(const HloInstruction& hlo) {
@@ -94,6 +94,9 @@ class AutoReorderPass : public HloModulePass {
       std::vector<LPContainer<const HloInstruction*>*> sorted_nodes);
   void SaveOrder(std::vector<LPContainer<const HloInstruction*>*> sorted_nodes,
                  std::string filename);
+  // right node's deps include left;
+  bool NodeHaveDep(LPContainer<const HloInstruction*>* node,
+                   LPContainer<const HloInstruction*>* maybe_deps_node);
 };
 
 // CanonicalAsyncOp GpuGetCanonicalAsyncOp(const HloInstruction& hlo);

@@ -706,9 +706,10 @@ LatencyEstimator::TimeCost OfflineSQLitePgle::GetLatencyBetween(
 }
 LatencyEstimator::TimeCost OfflineSQLitePgle::NodeCost(
     const HloInstruction* instr) const {
+  static constexpr TimeCost kLowCost = 1.0;
+
   if (hlo_query::IsAsyncCollectiveStartOp(instr, /*include_send_recv=*/true) ||
       hlo_query::IsAsyncCollectiveDoneOp(instr, /*include_send_recv=*/true)) {
-    static constexpr TimeCost kLowCost = 1.0;
     OfflineSQLitePgle::stats.node_misses++;
     return kLowCost;
   }
