@@ -24,7 +24,7 @@ limitations under the License.
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Value.h"
-#include "mlir/IR/MLIRContext.h"  // from @llvm-project
+#include "mlir/IR/MLIRContext.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/service/gpu/elemental_ir_emitter.h"
@@ -45,12 +45,12 @@ namespace xla {
 namespace gpu {
 
 const Shape& GetLargestConcatOperandShape(const HloFusionAnalysis& analysis) {
-  const HloInstruction* concat = analysis.fusion_heroes().front();
-  int64_t dim = concat->concatenate_dimension();
+  const HloInstruction& concat = analysis.fusion_hero(0).instruction();
+  int64_t dim = concat.concatenate_dimension();
   auto less = [&](const HloInstruction* lhs, const HloInstruction* rhs) {
     return lhs->shape().dimensions(dim) < rhs->shape().dimensions(dim);
   };
-  HloInstruction* operand = *absl::c_max_element(concat->operands(), less);
+  HloInstruction* operand = *absl::c_max_element(concat.operands(), less);
   return operand->shape();
 }
 
@@ -86,18 +86,18 @@ absl::Status ConcatenateFusion::EmitKernel(
   llvm::Type* index_type =
       GetIndexTypeForKernel(&fusion, launch_dims.launch_bound(), builder);
 
-  const HloInstruction* concat = analysis_.fusion_heroes().front();
-  int64_t concat_dim = concat->concatenate_dimension();
+  const HloInstruction& concat = analysis_.fusion_hero(0).instruction();
+  int64_t concat_dim = concat.concatenate_dimension();
   int64_t operand_offset = 0;
 
   // Emit the slices that correspond to the operands of the concat hero.
-  for (const HloInstruction* operand : concat->operands()) {
+  for (const HloInstruction* operand : concat.operands()) {
     llvm_ir::BodyEmitter body_emitter =
         [&](const llvm_ir::IrArray::Index& operand_index) -> absl::Status {
       // Bind concat to generate the current operand.
       TF_ASSIGN_OR_RETURN(auto operand_generator,
                           fused_emitter.GetGenerator(*operand));
-      fused_emitter.BindGenerator(*concat, [&](llvm_ir::IrArray::Index) {
+      fused_emitter.BindGenerator(concat, [&](llvm_ir::IrArray::Index) {
         return operand_generator(operand_index);
       });
 
@@ -111,8 +111,9 @@ absl::Status ConcatenateFusion::EmitKernel(
       for (const auto& [output, root] :
            llvm::zip_equal(outputs, analysis_.fusion_roots())) {
         llvm_ir::IrArray::Index root_index = result_index.SourceIndexOfBitcast(
-            concat->shape(), root->shape(), builder);
-        TF_ASSIGN_OR_RETURN(auto generator, fused_emitter.GetGenerator(*root));
+            concat.shape(), root.shape(), builder);
+        TF_ASSIGN_OR_RETURN(auto generator,
+                            fused_emitter.GetGenerator(root.instruction()));
         TF_ASSIGN_OR_RETURN(llvm::Value * value, generator(root_index));
         output.EmitWriteArrayElement(root_index, value, builder);
       }

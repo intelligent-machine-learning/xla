@@ -1,5 +1,5 @@
-load("//tsl:tsl.bzl", "if_not_android", "internal_visibility", "nvtx_headers")
-load("//tsl:tsl.default.bzl", "filegroup")
+load("@xla//xla/tsl:tsl.bzl", "if_not_android", "internal_visibility", "nvtx_headers")
+load("@xla//xla/tsl:tsl.default.bzl", "filegroup", "get_compatible_with_portable")
 load("//tsl/platform:build_config.bzl", "tsl_cc_test")
 load("//tsl/platform:build_config_root.bzl", "if_static")
 load("//tsl/platform:rules_cc.bzl", "cc_library")
@@ -38,7 +38,9 @@ filegroup(
         "scoped_memory_debug_annotation.h",
         "traceme.h",
         "traceme_encode.h",
+        "//tsl/profiler/utils:mobile_srcs_no_runtime",
     ],
+    compatible_with = get_compatible_with_portable(),
     visibility = ["//visibility:public"],
 )
 
@@ -64,6 +66,7 @@ cc_library(
         "//tsl/platform:logging",
         "//tsl/platform:status",
         "//tsl/profiler/protobuf:xplane_proto_cc",
+        "@com_google_absl//absl/status",
     ],
 )
 
@@ -112,12 +115,12 @@ tsl_cc_test(
         ":profiler_factory_impl",
         ":profiler_interface",
         "//tsl/platform:macros",
-        "//tsl/platform:status",
         "//tsl/platform:test",
         "//tsl/platform:test_main",
         "//tsl/profiler/protobuf:profiler_options_proto_cc",
         "//tsl/profiler/protobuf:xplane_proto_cc",
         "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/status",
     ],
 )
 
@@ -126,7 +129,7 @@ cc_library(
     hdrs = ["profiler_interface.h"],
     copts = tf_profiler_copts(),
     visibility = internal_visibility([
-        "//tsl:internal",
+        "@xla//xla/tsl:internal",
         "//tsl/profiler:internal",
         "//tsl/profiler:xla_profiler_backends",
     ]),
@@ -149,6 +152,7 @@ cc_library(
         "//tsl/platform:errors",
         "//tsl/platform:macros",
         "//tsl/platform:statusor",
+        "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings:string_view",
         "@xla//xla/tsl/util:env_var",
     ],
@@ -159,16 +163,16 @@ tsl_cc_test(
     srcs = ["profiler_lock_test.cc"],
     deps = [
         ":profiler_lock",
-        "//tsl/platform:statusor",
         "//tsl/platform:test",
         "//tsl/platform:test_main",
+        "@com_google_absl//absl/status:statusor",
     ],
 )
 
 cc_library(
     name = "profiler_session",
     hdrs = ["profiler_session.h"],
-    visibility = internal_visibility(["//tsl:internal"]),
+    visibility = internal_visibility(["@xla//xla/tsl:internal"]),
     deps = [
         "//tsl/platform",
         "//tsl/platform:errors",
@@ -178,6 +182,7 @@ cc_library(
         "//tsl/platform:types",
         "//tsl/profiler/protobuf:profiler_options_proto_cc",
         "//tsl/profiler/protobuf:xplane_proto_cc",
+        "@com_google_absl//absl/status",
     ] + if_not_android([
         ":profiler_interface",
         ":profiler_lock",
@@ -206,6 +211,7 @@ cc_library(
         "//tsl/profiler/protobuf:profiler_options_proto_cc",
         "//tsl/profiler/protobuf:xplane_proto_cc",
         "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/status",
     ] + if_not_android([
         ":profiler_collection",
         ":profiler_factory",
@@ -262,6 +268,7 @@ cc_library(
         "//tsl/platform:logging",
         "//tsl/platform:macros",
         "//tsl/platform:types",
+        "//tsl/profiler/utils:no_init",
         "@com_google_absl//absl/strings",
     ] + if_not_android([
         "//tsl/profiler/backends/cpu:traceme_recorder",
@@ -270,7 +277,7 @@ cc_library(
 )
 
 cc_library(
-    name = "nvtx_utils",
+    name = "nvtx_utils_impl",
     srcs = if_cuda_is_configured(
         ["nvtx_utils.cc"],
         ["nvtx_utils_stub.cc"],
@@ -281,9 +288,32 @@ cc_library(
 )
 
 cc_library(
+    name = "nvtx_utils_libtpu",
+    srcs = ["nvtx_utils_stub.cc"],
+    hdrs = ["nvtx_utils.h"],
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "libtpu_on_gce",
+    values = {"copt": "-DLIBTPU_ON_GCE"},
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "nvtx_utils",
+    hdrs = ["nvtx_utils.h"],
+    visibility = ["//visibility:public"],
+    deps = select({
+        # Remove this once we clean up all the CUDA specific deps.
+        "libtpu_on_gce": [":nvtx_utils_libtpu"],
+        "//conditions:default": [":nvtx_utils_impl"],
+    }),
+)
+
+cc_library(
     name = "scoped_annotation",
     hdrs = [
-        "nvtx_utils.h",
         "scoped_annotation.h",
     ],
     visibility = ["//visibility:public"],
@@ -332,11 +362,13 @@ cc_library(
     visibility = internal_visibility([
         "@xla//xla/backends/profiler/plugin:__pkg__",
         "//learning/brain/tfrc/executor/stream_executor:__pkg__",
+        "@xla//xla/backends/profiler/cpu:__pkg__",
     ]),
     deps = [
         ":profiler_interface",
         "//tsl/platform:status",
         "//tsl/profiler/protobuf:xplane_proto_cc",
+        "@com_google_absl//absl/status",
     ],
 )
 

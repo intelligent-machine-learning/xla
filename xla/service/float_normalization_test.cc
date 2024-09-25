@@ -16,11 +16,15 @@ limitations under the License.
 #include "xla/service/float_normalization.h"
 
 #include <cstdint>
+#include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
+#include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "xla/hlo/ir/hlo_computation.h"
+#include "xla/hlo/ir/hlo_input_output_alias_config.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/ir/hlo_opcode.h"
@@ -29,7 +33,6 @@ limitations under the License.
 #include "xla/service/hlo_verifier.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
-#include "xla/statusor.h"
 #include "xla/test.h"
 #include "xla/test_helpers.h"
 #include "xla/tests/hlo_test_base.h"
@@ -303,7 +306,7 @@ TEST_F(FloatNormalizationTest, ResolveMixedPrecisionTupleAllReduce) {
 
   HloInstruction* crs = builder.AddInstruction(HloInstruction::CreateAllReduce(
       ShapeUtil::MakeTupleShape({f32_shape, bf16_shape}), {a, b}, reduction,
-      /*replica_groups=*/{},
+      /*device_list=*/CollectiveDeviceList(),
       /*constrain_layout=*/false,
       /*channel_id=*/std::nullopt,
       /*use_global_device_ids=*/false));
@@ -334,7 +337,8 @@ TEST_F(FloatNormalizationTest, ResolveMixedPrecisionTupleAllToAllToBF16) {
   replica_groups[0].add_replica_ids(1);
   HloInstruction* a2a = builder.AddInstruction(HloInstruction::CreateAllToAll(
       ShapeUtil::MakeTupleShape({bf16_shape, bf16_shape}), {a, a},
-      replica_groups, /*constrain_layout=*/false, std::nullopt));
+      CollectiveDeviceList(replica_groups), /*constrain_layout=*/false,
+      std::nullopt));
   auto computation = module->AddEntryComputation(builder.Build());
 
   EXPECT_TRUE(Normalize(module.get()));
@@ -363,7 +367,8 @@ TEST_F(FloatNormalizationTest, ResolveMixedPrecisionTupleAllToAllToF32) {
   replica_groups[0].add_replica_ids(1);
   HloInstruction* a2a = builder.AddInstruction(HloInstruction::CreateAllToAll(
       ShapeUtil::MakeTupleShape({bf16_shape, f32_shape}), {a, a},
-      replica_groups, /*constrain_layout=*/false, std::nullopt));
+      CollectiveDeviceList(replica_groups), /*constrain_layout=*/false,
+      std::nullopt));
   auto computation = module->AddEntryComputation(builder.Build());
 
   EXPECT_TRUE(Normalize(module.get()));
@@ -569,7 +574,7 @@ TEST_F(FloatNormalizationNoComputeSupportTest,
   HloInstruction* crs = builder.AddInstruction(HloInstruction::CreateAllReduce(
       ShapeUtil::MakeTupleShape({bf16_shape_a, bf16_shape_b}), {a, b},
       reduction,
-      /*replica_groups=*/{},
+      /*device_list=*/CollectiveDeviceList(),
       /*constrain_layout=*/false,
       /*channel_id=*/std::nullopt,
       /*use_global_device_ids=*/false));
@@ -615,7 +620,7 @@ TEST_F(FloatNormalizationNoComputeSupportTest,
 
   HloInstruction* all_reduce = builder.AddInstruction(
       HloInstruction::CreateAllReduce(bf16_shape_a, {a}, reduction,
-                                      /*replica_groups=*/{},
+                                      /*device_list=*/CollectiveDeviceList(),
                                       /*constrain_layout=*/false,
                                       /*channel_id=*/std::nullopt,
                                       /*use_global_device_ids=*/false));
@@ -668,7 +673,7 @@ TEST_F(FloatNormalizationNoComputeSupportTest,
 
   HloInstruction* crs = builder.AddInstruction(
       HloInstruction::CreateAllReduce(bf16_shape_a, {a}, reduction,
-                                      /*replica_groups=*/{},
+                                      /*device_list=*/CollectiveDeviceList(),
                                       /*constrain_layout=*/false,
                                       /*channel_id=*/std::nullopt,
                                       /*use_global_device_ids=*/false));
@@ -705,7 +710,7 @@ TEST_F(FloatNormalizationNoComputeSupportTest,
   HloInstruction* crs =
       builder.AddInstruction(HloInstruction::CreateReduceScatter(
           bf16_shape_scattered, {a}, reduction,
-          /*replica_groups=*/{},
+          /*device_list=*/CollectiveDeviceList(),
           /*constrain_layout=*/false,
           /*channel_id=*/std::nullopt,
           /*use_global_device_ids=*/false, /*scatter_dimension*/ 0));
@@ -750,6 +755,34 @@ TEST_F(FloatNormalizationTest, ConvertBeforeTuple) {
   EXPECT_EQ(
       computation->root_instruction()->shape().tuple_shapes(0).element_type(),
       F32);
+}
+
+TEST_F(FloatNormalizationTest, KeepEntryInputOutputAlias) {
+  const std::string hlo_text = R"(
+    HloModule m,
+      input_output_alias={ {}: (1, {}, must-alias) },
+      entry_computation_layout={(bf16[1,64], bf16[1,64])->bf16[1,64]}
+
+    ENTRY e {
+      arg_0 = bf16[1,64] parameter(0)
+      output_param = bf16[1,64] parameter(1)
+      constant = bf16[] constant(2)
+      broadcast = bf16[1,64] broadcast(constant), dimensions={}
+      ROOT multiply = bf16[1,64] multiply(arg_0, broadcast)
+    })";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(hlo_text));
+
+  EXPECT_TRUE(Normalize(module.get(), BF16));
+
+  HloInputOutputAliasConfig& alias_config = module->input_output_alias_config();
+  ASSERT_FALSE(alias_config.ParameterHasAlias(0, {}));
+  ASSERT_TRUE(alias_config.ParameterHasAlias(1, {}));
+  ASSERT_TRUE(alias_config.OutputHasAlias({}));
+  EXPECT_EQ(alias_config.GetAliasedParameter({})->parameter_number, 1);
+  EXPECT_EQ(alias_config.GetAliasedParameter({})->kind,
+            HloInputOutputAliasConfig::AliasKind::kMustAlias);
 }
 
 }  // namespace xla

@@ -21,6 +21,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "absl/strings/str_join.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_computation.h"
@@ -110,7 +111,7 @@ bool MayPipeline(const HloCollectivePermuteInstruction& collective_permute) {
 // collective-permute will be pipelined and the value of the attribute
 // represents the runtime stream to execute the instruction. Without the
 // frontend attribute, the collective-permute will not be pipelined.
-Status DecomposeCollectivePermute(
+absl::Status DecomposeCollectivePermute(
     HloCollectivePermuteInstruction* collective_permute,
     HloComputation* computation, const std::string& pipeline_decision) {
   // We currently only decompose collective-permute with a channel_id.
@@ -156,6 +157,13 @@ Status DecomposeCollectivePermute(
   HloInstruction* send_done =
       computation->AddInstruction(HloInstruction::CreateSendDone(send));
 
+  // We will add control dependence to represent how we want to order Send/Recv
+  // and other collective operations. Here we only add the necessary control
+  // dependence to avoid optimization that can cause problems, in particular,
+  // to prevent fusion from fusing the computation of Send-data with the
+  // computation that requires the Recv-result.
+  TF_RETURN_IF_ERROR(send->AddControlDependencyTo(recv_done));
+
   HloInstruction* recv_data = computation->AddInstruction(
       HloInstruction::CreateGetTupleElement(recv_done, 0));
   TF_RETURN_IF_ERROR(collective_permute->ReplaceAllUsesWith(recv_data));
@@ -171,7 +179,7 @@ Status DecomposeCollectivePermute(
     recv_done->add_frontend_attributes(attributes);
   }
 
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 // Returns true if the (source, target) pairs form a forward cycle with all

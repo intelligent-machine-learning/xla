@@ -1,5 +1,5 @@
-load("//tsl:tsl.bzl", "internal_visibility")
-load("//tsl:tsl.default.bzl", "filegroup")
+load("@xla//xla/tsl:tsl.bzl", "internal_visibility")
+load("@xla//xla/tsl:tsl.default.bzl", "filegroup")
 load(
     "//tsl/platform:build_config.bzl",
     "tsl_cc_test",
@@ -18,11 +18,7 @@ cc_library(
     name = "histogram",
     srcs = ["histogram.cc"],
     hdrs = ["histogram.h"],
-    visibility = internal_visibility([
-        "//learning/brain/google/monitoring:__pkg__",
-        "//tensorflow/core/lib/histogram:__pkg__",
-        "//tsl/lib/monitoring:__pkg__",
-    ]),
+    visibility = ["//visibility:public"],
     deps = [
         "//tsl/platform:logging",
         "//tsl/platform:macros",

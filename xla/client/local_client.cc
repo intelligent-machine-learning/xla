@@ -20,6 +20,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "xla/client/xla_computation.h"
 #include "xla/service/backend.h"
 #include "xla/service/dump.h"
@@ -51,7 +52,7 @@ LocalExecutable::LocalExecutable(std::unique_ptr<Executable> executable,
       << "Must have a valid device ordinal that the executable was built for.";
 }
 
-Status LocalExecutable::ValidateExecutionOptions(
+absl::Status LocalExecutable::ValidateExecutionOptions(
     const ExecutableRunOptions& run_options, const Backend& backend) {
   if (run_options.stream() != nullptr) {
     if (!run_options.stream()->ok()) {
@@ -60,25 +61,42 @@ Status LocalExecutable::ValidateExecutionOptions(
 
     // Check stream matches service platform.
     const se::Platform* stream_platform =
-        run_options.stream()->parent()->platform();
+        run_options.stream()->parent()->GetPlatform();
     if (stream_platform != backend_->platform()) {
       return InvalidArgument(
           "stream is for platform %s, but service targets platform %s",
           stream_platform->Name(), backend_->platform()->Name());
     }
 
-    // Cannot specify device_ordinal with a stream. The stream determines these
-    // values.
-    if (run_options.device_ordinal() != -1) {
+    // The device ordinal (if provided) should match the ordinal of the device
+    // the stream belongs to.
+    int physical_device_ordinal = -1;
+    if (run_options.physical_device_ordinal() != -1) {
+      physical_device_ordinal = run_options.physical_device_ordinal();
+      if (run_options.device_ordinal() == -1) {
+        return InvalidArgument(
+            "The logical device ordinal is required if the physical device "
+            "ordinal is specified.");
+      }
+    } else if (run_options.device_ordinal() != -1) {
+      // If the physical device ordinal is not specified, it is the same as the
+      // logical device ordinal if it is given.
+      physical_device_ordinal = run_options.device_ordinal();
+    }
+    if (physical_device_ordinal != -1 &&
+        physical_device_ordinal !=
+            run_options.stream()->parent()->device_ordinal()) {
       return InvalidArgument(
-          "cannot set both device ordinal and stream options in "
-          "ExecutableRunOptions; the stream determines the device ordinal");
+          "The physical device ordinal does not match the ordinal of the "
+          "device the stream belongs to.");
     }
   }
 
   // Verify that the device the executable was built for is equivalent
   // to the device it will run on.
-  int run_device_ordinal = run_options.device_ordinal();
+  int run_device_ordinal = run_options.physical_device_ordinal() != -1
+                               ? run_options.physical_device_ordinal()
+                               : run_options.device_ordinal();
   if (run_device_ordinal == -1) {
     run_device_ordinal = run_options.stream() != nullptr
                              ? run_options.stream()->parent()->device_ordinal()
@@ -112,7 +130,7 @@ Status LocalExecutable::ValidateExecutionOptions(
         backend.platform()->Name());
   }
 
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 absl::StatusOr<std::pair<ServiceExecutableRunOptions, StreamPool::Ptr>>
@@ -153,8 +171,11 @@ LocalExecutable::RunHelper(const absl::Span<const Shape* const> argument_shapes,
     // `service_options` (otherwise we will end up using a returned stream in
     // ExecuteOnStreamWrapper), which is why it isn't declared in the inner "if"
     // scope.
-    TF_ASSIGN_OR_RETURN(
-        stream, BorrowStreamForDevice(run_options.device_ordinal(), backend_));
+    TF_ASSIGN_OR_RETURN(stream, BorrowStreamForDevice(
+                                    run_options.physical_device_ordinal() != -1
+                                        ? run_options.physical_device_ordinal()
+                                        : run_options.device_ordinal(),
+                                    backend_));
     run_options.set_stream(stream.get());
   }
   if (run_options.allocator() == nullptr) {
@@ -207,7 +228,7 @@ static std::shared_ptr<HloSnapshot> DumpArguments(
   for (const ShapedBuffer* arg : arguments) {
     auto literal = std::make_shared<Literal>(arg->on_host_shape());
     backend->transfer_manager()->TransferLiteralFromDevice(
-        stream, *arg, literal.get(), [snapshot, literal](Status status) {
+        stream, *arg, literal.get(), [snapshot, literal](absl::Status status) {
           if (!status.ok()) {
             LOG(ERROR) << "TransferLiteralFromDevice for HLO snapshot inputs "
                           "failed: "
@@ -227,7 +248,7 @@ static void DumpOutputsAndSaveSnapshot(const Backend* backend,
   auto literal = std::make_shared<Literal>(outputs.on_host_shape());
   backend->transfer_manager()->TransferLiteralFromDevice(
       stream, outputs, literal.get(),
-      [snapshot{std::move(snapshot)}, literal](Status status) {
+      [snapshot{std::move(snapshot)}, literal](absl::Status status) {
         if (status.ok()) {
           *snapshot->mutable_result() = literal->ToProto();
         } else {
@@ -471,16 +492,16 @@ absl::StatusOr<const ShapedBuffer*> LocalClient::GlobalDataToShapedBuffer(
   return local_service_->GlobalDataToShapedBuffer(data, replica_number);
 }
 
-Status LocalClient::TransferToInfeedLocal(const LiteralSlice& literal,
-                                          int device_ordinal) {
+absl::Status LocalClient::TransferToInfeedLocal(const LiteralSlice& literal,
+                                                int device_ordinal) {
   TF_ASSIGN_OR_RETURN(se::StreamExecutor * executor,
                       backend().stream_executor(device_ordinal));
   return backend().transfer_manager()->TransferLiteralToInfeed(executor,
                                                                literal);
 }
 
-Status LocalClient::TransferFromOutfeedLocal(int device_ordinal,
-                                             MutableBorrowingLiteral literal) {
+absl::Status LocalClient::TransferFromOutfeedLocal(
+    int device_ordinal, MutableBorrowingLiteral literal) {
   TF_ASSIGN_OR_RETURN(se::StreamExecutor * executor,
                       backend().stream_executor(device_ordinal));
   return backend().transfer_manager()->TransferLiteralFromOutfeed(executor,
@@ -492,7 +513,7 @@ absl::StatusOr<int> LocalClient::ReplicaNumberToDeviceOrdinal(
   return local_service_->ReplicaNumberToDeviceOrdinal(replica_number);
 }
 
-absl::StatusOr<TransferToServerResponse> LocalClient::TransferToLocalServer(
+absl::StatusOr<GlobalDataHandle> LocalClient::TransferToLocalServer(
     const ::xla::BorrowingLiteral& literal, int device_ordinal) {
   const ::xla::Shape& shape = literal.shape();
 
@@ -505,14 +526,13 @@ absl::StatusOr<TransferToServerResponse> LocalClient::TransferToLocalServer(
       stream.get(), literal, shaped_buffer));
   std::vector<::xla::ScopedShapedBuffer> replicated_buffer;
   replicated_buffer.emplace_back(std::move(shaped_buffer));
-  ::xla::TransferToServerResponse result;
-  TF_ASSIGN_OR_RETURN(*result.mutable_data(),
+  TF_ASSIGN_OR_RETURN(GlobalDataHandle data,
                       local_service_->RegisterReplicatedBuffers(
                           std::move(replicated_buffer),
                           absl::StrCat("TransferToServer literal of shape ",
                                        ::xla::ShapeUtil::HumanString(shape))));
 
-  return result;
+  return data;
 }
 
 }  // namespace xla

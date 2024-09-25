@@ -31,9 +31,6 @@ class Pass;
 namespace func {
 class FuncOp;
 }  // namespace func
-namespace lmhlo {
-class FusionOp;
-}  // namespace lmhlo
 
 namespace mhlo {
 
@@ -80,10 +77,6 @@ std::unique_ptr<OperationPass<ModuleOp>> createLegalizeToMemrefPass();
 
 /// Lowers from HLO dialect to Arithmetic dialect.
 std::unique_ptr<OperationPass<ModuleOp>> createLegalizeToArithmeticPass();
-
-// Lowers shape operations from HLO dialect to Standard dialect.
-std::unique_ptr<OperationPass<func::FuncOp>>
-createLegalizeHloShapeOpsToStandardPass();
 
 /// Lowers from MHLO dialect to THLO dialect.
 std::unique_ptr<OperationPass<func::FuncOp>> createLegalizeMHLOToTHLOPass(
@@ -185,10 +178,6 @@ std::unique_ptr<OperationPass<ModuleOp>> createStablehloLegalizeToHloPass();
 // Legalizes from the Shape dialect to the MHLO dialect.
 std::unique_ptr<OperationPass<func::FuncOp>> createShapeLegalizeToHloPass(
     bool legalizeConstraints = false);
-
-// Legalizes from MHLO quantized ops with MHLO quant types to MHLO primitive ops
-// like int ops.
-std::unique_ptr<OperationPass<func::FuncOp>> createMhloQuantLegalizeToIntPass();
 
 // Test passes.
 std::unique_ptr<Pass> createTestInferShapedTypeMethodsPass();

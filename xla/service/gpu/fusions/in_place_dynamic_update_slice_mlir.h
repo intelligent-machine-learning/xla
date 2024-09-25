@@ -17,14 +17,19 @@ limitations under the License.
 
 #include <cstdint>
 #include <optional>
+#include <vector>
 
-#include "mlir/IR/MLIRContext.h"  // from @llvm-project
-#include "mlir/Interfaces/DataLayoutInterfaces.h"  // from @llvm-project
+#include "absl/status/status.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/MLIRContext.h"
+#include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
+#include "xla/service/gpu/fusions/mlir/computation_partitioner.h"
 #include "xla/service/gpu/fusions/mlir/mlir_fusion_emitter.h"
 #include "xla/service/gpu/hlo_fusion_analysis.h"
+#include "xla/service/gpu/ir_emission_utils.h"
 #include "xla/service/gpu/launch_dimensions.h"
-#include "xla/status.h"
+#include "xla/service/gpu/model/indexing_map.h"
 
 namespace xla {
 namespace gpu {
@@ -44,8 +49,6 @@ class MlirInPlaceDynamicUpdateSliceFusion : public MlirFusionEmitterBase {
       : analysis_(analysis),
         dus_ops_(
             GetOutputDefiningDynamicUpdateSlices(analysis.fusion_roots())) {}
-
-  static bool IsSupported(const HloFusionAnalysis& analysis);
 
   LaunchDimensions launch_dimensions() const override;
 
@@ -67,12 +70,13 @@ class MlirInPlaceDynamicUpdateSliceFusion : public MlirFusionEmitterBase {
       mlir::func::FuncOp entry_function,
       const HloFusionInstruction& fusion) const override;
 
-  std::vector<const HloInstruction*> GetInstructionsWithCustomCodegen(
-      const HloFusionInstruction& fusion) const override;
+  std::vector<mlir_converter::EpilogueSpecification> GetEpilogues(
+      const HloFusionInstruction& fusion,
+      mlir::MLIRContext* mlir_context) const override;
 
  private:
   const HloFusionAnalysis& analysis_;
-  std::vector<const HloInstruction*> dus_ops_;
+  std::vector<HloInstructionAdaptor> dus_ops_;
 };
 
 }  // namespace gpu

@@ -1,12 +1,9 @@
 """Wrapper around proto libraries used inside the XLA codebase."""
 
+load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
 load(
     "@local_config_rocm//rocm:build_defs.bzl",
     "if_rocm_is_configured",
-)
-load(
-    "@tsl//tsl:tsl.bzl",
-    "tsl_copts",
 )
 load(
     "@tsl//tsl/platform:build_config_root.bzl",
@@ -17,12 +14,14 @@ load(
     "@tsl//tsl/platform/default:cuda_build_defs.bzl",
     "if_cuda_is_configured",
 )
+load(
+    "//xla/tsl:tsl.bzl",
+    "tsl_copts",
+)
 
 def xla_py_proto_library(**_kwargs):
     # Note: we don't currently define a proto library target for Python in OSS.
     pass
-
-ORC_JIT_MEMORY_MAPPER_TARGETS = []
 
 def xla_py_test_deps():
     return []
@@ -47,8 +46,8 @@ _XLA_SHARED_OBJECT_SENSITIVE_DEPS = if_static(extra_deps = [], otherwise = [
     Label("//xla/stream_executor:stream_executor_impl"),
     Label("//xla/stream_executor/gpu:gpu_init_impl"),
     "@com_google_protobuf//:protobuf",
-    "@tsl//tsl/framework:allocator_registry_impl",
-    "@tsl//tsl/framework:allocator",
+    "//xla/tsl/framework:allocator_registry_impl",
+    "//xla/tsl/framework:allocator",
     "@tsl//tsl/platform:env_impl",
     "@tsl//tsl/profiler/backends/cpu:annotation_stack_impl",
     "@tsl//tsl/profiler/backends/cpu:traceme_recorder_impl",
@@ -58,9 +57,7 @@ _XLA_SHARED_OBJECT_SENSITIVE_DEPS = if_static(extra_deps = [], otherwise = [
     "@tsl//tsl/protobuf:protos_all_cc_impl",
 ]) + if_cuda_is_configured([
     Label("//xla/stream_executor/cuda:all_runtime"),
-    Label("//xla/stream_executor/cuda:cuda_stream"),
     Label("//xla/stream_executor/cuda:stream_executor_cuda"),
-    Label("//xla/stream_executor/gpu:gpu_cudamallocasync_allocator"),
 ]) + if_rocm_is_configured([
     Label("//xla/stream_executor/gpu:gpu_stream"),
     Label("//xla/stream_executor/rocm:all_runtime"),
@@ -79,20 +76,22 @@ def xla_cc_test(name, deps = [], **kwargs):
         **kwargs
     )
 
-def auto_sharding_deps():
-    return [Label("//xla/hlo/experimental/auto_sharding:auto_sharding_impl")]
+def xla_internal(targets, otherwise = []):
+    _ = targets  # buildifier: disable=unused-variable
+    return otherwise
 
-def auto_sharding_solver_deps():
-    return [Label("//xla/hlo/experimental/auto_sharding:auto_sharding_solver_impl")]
-
-def xla_export_hlo_deps():
+def tests_build_defs_bzl_deps():
     return []
 
-def xla_nvml_deps():
-    return ["@local_config_cuda//cuda:nvml_headers"]
-
-def xla_cub_deps():
-    return ["@local_config_cuda//cuda:cub_headers"]
-
-def xla_symbol_repository_deps():
-    return []
+def xla_bzl_library(name = "xla_bzl_library"):
+    bzl_library(
+        name = "xla_bzl",
+        srcs = ["xla.bzl"],
+        deps = [
+            "//xla/tsl:tsl_bzl",
+            "@local_config_rocm//rocm:build_defs_bzl",
+            "@tsl//tsl/platform:build_config_root_bzl",
+            "@tsl//tsl/platform/default:cuda_build_defs_bzl",
+            "@bazel_skylib//:bzl_library",
+        ],
+    )

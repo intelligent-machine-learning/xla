@@ -18,6 +18,7 @@ limitations under the License.
 #include <algorithm>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <utility>
 #include <variant>
@@ -29,15 +30,14 @@ limitations under the License.
 #include "absl/strings/string_view.h"
 #include "xla/autotune_results.pb.h"
 #include "xla/autotuning.pb.h"
-#include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
-#include "xla/hlo/ir/hlo_module.h"
 #include "xla/shape.h"
 #include "xla/stream_executor/device_description.h"
 #include "xla/stream_executor/device_memory.h"
 #include "xla/stream_executor/device_memory_allocator.h"
 #include "xla/stream_executor/gpu/redzone_allocator.h"
 #include "xla/stream_executor/stream_executor.h"
+#include "xla/stream_executor/stream_executor_memory_allocator.h"
 #include "xla/xla.pb.h"
 
 namespace xla {
@@ -53,19 +53,17 @@ struct DeviceConfig {
 };
 
 struct DevicelessConfig {
-  // The human-readable description of the device.  It can be found by using
-  // stream_exec->GetDeviceDescription().model_str() when the stream executor
-  // is available.
-  std::string model_str;
-
-  // A field to determine the architecture of the device. We only pick an
-  // algorithm for non-Ampere architectures.
-  se::GpuComputeCapability gpu_compute_capability{
-      se::CudaComputeCapability{0, 0}};
+  // The device description of the target device.
+  se::DeviceDescription device_description;
 };
 
 class AutotuneCacheKey {
  public:
+  AutotuneCacheKey(const se::DeviceDescription& device_description,
+                   const HloInstruction& instruction)
+      : AutotuneCacheKey(DeviceDescriptionToCacheKey(device_description),
+                         instruction.ToString()) {}
+
   AutotuneCacheKey(absl::string_view model_str,
                    const HloInstruction& instruction);
 
@@ -91,6 +89,9 @@ class AutotuneCacheKey {
                            hlo_canonical_);
   }
 
+  static std::string DeviceDescriptionToCacheKey(
+      const se::DeviceDescription& device_description);
+
  private:
   std::string model_str_;
   std::string hlo_canonical_;
@@ -101,12 +102,24 @@ class AutotuneConfig {
   bool should_init_buffers() const { return autotune_level_ >= 2; }
   bool should_reinit_output_buffer() const { return autotune_level_ >= 3; }
   bool should_check_correctness() const { return autotune_level_ >= 4; }
+  bool should_skip_wrong_results() const { return autotune_level_ >= 5; }
   bool should_crash_on_check_failure() const {
     return should_crash_on_check_failure_;
   }
   bool should_require_complete_aot_autotune_results() const {
     return require_complete_aot_autotune_results_;
   }
+  // Empty string means no cache is used.
+  const std::string& autotune_cache_dir() const { return autotune_cache_dir_; }
+
+  AutotuneConfig(const AutotuneConfig& right)
+      : config_(right.config_),
+        autotune_level_(right.autotune_level_),
+        should_crash_on_check_failure_(right.should_crash_on_check_failure_),
+        exhaustive_tiling_search_(right.exhaustive_tiling_search_),
+        require_complete_aot_autotune_results_(
+            right.require_complete_aot_autotune_results_),
+        autotune_cache_dir_(right.autotune_cache_dir_) {}
 
   AutotuneConfig(const std::variant<DeviceConfig, DevicelessConfig>& config,
                  const DebugOptions& debug_options)
@@ -117,15 +130,19 @@ class AutotuneConfig {
         exhaustive_tiling_search_(
             debug_options.xla_gpu_exhaustive_tiling_search()),
         require_complete_aot_autotune_results_(
-            debug_options.xla_gpu_require_complete_aot_autotune_results()) {}
+            debug_options.xla_gpu_require_complete_aot_autotune_results()),
+        autotune_cache_dir_(
+            debug_options.xla_gpu_per_fusion_autotune_cache_dir()) {}
 
-  absl::string_view GetModelStr() const {
+  std::string GetModelStr() const {
     if (auto deviceless_config = std::get_if<DevicelessConfig>(&config_)) {
-      return deviceless_config->model_str;
+      return AutotuneCacheKey::DeviceDescriptionToCacheKey(
+          deviceless_config->device_description);
     }
 
     const auto& device_config = std::get<DeviceConfig>(config_);
-    return device_config.stream_exec->GetDeviceDescription().model_str();
+    return AutotuneCacheKey::DeviceDescriptionToCacheKey(
+        device_config.stream_exec->GetDeviceDescription());
   }
 
   se::StreamExecutor* GetExecutor() const {
@@ -136,7 +153,14 @@ class AutotuneConfig {
   se::DeviceMemoryAllocator* GetAllocator() const {
     CHECK(std::holds_alternative<DeviceConfig>(config_));
     auto& cf = std::get<DeviceConfig>(config_);
-    return cf.allocator ? cf.allocator : GetExecutor()->GetAllocator();
+    if (cf.allocator != nullptr) {
+      return cf.allocator;
+    }
+    if (allocator_ == nullptr) {
+      allocator_ =
+          std::make_unique<se::StreamExecutorMemoryAllocator>(GetExecutor());
+    }
+    return allocator_.get();
   }
 
   absl::StatusOr<se::Stream*> GetStream() const {
@@ -148,7 +172,8 @@ class AutotuneConfig {
     if (auto c = std::get_if<DeviceConfig>(&config_)) {
       return c->stream_exec->GetDeviceDescription().gpu_compute_capability();
     }
-    return std::get<DevicelessConfig>(config_).gpu_compute_capability;
+    return std::get<DevicelessConfig>(config_)
+        .device_description.gpu_compute_capability();
   }
 
   bool IsDeviceless() const {
@@ -163,6 +188,8 @@ class AutotuneConfig {
   bool should_crash_on_check_failure_;
   bool exhaustive_tiling_search_;
   bool require_complete_aot_autotune_results_;
+  mutable std::unique_ptr<se::DeviceMemoryAllocator> allocator_;
+  std::string autotune_cache_dir_;
 };
 
 using AutotuneNoCacheFn = std::function<absl::StatusOr<AutotuneResult>()>;
@@ -187,20 +214,21 @@ struct AutotunerUtil {
   // Checks if the key is in the autotune cache.
   //
   // Normally, we don't have to use this low level method.
-  static bool IsInCache(const AutotuneCacheKey& key);
+  static absl::StatusOr<bool> IsInCache(const AutotuneCacheKey& key,
+                                        const AutotuneConfig& config);
 
   // Adds the result to the autotune cache.
   //
   // Returns true if the entry is inserted.
   //
   // Normally, we don't have to use this low level method.
-  static bool AddResult(const AutotuneCacheKey& key, AutotuneResult result);
+  static absl::StatusOr<bool> AddResult(const AutotuneCacheKey& key,
+                                        AutotuneResult result,
+                                        const AutotuneConfig& config);
 
-  // Creates a RedzoneAllocator from a given config. If `force_stream` is
-  // provided, than it is used for checking redzones.
+  // Creates a RedzoneAllocator from a given config.
   static absl::StatusOr<se::RedzoneAllocator> CreateRedzoneAllocator(
-      const AutotuneConfig& config, const DebugOptions& opts,
-      se::Stream* force_stream = nullptr);
+      const AutotuneConfig& config, const DebugOptions& opts);
 
   // Functions to save/load XLA's autotuning results.
   //
@@ -244,20 +272,18 @@ struct AutotunerUtil {
   static absl::StatusOr<std::string> SerializeAutotuneResults(
       bool as_textproto = false);
 
-  // As above, but only performs serialization for instructions found in the
-  // module.
-  //
-  // Only serializes autotuning results for instructions found in the module:
-  // while this is more expensive than serializing all cache, this avoids
-  // quadratic blow-up when serializing cache for a large number of modules.
-  static absl::StatusOr<std::string> SerializeAutotuneResultsForModule(
-      const HloModule& module, const AutotuneConfig& autotune_config,
-      bool as_textproto = false);
-
+  // Serializes autotune results into the given proto.
   static absl::Status SerializeAutotuneResults(AutotuneResults* results);
+
+  // Loads autotune results from the given string of bytes.
+  //
+  // Warning: The results are only loaded to the in-memory cache.
   static absl::Status LoadAutotuneResults(absl::string_view data,
                                           bool as_textproto = false);
 
+  // Loads autotune results from the given proto.
+  //
+  // Warning: The results are only loaded to the in-memory cache.
   static absl::Status LoadAutotuneResults(const AutotuneResults& results);
 
   // Serializes autotune results into a file.
@@ -267,15 +293,40 @@ struct AutotunerUtil {
   static absl::Status SerializeAutotuneResultsToFile(
       absl::string_view file_path);
 
+  // As above, but if you already called SerializeAutotuneResults to get a
+  // proto.
+  static absl::Status SerializeAutotuneResultsToFile(
+      const AutotuneResults& results, absl::string_view file_path);
+
   // Loads autotune results from a file.
   //
   // If `file_path` ends with ".txt" or ".textproto", then the file is
   // considered to be in the textproto format, otherwise the binary protobuf
   // format.
+  //
+  // Warning: The results are only loaded to the in-memory cache.
   static absl::Status LoadAutotuneResultsFromFile(absl::string_view file_path);
 
+  // Warning: This only clears the in-memory cache. If you use a file based
+  // cache you're responsible for clearing the cache directory when you want to.
   static void ClearAutotuneResults();
+
+  // Warning: This only checks the in-memory cache. If you use a file based
+  // cache, you're responsible for checking whether the cache directory is
+  // empty.
+  static bool ResultCacheIsEmpty();
 };
+
+absl::StatusOr<std::string> AutotuneResultsToString(
+    const AutotuneResults& results, bool as_textproto);
+
+// Exposed only for testing. Returns the SHA-256 hash of the input string,
+// encoded in base64.
+//
+// SHA-256 was chosen to follow industry best practices and avoid collisions.
+// Git is also transitioning to SHA-256. This is probably better than
+// tsl::Fingerprint128.
+absl::StatusOr<std::string> GetBase64EncodedSha256Hash(absl::string_view s);
 
 }  // namespace gpu
 }  // namespace xla

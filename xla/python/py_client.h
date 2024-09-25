@@ -31,14 +31,16 @@ limitations under the License.
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "llvm/Support/Casting.h"
-#include "nanobind/nanobind.h"  // from @nanobind
+#include "nanobind/nanobind.h"
 #include "xla/client/xla_builder.h"
 #include "xla/pjrt/exceptions.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/pjrt_executable.h"
+#include "xla/python/ifrt/attribute_map.h"
 #include "xla/python/ifrt/client.h"
 #include "xla/python/ifrt/compiler.h"
 #include "xla/python/ifrt/device.h"
+#include "xla/python/ifrt/program.h"
 #include "xla/python/nb_class_ptr.h"
 #include "xla/python/pjrt_ifrt/pjrt_client.h"
 #include "xla/shape.h"
@@ -63,6 +65,9 @@ class PyClient {
   virtual ~PyClient();
 
   ifrt::Client* ifrt_client() const { return ifrt_client_.get(); }
+  const std::shared_ptr<ifrt::Client>& shared_ptr_ifrt_client() const {
+    return ifrt_client_;
+  }
 
   // Short-term escape hatch to get PjRtClient from PyClient.
   // TODO(hyeontaek): Migrate all users of this method to be agnostic of PjRt.
@@ -109,8 +114,7 @@ class PyClient {
 
   // Returns implementation-specific attributes about this client, e.g. the PJRT
   // C API version if applicable.
-  absl::flat_hash_map<std::string, xla::ifrt::Client::ClientAttribute>
-  attributes() const {
+  const xla::ifrt::AttributeMap& Attributes() const {
     return client_attributes_;
   }
 
@@ -125,29 +129,25 @@ class PyClient {
   absl::StatusOr<nb_class_ptr<PyDevice>> DeviceFromLocalHardwareId(
       int local_hardware_id);
 
-  // Returns the PyDevice associated with the given PjRtDevice.
-  nb_class_ptr<PyDevice> GetPyDevice(PjRtDevice* device);
+  // Returns the PyDevice associated with the given ifrt::Device.
+  nb_class_ptr<PyDevice> GetPyDevice(ifrt::Device* device);
 
-  // Returns the PyMemorySpace associated with the given PjRtMemorySpace.
-  nb_class_ptr<PyMemorySpace> GetPyMemorySpace(PjRtMemorySpace* memory_space);
+  // Returns the PyMemorySpace associated with the given ifrt::Memory.
+  nb_class_ptr<PyMemorySpace> GetPyMemorySpace(ifrt::Memory* memory_space);
 
   // Returns a vector of live PyArray objects. PyArray objects may share
   // PjRtBuffers, so there may be duplicates of the same underlying device
   // buffer.
-  std::vector<nanobind::object> LiveBuffersOnDevice(PjRtDevice* device);
+  std::vector<nanobind::object> LiveBuffersOnDevice(ifrt::Device* device);
 
   nanobind::list LiveExecutables();
 
   // TODO(zhangqiaorjc): Remove when we have transparent defragmentation.
   absl::Status Defragment();
 
-  static absl::StatusOr<nanobind::list> MakeCrossHostReceiveBuffers(
-      nb_class_ptr<PyClient> client, absl::Span<const Shape> shapes,
-      PjRtDevice* device);
-
   static absl::StatusOr<nanobind::object> BufferFromPyval(
       nb_class_ptr<PyClient> client, nanobind::handle argument,
-      PjRtDevice* device, bool force_copy,
+      ifrt::Device* device, bool force_copy,
       ifrt::Client::HostBufferSemantics host_buffer_semantics);
 
   static absl::StatusOr<nb_class_ptr<PyLoadedExecutable>> CompileIfrtProgram(
@@ -237,8 +237,7 @@ class PyClient {
   static PyType_Slot slots_[];
 
   std::shared_ptr<ifrt::Client> ifrt_client_;
-  absl::flat_hash_map<std::string, xla::ifrt::Client::ClientAttribute>
-      client_attributes_;
+  xla::ifrt::AttributeMap client_attributes_;
   // Pointers to intrusive doubly-linked lists of arrays and executables, used
   // to iterate over all known objects when heap profiling. The list structure
   // is protected by the GIL.
@@ -247,7 +246,7 @@ class PyClient {
   PyArray_Storage* arrays_ = nullptr;
 
   absl::flat_hash_map<ifrt::Device*, nb_class_ptr<PyDevice>> devices_;
-  absl::flat_hash_map<PjRtMemorySpace*, nb_class_ptr<PyMemorySpace>>
+  absl::flat_hash_map<ifrt::Memory*, nb_class_ptr<PyMemorySpace>>
       memory_spaces_;
 };
 

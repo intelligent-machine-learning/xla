@@ -22,6 +22,8 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "absl/status/statusor.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
@@ -35,11 +37,9 @@ limitations under the License.
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Transforms/Instrumentation/DataFlowSanitizer.h"
-#include "xla/runtime/execution_engine.h"
 #include "xla/service/cpu/cpu_runtime.h"
 #include "xla/service/cpu/llvm_ir_runtime.h"
 #include "xla/service/llvm_ir/llvm_util.h"
-#include "xla/statusor.h"
 #include "xla/types.h"
 #include "xla/util.h"
 #include "tsl/platform/logging.h"
@@ -160,20 +160,6 @@ llvm::Expected<std::unique_ptr<llvm::MemoryBuffer>> CompilerFunctor::operator()(
 
   llvm::ModulePassManager pm;
 
-  for (const auto& func_name : convert_to_xla_runtime_abi_) {
-    llvm::Function* func = module.getFunction(func_name);
-    // Create a new function with the XLA Runtime ABI and inline the original
-    // (i.e. with ctx + memref args) into it.
-    std::string inlined_func_name =
-        absl::StrCat(func_name, "__orig_xla_runtime_abi");
-    func->setName(inlined_func_name);
-    absl::Status status = xla::runtime::ExportWithXlaRuntimeAbi(
-        module, inlined_func_name, func_name);
-    if (!status.ok()) {
-      LOG(FATAL) << status.message();
-    }
-  }
-
   if (dfsan_enabled_) {
     pm.addPass(llvm::DataFlowSanitizerPass(dfsan_abi_list_files_));
   }
@@ -193,8 +179,8 @@ llvm::Expected<std::unique_ptr<llvm::MemoryBuffer>> CompilerFunctor::operator()(
   runtime::RewriteIRRuntimeFunctions(&module, fast_math_flags_);
 
   // Buffer for holding machine code prior to constructing the ObjectFile.
-  llvm::SmallVector<char, 0> stream_buffer;
-  llvm::raw_svector_ostream ostream(stream_buffer);
+  llvm::SmallVector<char, 0> mc_stream_buffer;
+  llvm::raw_svector_ostream ostream(mc_stream_buffer);
 
   VLOG(2) << "IR after optimizations";
 
@@ -208,20 +194,20 @@ llvm::Expected<std::unique_ptr<llvm::MemoryBuffer>> CompilerFunctor::operator()(
   target_machine_->addPassesToEmitMC(codegen_passes, mc_context, ostream);
   codegen_passes.run(module);
 
-  std::unique_ptr<llvm::MemoryBuffer> memory_buffer(
-      new llvm::SmallVectorMemoryBuffer(std::move(stream_buffer)));
+  std::unique_ptr<llvm::MemoryBuffer> mc_memory_buffer(
+      new llvm::SmallVectorMemoryBuffer(std::move(mc_stream_buffer)));
 
   if (post_codegen_hook_) {
     llvm::Expected<std::unique_ptr<llvm::object::ObjectFile>> obj_file =
-        llvm::object::ObjectFile::createObjectFile(*memory_buffer);
+        llvm::object::ObjectFile::createObjectFile(*mc_memory_buffer);
     if (obj_file) {
       post_codegen_hook_(*obj_file.get());
     } else {
-      LOG(WARNING) << "Could convert memory buffer to object file!";
+      LOG(WARNING) << "Could not convert memory buffer to object file!";
     }
   }
 
-  return std::move(memory_buffer);
+  return std::move(mc_memory_buffer);
 }
 
 }  // namespace cpu

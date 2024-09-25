@@ -31,17 +31,10 @@ limitations under the License.
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "xla/stream_executor/gpu/gpu_types.h"
-#include "xla/stream_executor/platform.h"
+#include "xla/stream_executor/stream_executor.h"
 
 namespace stream_executor {
 namespace gpu {
-
-// Identifies the memory space where an allocation resides. See
-// GpuDriver::GetPointerMemorySpace().
-enum class MemorySpace { kHost, kDevice };
-
-// Returns a casual string, such as "host" for the provided memory space.
-std::string MemorySpaceString(MemorySpace memory_space);
 
 class GpuContext;
 
@@ -250,10 +243,6 @@ class GpuDriver {
   // bad things will happen.
   // http://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__CTX.html#group__CUDA__CTX_1g27a365aebb0eb548166309f58a1e8b8e
   static void DestroyContext(GpuContext* context);
-
-  // Returns the context handle (CUcontext for CUDA and hipCtx_t for ROCm) of a
-  // GpuContext.
-  static GpuContextHandle GetContextHandle(GpuContext* context);
 
   // Queries the runtime for the specified attribute of the specified function.
   // cuFuncGetAttribute (the underlying CUDA driver API routine) only operates
@@ -641,9 +630,10 @@ class GpuDriver {
   // a device pointer and size of the symbol on success. symbol_name may not be
   // null. At least one of dptr or bytes should not be null. No ownership is
   // taken of symbol_name.
-  static bool GetModuleSymbol(GpuContext* context, GpuModuleHandle module,
-                              const char* symbol_name, GpuDevicePtr* dptr,
-                              size_t* bytes);
+  static absl::Status GetModuleSymbol(GpuContext* context,
+                                      GpuModuleHandle module,
+                                      const char* symbol_name,
+                                      GpuDevicePtr* dptr, size_t* bytes);
 
   // Unloads module from the current context via cuModuleUnload.
   // TODO(leary) the documentation doesn't say what kind of disasters happen
@@ -781,12 +771,6 @@ class GpuDriver {
   static absl::Status RecordEvent(GpuContext* context, GpuEventHandle event,
                                   GpuStreamHandle stream);
 
-  // Polls (without blocking) to determine the status of an event - pending or
-  // complete (or an error status).
-  // http://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__EVENT.html#group__CUDA__EVENT_1g6f0704d755066b0ee705749ae911deef
-  static absl::StatusOr<GpuStatus> QueryEvent(GpuContext* context,
-                                              GpuEventHandle event);
-
   // -- Pointer-specific calls.
 
   // Returns the context in which pointer was allocated or registered.
@@ -796,8 +780,7 @@ class GpuDriver {
   static absl::StatusOr<GpuDeviceHandle> GetPointerDevice(GpuDevicePtr pointer);
 
   // Returns the memory space addressed by pointer.
-  static absl::StatusOr<MemorySpace> GetPointerMemorySpace(
-      GpuDevicePtr pointer);
+  static absl::StatusOr<MemoryType> GetPointerMemorySpace(GpuDevicePtr pointer);
 
   // Returns the base address and size of the device pointer dptr.
   static absl::Status GetPointerAddressRange(GpuDevicePtr dptr,

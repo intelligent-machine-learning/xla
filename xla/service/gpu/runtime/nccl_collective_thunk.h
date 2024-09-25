@@ -25,13 +25,13 @@ limitations under the License.
 #include <vector>
 
 #include "absl/base/thread_annotations.h"
-#include "absl/container/node_hash_map.h"
+#include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
-#include "mlir/IR/BuiltinAttributes.h"  // from @llvm-project
-#include "mlir/IR/BuiltinOps.h"  // from @llvm-project
-#include "mlir/IR/Value.h"  // from @llvm-project
+#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Value.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/service/buffer_assignment.h"
@@ -39,13 +39,12 @@ limitations under the License.
 #include "xla/service/global_device_id.h"
 #include "xla/service/gpu/buffer_allocations.h"
 #include "xla/service/gpu/ir_emission_utils.h"
-#include "xla/service/gpu/nccl_clique_key.h"
 #include "xla/service/gpu/runtime/nccl_api.h"
+#include "xla/service/gpu/runtime/nccl_clique_key.h"
 #include "xla/service/gpu/runtime/thunk.h"
 #include "xla/service/llvm_ir/llvm_util.h"
 #include "xla/service/rendezvous.h"
 #include "xla/shape.h"
-#include "xla/status.h"
 #include "xla/stream_executor/device_memory.h"
 #include "xla/stream_executor/event.h"
 #include "xla/stream_executor/stream.h"
@@ -107,6 +106,18 @@ NcclCollectiveConfig GetNcclCollectiveConfigForMlir(
   return config;
 }
 
+// This wraps the ncclCommHandle object along with other information
+// that could be useful.
+struct NcclCommHandleWrapper {
+  NcclCommHandleWrapper(NcclApi::NcclCommHandle handle, bool is_local)
+      : comm_handle(handle), is_local(is_local) {}
+
+  // Communicator handle.
+  NcclApi::NcclCommHandle comm_handle;
+  // Whether this comm is a node-local comm.
+  bool is_local;
+};
+
 //===----------------------------------------------------------------------===//
 // NcclCollectiveThunk
 //===----------------------------------------------------------------------===//
@@ -143,7 +154,7 @@ class NcclCollectiveThunk : public Thunk {
 
    private:
     absl::Mutex mu_;
-    absl::node_hash_map<se::StreamExecutor*, se::Event> events_
+    absl::flat_hash_map<se::StreamExecutor*, std::unique_ptr<se::Event>> events_
         ABSL_GUARDED_BY(mu_);
   };
 
@@ -164,10 +175,19 @@ class NcclCollectiveThunk : public Thunk {
     async_events_ = async_events;
   }
 
+  NcclStreamId nccl_stream_id() const {
+    return xla::gpu::GetStreamId(IsAsync(), GetAsyncStreamKind());
+  }
+
+  ExecutionStreamId nccl_execution_stream_id() const {
+    return ExecutionStreamId(execution_stream_id().value() +
+                             nccl_stream_id().value());
+  }
+
  protected:
-  virtual absl::Status RunNcclCollective(const ExecuteParams& params,
-                                         se::Stream& stream,
-                                         NcclApi::NcclCommHandle comm) = 0;
+  virtual absl::Status RunNcclCollective(
+      const ExecuteParams& params, se::Stream& stream,
+      NcclCommHandleWrapper comm_wrapper) = 0;
   virtual const NcclCollectiveConfig& config() const = 0;
   virtual AsyncStreamKind GetAsyncStreamKind() const {
     return AsyncStreamKind::kCollective;
@@ -185,10 +205,6 @@ class NcclCollectiveThunk : public Thunk {
 
  private:
   bool IsAsync() const { return async_events_ != nullptr; }
-  int64_t GetStreamId() const {
-    return xla::gpu::GetStreamId(IsAsync(), GetAsyncStreamKind());
-  }
-
   NcclApi* nccl_api_;
   std::shared_ptr<AsyncEvents> async_events_;
 
@@ -211,12 +227,22 @@ class NcclCollectiveDoneThunk : public Thunk {
  public:
   NcclCollectiveDoneThunk(
       Thunk::Kind kind, ThunkInfo thunk_info,
-      std::shared_ptr<NcclCollectiveThunk::AsyncEvents> async_events);
+      std::shared_ptr<NcclCollectiveThunk::AsyncEvents> async_events,
+      AsyncStreamKind async_stream_kind);
 
   absl::Status ExecuteOnStream(const ExecuteParams& params) override;
 
+  // return the execution stream id wheer previous async operator was launched
+  // to.
+  ExecutionStreamId nccl_execution_stream_id() const {
+    return ExecutionStreamId(
+        execution_stream_id().value() +
+        xla::gpu::GetStreamId(true, async_stream_kind_).value());
+  }
+
  private:
   std::shared_ptr<NcclCollectiveThunk::AsyncEvents> async_events_;
+  AsyncStreamKind async_stream_kind_ = AsyncStreamKind::kCollective;
 };
 
 //===----------------------------------------------------------------------===//
@@ -244,7 +270,7 @@ absl::Status AddOpDescription(absl::Status status, OpT op,
     str = llvm_ir::DumpToString(op.getOperation());
   }
 
-  return Status(
+  return absl::Status(
       status.code(),
       absl::StrFormat(
           "%s\n"
@@ -261,11 +287,13 @@ size_t GetNumLocalParticipants(
     const std::vector<GlobalDeviceId>& participants,
     const std::vector<GlobalDeviceId>* local_devices);  // may be null
 
-absl::StatusOr<NcclApi::NcclCommHandle> GetNcclComm(
+// Returns a nccl comm handle and a flag indicating if
+// it's a local communicator.
+absl::StatusOr<NcclCommHandleWrapper> GetNcclComm(
     const Thunk::CollectiveExecuteParams& params,
     const Thunk::CollectiveCliques& collective_cliques,
     const std::vector<ReplicaGroup>& replica_groups,
-    CollectiveOpGroupMode group_mode, int64_t stream_id,
+    CollectiveOpGroupMode group_mode, NcclStreamId stream_id,
     AsyncStreamKind stream_kind);
 
 struct DeviceBufferPair {
@@ -291,9 +319,9 @@ absl::StatusOr<std::vector<DeviceBufferPair>> ConvertToDeviceBuffers(
 // communicator to enable zero-copy collectives.
 //
 // https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/bufferreg.html
-Status MaybeRegisterBuffers(NcclApi* nccl_api, int device_ordinal,
-                            const std::vector<DeviceBufferPair>& buffers,
-                            NcclApi::NcclCommHandle comm);
+absl::Status MaybeRegisterBuffers(NcclApi* nccl_api, int device_ordinal,
+                                  const std::vector<DeviceBufferPair>& buffers,
+                                  NcclApi::NcclCommHandle comm);
 
 }  // namespace gpu
 }  // namespace xla

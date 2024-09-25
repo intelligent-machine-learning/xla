@@ -29,11 +29,12 @@ limitations under the License.
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "llvm/Support/ExtensibleRTTI.h"
-#include "mlir/IR/BuiltinOps.h"  // from @llvm-project
+#include "mlir/IR/BuiltinOps.h"
 #include "xla/hlo/ir/hlo_sharding.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/pjrt_executable.h"
 #include "xla/python/ifrt/array.h"
+#include "xla/python/ifrt/attribute_map.h"
 #include "xla/python/ifrt/device.h"
 #include "xla/python/ifrt/dtype.h"
 #include "xla/python/ifrt/executable.h"
@@ -41,13 +42,14 @@ limitations under the License.
 #include "xla/python/ifrt/host_callback.h"
 #include "xla/python/ifrt/shape.h"
 #include "xla/python/ifrt/sharding.h"
+#include "xla/python/pjrt_ifrt/pjrt_attribute_map_util.h"
 #include "xla/python/pjrt_ifrt/pjrt_client.h"
 #include "xla/python/pjrt_ifrt/pjrt_host_callback.h"
-#include "xla/status.h"
-#include "xla/statusor.h"
+#include "xla/python/pjrt_ifrt/xla_compiler.h"
+#include "xla/tsl/concurrency/ref_count.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
-#include "tsl/concurrency/ref_count.h"
+#include "tsl/platform/statusor.h"
 
 namespace xla {
 namespace ifrt {
@@ -83,9 +85,8 @@ class PjRtExecutable final
  public:
   // Creates PjRtExecutable from xla::PjRtExecutable.
   static absl::StatusOr<std::unique_ptr<Executable>> Create(
-      std::unique_ptr<xla::PjRtExecutable> pjrt_executable);
-  static absl::StatusOr<std::unique_ptr<Executable>> Create(
-      std::shared_ptr<xla::PjRtExecutable> pjrt_executable);
+      std::shared_ptr<xla::PjRtExecutable> pjrt_executable,
+      std::unique_ptr<XlaCompileOptions> compile_options);
 
   // PjRtCompatibleExecutable implementation.
 
@@ -150,19 +151,30 @@ class PjRtExecutable final
     return pjrt_executable_->GetHloModules();
   }
 
-  absl::StatusOr<
-      absl::flat_hash_map<std::string, Executable::CostAnalysisValue>>
-  GetCostAnalysis() const override {
-    return pjrt_executable_->GetCostAnalysis();
+  absl::StatusOr<xla::ifrt::AttributeMap> GetCostAnalysis() const override {
+    TF_ASSIGN_OR_RETURN(auto result, pjrt_executable_->GetCostAnalysis());
+    return xla::ifrt::FromPjRtAttributeMap(std::move(result));
+  }
+
+  absl::StatusOr<std::vector<std::vector<absl::string_view>>>
+  GetOutputMemoryKinds() const override {
+    return pjrt_executable_->GetOutputMemoryKinds();
+  }
+
+  const XlaCompileOptions* GetCompileOptions() const override {
+    return compile_options_.get();
   }
 
   static char ID;  // NOLINT
 
  protected:
-  explicit PjRtExecutable(std::shared_ptr<xla::PjRtExecutable> pjrt_executable)
-      : pjrt_executable_(std::move(pjrt_executable)) {}
+  explicit PjRtExecutable(std::shared_ptr<xla::PjRtExecutable> pjrt_executable,
+                          std::unique_ptr<XlaCompileOptions> compile_options)
+      : pjrt_executable_(std::move(pjrt_executable)),
+        compile_options_(std::move(compile_options)) {}
 
   std::shared_ptr<xla::PjRtExecutable> pjrt_executable_;
+  std::unique_ptr<XlaCompileOptions> compile_options_;
 };
 
 // `LoadedExecutable` implementation that wraps a `xla::PjRtLoadedExecutable`.
@@ -176,10 +188,6 @@ class PjRtLoadedExecutable final
   // Creates PjRtExecutable from xla::PjRtLoadedExecutable. We expect that
   // xla::PjRtLoadedExecutable has fixed output dtypes/shapes/shardings.
   // PjRtLoadedExecutable::GetHloModules() must be implemented.
-  static absl::StatusOr<std::unique_ptr<LoadedExecutable>> Create(
-      PjRtCompatibleClient* client,
-      std::unique_ptr<xla::PjRtLoadedExecutable> pjrt_loaded_executable,
-      std::vector<tsl::RCReference<LoadedHostCallback>> loaded_host_callbacks);
   static absl::StatusOr<std::unique_ptr<LoadedExecutable>> Create(
       PjRtCompatibleClient* client,
       std::shared_ptr<xla::PjRtLoadedExecutable> pjrt_loaded_executable,
@@ -216,10 +224,10 @@ class PjRtLoadedExecutable final
     return pjrt_loaded_executable_->name();
   }
 
-  Future<absl::Status> GetReadyFuture() const override {
+  Future<> GetReadyFuture() const override {
     // PjRtCompiler blocks until compilation finishes and returns only the
     // executables that are ready.
-    return Future<absl::Status>(absl::OkStatus());
+    return Future<>(absl::OkStatus());
   }
 
   std::optional<std::vector<OpSharding>> GetParameterShardings()
@@ -283,26 +291,21 @@ class PjRtLoadedExecutable final
       absl::Span<tsl::RCReference<Array>> args, const ExecuteOptions& options,
       std::optional<DeviceList> devices) override;
 
-  Future<Status> Delete() override;
+  Future<> Delete() override;
   bool IsDeleted() const override {
     DCHECK(this);
     return pjrt_loaded_executable_->IsDeleted();
   }
 
-  absl::Span<const LoadedExecutable::LogicalDeviceIds>
-  addressable_device_logical_ids() const override {
-    DCHECK(this);
-    return pjrt_loaded_executable_->addressable_device_logical_ids();
-  }
   absl::Span<Device* const> addressable_devices() const override {
     DCHECK(this);
-    return pjrt_loaded_executable_->addressable_devices();
+    return addressable_devices_;
   }
 
-  absl::StatusOr<
-      absl::flat_hash_map<std::string, Executable::CostAnalysisValue>>
-  GetCostAnalysis() const override {
-    return pjrt_loaded_executable_->GetCostAnalysis();
+  absl::StatusOr<xla::ifrt::AttributeMap> GetCostAnalysis() const override {
+    TF_ASSIGN_OR_RETURN(auto result,
+                        pjrt_loaded_executable_->GetCostAnalysis());
+    return xla::ifrt::FromPjRtAttributeMap(std::move(result));
   }
 
   static char ID;  // NOLINT
@@ -320,7 +323,7 @@ class PjRtLoadedExecutable final
   PjRtLoadedExecutable(
       PjRtCompatibleClient* client,
       std::shared_ptr<xla::PjRtLoadedExecutable> pjrt_loaded_executable,
-      DeviceList devices,
+      DeviceList devices, std::vector<Device*> addressable_devices,
       std::vector<tsl::RCReference<LoadedHostCallback>>
           all_loaded_host_callbacks,
       std::vector<PjRtHostSendAndRecvLoadedHostCallback*>
@@ -330,10 +333,18 @@ class PjRtLoadedExecutable final
 
   PjRtCompatibleClient* client_;
   std::shared_ptr<xla::PjRtLoadedExecutable> pjrt_loaded_executable_;
+  // Devices that `pjrt_loaded_executable_` runs on. Empty if the executable is
+  // portable.
   DeviceList devices_;
+  std::vector<Device*> addressable_devices_;
   std::shared_ptr<std::vector<tsl::RCReference<LoadedHostCallback>>>
       all_loaded_host_callbacks_;
   std::vector<PjRtHostSendAndRecvLoadedHostCallback*> host_send_recv_callbacks_;
+
+  // Output array specs. If the executable is portable, shardings in
+  // `output_shardings_` will use an arbitrary addressable device, and will be
+  // overridden by a `SingleDeviceSharding` generated on the fly at execution
+  // time.
   std::vector<DType> output_dtypes_;
   std::vector<Shape> output_shapes_;
   std::vector<std::shared_ptr<const Sharding>> output_shardings_;

@@ -13,16 +13,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include "xla/stream_executor/rocm/rocm_event.h"
+
 #include "xla/stream_executor/gpu/gpu_event.h"
-#include "xla/stream_executor/gpu/gpu_executor.h"
 #include "xla/stream_executor/gpu/gpu_stream.h"
+#include "xla/stream_executor/rocm/rocm_driver.h"
 
 namespace stream_executor {
 namespace gpu {
 
-Event::Status GpuEvent::PollForStatus() {
-  absl::StatusOr<hipError_t> status =
-      GpuDriver::QueryEvent(parent_->gpu_context(), gpu_event_);
+Event::Status RocmEvent::PollForStatus() {
+  absl::StatusOr<hipError_t> status = QueryEvent(context(), gpu_event());
   if (!status.ok()) {
     LOG(ERROR) << "Error polling for event status: "
                << status.status().message();

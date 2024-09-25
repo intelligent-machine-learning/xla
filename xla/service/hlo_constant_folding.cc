@@ -16,22 +16,26 @@ limitations under the License.
 #include "xla/service/hlo_constant_folding.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdint>
 #include <memory>
-#include <string>
 #include <utility>
 #include <vector>
 
+#include "absl/algorithm/container.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/strings/str_format.h"
+#include "absl/strings/string_view.h"
+#include "absl/time/time.h"
 #include "xla/hlo/evaluator/hlo_evaluator.h"
-#include "xla/hlo/ir/dfs_hlo_visitor_with_default.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_opcode.h"
-#include "xla/hlo/utils/hlo_query.h"
-#include "xla/layout_util.h"
 #include "xla/literal.h"
 #include "xla/service/slow_operation_alarm.h"
 #include "xla/shape_util.h"
-#include "xla/types.h"
 #include "tsl/platform/errors.h"
 
 namespace xla {
@@ -163,21 +167,33 @@ absl::StatusOr<bool> HloConstantFolding::Run(
         continue;
       }
 
-      // Don't constant fold unless it's a net positive or the output is small.
+      if (instruction->opcode() == HloOpcode::kPad &&
+          instruction->operand(0)->opcode() == HloOpcode::kBroadcast &&
+          instruction->operand(1)->opcode() == HloOpcode::kConstant) {
+        // Reduce the compile time by skipping the constant folding of pad
+        // instruction with broadcast operand. With 45m shape limit the compile
+        // time could be more than 30 seconds. According to the current
+        // benchmarks it does not affect the performance.
+        continue;
+      }
+
+      // Don't constant fold unless output and operand sizes are small.
       if (instruction->shape().IsArray()) {
-        int64_t elements_in_removed_operands = 0;
+        int64_t elements_in_operands = 0;
         for (HloInstruction* operand : instruction->operands()) {
-          if (operand->user_count() == 1 && operand->shape().IsArray()) {
-            elements_in_removed_operands +=
-                ShapeUtil::ElementsIn(operand->shape());
+          if (operand->shape().IsArray()) {
+            elements_in_operands += ShapeUtil::ElementsIn(operand->shape());
           }
         }
         int64_t elements_in_constant =
             ShapeUtil::ElementsIn(instruction->shape());
 
         static const int64_t kMaximumConstantSizeElements = 45 * 1000 * 1000;
-        if (std::max(elements_in_constant, elements_in_removed_operands) >
+        if (std::max(elements_in_constant, elements_in_operands) >
             kMaximumConstantSizeElements) {
+          VLOG(2) << "Ignore constant folding: result shape size is "
+                  << elements_in_constant << " total size of arguments is "
+                  << elements_in_operands;
           continue;
         }
       }
@@ -231,7 +247,7 @@ absl::StatusOr<bool> HloConstantFolding::Run(
 
       VLOG(4) << "Constant folded: " << instruction->ToString();
       dead_instructions.push_back(instruction);
-      HloInstruction* new_constant = computation->AddInstruction(
+      HloInstruction* new_constant = instruction->AddInstruction(
           HloInstruction::CreateConstant(std::move(result)));
       if (new_constant->shape().has_layout()) {
         // Update element_size_in_bits on the new instruction's layout. Literals

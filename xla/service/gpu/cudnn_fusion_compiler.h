@@ -21,6 +21,7 @@ limitations under the License.
 #include "absl/strings/string_view.h"
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/hlo/ir/hlo_module.h"
+#include "xla/service/gpu/ir_emission_utils.h"
 #include "xla/service/hlo_pass_interface.h"
 #include "xla/stream_executor/dnn.h"
 #include "xla/stream_executor/stream_executor.h"
@@ -32,9 +33,6 @@ namespace gpu {
 // compiles them using a cuDNN handle and serializes them.
 class CuDnnFusionCompiler : public HloModulePass {
  public:
-  // <HLO computation fingerprint, serialized compiled cuDNN graph>.
-  using BinaryMap = absl::flat_hash_map<std::string, std::string>;
-
   explicit CuDnnFusionCompiler(se::StreamExecutor& stream_exec,
                                BinaryMap& compilation_results)
       : dnn_support_(*stream_exec.AsDnn()),

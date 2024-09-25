@@ -31,7 +31,7 @@ limitations under the License.
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "llvm/Support/Casting.h"
-#include "nanobind/nanobind.h"  // from @nanobind
+#include "nanobind/nanobind.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/layout.h"
 #include "xla/pjrt/exceptions.h"
@@ -39,14 +39,17 @@ limitations under the License.
 #include "xla/pjrt/pjrt_common.h"
 #include "xla/pjrt/pjrt_executable.h"
 #include "xla/pjrt/pjrt_future.h"
+#include "xla/pjrt/pjrt_layout.h"
 #include "xla/python/ifrt/array.h"
+#include "xla/python/ifrt/attribute_map.h"
 #include "xla/python/ifrt/executable.h"
 #include "xla/python/nb_class_ptr.h"
 #include "xla/python/pjrt_ifrt/pjrt_executable.h"
 #include "xla/python/py_array.h"
 #include "xla/python/py_client.h"
 #include "xla/python/traceback.h"
-#include "tsl/concurrency/ref_count.h"
+#include "xla/tsl/concurrency/ref_count.h"
+#include "xla/xla_data.pb.h"
 #include "tsl/platform/status.h"
 
 namespace xla {
@@ -54,17 +57,16 @@ namespace xla {
 class PyToken {
  public:
   PyToken() = default;
-  explicit PyToken(PjRtFuture<absl::Status> future)
-      : future_(std::move(future)) {}
+  explicit PyToken(PjRtFuture<> future) : future_(std::move(future)) {}
 
   static PyToken ReadyPyToken() {
-    return PyToken(PjRtFuture<absl::Status>(absl::OkStatus()));
+    return PyToken(PjRtFuture<>(absl::OkStatus()));
   }
 
   absl::Status Await();
 
  private:
-  PjRtFuture<absl::Status> future_;
+  PjRtFuture<> future_;
 };
 
 // PyShardedToken contains a PyToken for each device's execution.
@@ -72,7 +74,7 @@ class PyShardedToken {
  public:
   // Default construction creates a always-ready token.
   PyShardedToken() = default;
-  explicit PyShardedToken(std::vector<PjRtFuture<absl::Status>> futures)
+  explicit PyShardedToken(std::vector<PjRtFuture<>> futures)
       : futures_(std::move(futures)) {}
 
   PyToken GetPyToken(int device_id) const {
@@ -83,7 +85,7 @@ class PyShardedToken {
   absl::Status Await();
 
  private:
-  std::vector<PjRtFuture<absl::Status>> futures_;
+  std::vector<PjRtFuture<>> futures_;
 };
 
 class PyExecuteResults {
@@ -91,8 +93,7 @@ class PyExecuteResults {
   PyExecuteResults(const nb_class_ptr<PyClient>& client,
                    std::vector<tsl::RCReference<ifrt::Array>> ifrt_arrays,
                    int num_computations, PyShardedToken token,
-                   xla::PjRtFuture<absl::Status> result_status =
-                       xla::PjRtFuture<absl::Status>());
+                   PjRtFuture<> result_status = PjRtFuture<>());
 
   std::vector<std::vector<PyArray>> DisassembleIntoSingleDeviceArrays();
 
@@ -122,7 +123,7 @@ class PyExecuteResults {
   int num_computations_;
   PyShardedToken token_;
   // Only set if the computation has tokens.
-  xla::PjRtFuture<absl::Status> result_status_;
+  PjRtFuture<> result_status_;
 };
 
 using ExecuteShardedArg = std::variant<PyArray, std::vector<PyArray>>;
@@ -134,7 +135,7 @@ class PyLoadedExecutable {
  public:
   PyLoadedExecutable(
       nb_class_ptr<PyClient> client,
-      std::unique_ptr<ifrt::LoadedExecutable> ifrt_loaded_executable,
+      std::shared_ptr<ifrt::LoadedExecutable> ifrt_loaded_executable,
       std::optional<nb_traceback> traceback,
       std::optional<std::string> fingerprint);
   ~PyLoadedExecutable();
@@ -144,9 +145,8 @@ class PyLoadedExecutable {
     return ifrt_loaded_executable_.get();
   }
 
-  absl::Span<const PjRtLoadedExecutable::LogicalDeviceIds>
-  addressable_device_logical_ids() const {
-    return ifrt_loaded_executable_->addressable_device_logical_ids();
+  std::shared_ptr<ifrt::LoadedExecutable> shared_ifrt_loaded_executable() {
+    return ifrt_loaded_executable_;
   }
 
   std::vector<nb_class_ptr<PyDevice>> AddressableDevices() const;
@@ -160,8 +160,7 @@ class PyLoadedExecutable {
     return ifrt_loaded_executable_->GetCompiledMemoryStats();
   }
 
-  absl::StatusOr<absl::flat_hash_map<std::string, PjRtValueType>>
-  GetCostAnalysis() const {
+  absl::StatusOr<xla::ifrt::AttributeMap> GetCostAnalysis() const {
     return ifrt_loaded_executable_->GetCostAnalysis();
   }
 
@@ -238,7 +237,7 @@ class PyLoadedExecutable {
   friend class PyClient;
 
   nb_class_ptr<PyClient> client_;
-  std::unique_ptr<ifrt::LoadedExecutable> ifrt_loaded_executable_;
+  std::shared_ptr<ifrt::LoadedExecutable> ifrt_loaded_executable_;
   std::optional<nb_traceback> traceback_;
 
   // Identical executables (i.e. representing the same program) will have the

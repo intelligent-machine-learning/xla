@@ -24,7 +24,6 @@ limitations under the License.
 #include <list>
 #include <memory>
 #include <optional>
-#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -36,23 +35,18 @@ limitations under the License.
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/functional/any_invocable.h"
+#include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_schedule.h"
 #include "xla/hlo/utils/hlo_live_range.h"
 #include "xla/service/buffer_value.h"
-#include "xla/service/buffer_value_containers.h"
 #include "xla/service/heap_simulator/allocation_block.h"
 #include "xla/service/hlo.pb.h"
 #include "xla/service/hlo_alias_analysis.h"
-#include "xla/service/hlo_buffer.h"
-#include "xla/service/hlo_dataflow_analysis.h"
-#include "xla/service/hlo_ordering.h"
 #include "xla/service/hlo_value.h"
-#include "xla/service/memory_space_assignment/repacking.h"
-#include "xla/service/tuple_points_to_analysis.h"
-#include "xla/statusor.h"
+#include "xla/service/logical_buffer.h"
 
 namespace xla {
 
@@ -215,10 +209,10 @@ class HeapSimulator {
                     memory_by_computation = nullptr);
   ~HeapSimulator();
 
-  Status RunComputation(const HloComputation& computation,
-                        const HloInstructionSequence& instruction_sequence,
-                        const HloAliasAnalysis& alias_analysis,
-                        HloLiveRange* live_range);
+  absl::Status RunComputation(
+      const HloComputation& computation,
+      const HloInstructionSequence& instruction_sequence,
+      const HloAliasAnalysis& alias_analysis, HloLiveRange* live_range);
 
   bool IgnoreBuffer(const HloValue* buffer) const;
   void Alloc(const HloValue* buffer, const HloInstruction* instruction);
@@ -364,6 +358,8 @@ struct BufferIntervalTreeNode {
   BufferIntervalTreeNode* right;
   // parent
   BufferIntervalTreeNode* parent;
+
+  std::string ToString() const;
 };
 
 // An interval tree that can query buffers overlapping in time.
@@ -383,7 +379,48 @@ class BufferIntervalTree {
 
   BufferIntervalTreeNode* GetRoot() { return root_; }
 
+  // Returns a compact 2D view of memory usage over time.
+  // X axis is time, Y axis is memory.
+  //
+  // Say there are 3 buffers in the heap:
+  // - Buffer 1: memory block [0, 16), time interval [15, 25]
+  // - Buffer 2: memory block [16, 48), time interval [15, 19]
+  // - Buffer 3: memory block [32, 64), time interval [20, 22]
+  //
+  // NodesOverlappingInTimeToAsciiArt(/*start=*/18, /*end=*/23,
+  // /*group_size=*/3) returns:
+  //
+  // Memory map for time: [18,23], memory_block_size: 16, group_size: 3
+  //
+  //  ..# ##. 64
+  //  ### ##. 48
+  //  ##. ... 32
+  //  ### ### 16
+  //  890 123
+  //
+  // Explanation:
+  //
+  // The functions decides a memory block size of 16 would be most compact to
+  // display all the buffers.
+  // '#' indicates used and '.' indicates free memory.
+  //
+  // ..# ##. 64      "64" indicates memory block [48,64)
+  // ### ##. 48      "48" indicates memory block [32,48)
+  // ##. ... 32      "32" indicates memory block [16,32)
+  // ### ### 16      "16" indicates memory block [0,16)
+  // 890 123
+  //
+  // "890 123" indicate the last digits of time instants 18, 19, 20, 21, 22, 23.
+  // Only the last digit is shown for compactness.
+  // `group_size=3` inserts spaces after every 3 columns (time instants).
+  // All the memory blocks beyond 64 are free for time interval [18,23].
+  std::string NodesOverlappingInTimeToAsciiArt(int64_t start, int64_t end,
+                                               int64_t group_size = 0) const;
+
  private:
+  std::vector<const BufferIntervalTreeNode*> NodesOverlappingInTime(
+      int64_t start, int64_t end) const;
+
   BufferIntervalTreeNode* root_ = nullptr;
   std::list<BufferIntervalTreeNode> node_storage_;
 };
@@ -756,14 +793,14 @@ class GlobalDecreasingSizeBestFitHeap : public HeapAlgorithm<BufferType> {
     // (spatially) should be allocated. Such a slice has size
     // sorted_slice_sizes_[i] and would be allocated at offset +
     // sum(sorted_slice_sizes[j], for j in [0, i-1]).
-    Status DoesPermutationFit(
+    absl::Status DoesPermutationFit(
         absl::Span<const int64_t> permutation_of_slice_times,
         const FreeChunkRoot& root, int64_t offset) const;
 
     // Only DoesSlicedPermutationFit() should call this method directly. Other
     // callers should call DoesSlicedPermutationFit(), which contains some
     // wrapper VLOGGING.
-    Status DoesPermutationFitImpl(
+    absl::Status DoesPermutationFitImpl(
         absl::Span<const int64_t> permutation_of_slice_times,
         const FreeChunkRoot& root, int64_t offset) const;
 
@@ -811,7 +848,7 @@ class GlobalDecreasingSizeBestFitHeap : public HeapAlgorithm<BufferType> {
   void ShareWith(const BufferType* buffer, const BufferType* share_with,
                  int64_t size) override;
 
-  StatusOr<Result> Finish() override;
+  absl::StatusOr<Result> Finish() override;
 
   // Return a BufferIntervalCompare function that sort by spatial size. We don't
   // look at co-locates as they should have the same size.
@@ -992,7 +1029,7 @@ class ChooseBestHeapAlgorithm : public HeapAlgorithm<BufferType> {
     }
   }
 
-  StatusOr<Result> Finish() override;
+  absl::StatusOr<Result> Finish() override;
 
  private:
   std::vector<std::unique_ptr<HeapAlgorithm<BufferType>>> algorithms_;

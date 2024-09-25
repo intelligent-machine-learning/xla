@@ -34,21 +34,22 @@ limitations under the License.
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
-#include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "llvm/Support/Casting.h"
-#include "mlir/IR/BuiltinOps.h"  // from @llvm-project
-#include "mlir/IR/MLIRContext.h"  // from @llvm-project
-#include "mlir/IR/OwningOpRef.h"  // from @llvm-project
-#include "nanobind/nanobind.h"  // from @nanobind
-#include "nanobind/stl/optional.h"  // from @nanobind  // IWYU pragma: keep
-#include "nanobind/stl/pair.h"  // from @nanobind  // IWYU pragma: keep
-#include "nanobind/stl/shared_ptr.h"  // from @nanobind  // IWYU pragma: keep
-#include "nanobind/stl/string.h"  // from @nanobind  // IWYU pragma: keep
-#include "nanobind/stl/string_view.h"  // from @nanobind  // IWYU pragma: keep
-#include "nanobind/stl/unique_ptr.h"  // from @nanobind  // IWYU pragma: keep
-#include "nanobind/stl/variant.h"  // from @nanobind  // IWYU pragma: keep
-#include "nanobind/stl/vector.h"  // from @nanobind  // IWYU pragma: keep
+#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/MLIRContext.h"
+#include "mlir/IR/OwningOpRef.h"
+#include "mlir/Pass/PassManager.h"
+#include "nanobind/nanobind.h"
+#include "nanobind/stl/optional.h"  // IWYU pragma: keep
+#include "nanobind/stl/pair.h"  // IWYU pragma: keep
+#include "nanobind/stl/shared_ptr.h"  // IWYU pragma: keep
+#include "nanobind/stl/string.h"  // IWYU pragma: keep
+#include "nanobind/stl/string_view.h"  // IWYU pragma: keep
+#include "nanobind/stl/unique_ptr.h"  // IWYU pragma: keep
+#include "nanobind/stl/variant.h"  // IWYU pragma: keep
+#include "nanobind/stl/vector.h"  // IWYU pragma: keep
 #include "xla/literal.h"
 #include "xla/pjrt/exceptions.h"
 #include "xla/pjrt/mlir_to_hlo.h"
@@ -64,8 +65,10 @@ limitations under the License.
 #include "xla/python/ifrt/device.h"
 #include "xla/python/ifrt/dtype.h"
 #include "xla/python/ifrt/executable.h"
+#include "xla/python/ifrt/hlo/hlo_program.h"
 #include "xla/python/ifrt/host_callback.h"
 #include "xla/python/ifrt/memory.h"
+#include "xla/python/ifrt/program.h"
 #include "xla/python/nb_absl_span.h"  // IWYU pragma: keep
 #include "xla/python/nb_class_ptr.h"
 #include "xla/python/nb_numpy.h"
@@ -85,19 +88,23 @@ limitations under the License.
 #include "xla/python/types.h"
 #include "xla/service/custom_call_target_registry.h"
 #include "xla/service/platform_util.h"  // IWYU pragma: keep
+#include "xla/service/spmd/shardy/constants.h"
+#include "xla/service/spmd/shardy/sdy_round_trip/pipelines.h"
+#include "xla/service/spmd/shardy/utils.h"
 #include "xla/shape.h"
 #include "xla/status_macros.h"
+#include "xla/tsl/concurrency/ref_count.h"
+#include "xla/tsl/framework/mlir/status_scoped_diagnostic_handler.h"
 #include "xla/util.h"
-#include "tsl/concurrency/ref_count.h"
 #include "tsl/platform/casts.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/logging.h"
 #include "tsl/platform/status.h"
 #include "tsl/platform/statusor.h"
 
-#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM || TENSORFLOW_USE_SYCL
 #include "xla/python/py_client_gpu.h"
-#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM || TENSORFLOW_USE_SYCL
 
 namespace xla {
 
@@ -112,7 +119,7 @@ namespace nb = nanobind;
 
 PyClient::PyClient(std::shared_ptr<ifrt::Client> ifrt_client)
     : ifrt_client_(std::move(ifrt_client)),
-      client_attributes_(ifrt_client_->attributes()) {
+      client_attributes_(ifrt_client_->Attributes()) {
   CHECK(ifrt_client_);
 }
 
@@ -120,7 +127,7 @@ PyClient::PyClient(std::shared_ptr<ifrt::Client> ifrt_client)
   for (ifrt::Device* device : client->ifrt_client()->devices()) {
     client->devices_[device] = make_nb_class<PyDevice>(client, device);
 
-    for (PjRtMemorySpace* memory : device->memory_spaces()) {
+    for (ifrt::Memory* memory : device->Memories()) {
       auto& py_memory = client->memory_spaces_[memory];
       if (py_memory.get() == nullptr) {
         py_memory = make_nb_class<PyMemorySpace>(client, memory);
@@ -144,7 +151,7 @@ nb_class_ptr<PyDevice> PyClient::GetPyDevice(ifrt::Device* device) {
 }
 
 nb_class_ptr<PyMemorySpace> PyClient::GetPyMemorySpace(
-    PjRtMemorySpace* memory_space) {
+    ifrt::Memory* memory_space) {
   auto& py_memory = memory_spaces_[memory_space];
   if (py_memory.get() == nullptr) {
     py_memory = make_nb_class<PyMemorySpace>(
@@ -157,7 +164,7 @@ std::vector<nb_class_ptr<PyDevice>> PyClient::Devices() {
   std::vector<nb_class_ptr<PyDevice>> devices;
   auto span = ifrt_client_->devices();
   devices.reserve(span.size());
-  for (PjRtDevice* device : span) {
+  for (ifrt::Device* device : span) {
     devices.push_back(GetPyDevice(device));
   }
   return devices;
@@ -174,7 +181,7 @@ std::vector<nb_class_ptr<PyDevice>> PyClient::LocalDevices() {
 
 absl::StatusOr<nb_class_ptr<PyDevice>> PyClient::DeviceFromLocalHardwareId(
     int local_hardware_id) {
-  TF_ASSIGN_OR_RETURN(PjRtDevice * device,
+  TF_ASSIGN_OR_RETURN(ifrt::Device * device,
                       ifrt_client_->LookupAddressableDevice(local_hardware_id));
   return GetPyDevice(device);
 }
@@ -276,7 +283,7 @@ absl::Status PyClient::Defragment() {
 }
 
 /* static */ absl::StatusOr<nb::object> PyClient::BufferFromPyval(
-    nb_class_ptr<PyClient> client, nb::handle argument, PjRtDevice* device,
+    nb_class_ptr<PyClient> client, nb::handle argument, ifrt::Device* device,
     bool force_copy, ifrt::Client::HostBufferSemantics host_buffer_semantics) {
   if (device == nullptr) {
     TF_RET_CHECK(!client->ifrt_client_->addressable_devices().empty());
@@ -308,8 +315,8 @@ absl::Status PyClient::Defragment() {
   TF_RETURN_IF_ERROR(
       jax::ApplyTransferGuardToHostToDevice(transfer_guard_formatter));
 
-  TF_ASSIGN_OR_RETURN(PjRtDevice * found_device,
-                      client->ifrt_client_->LookupDevice(device->id()));
+  TF_ASSIGN_OR_RETURN(ifrt::Device * found_device,
+                      client->ifrt_client_->LookupDevice(device->Id()));
   if (found_device != device) {
     return InvalidArgument("Cannot copy value to device '%s' with '%s' backend",
                            device->DebugString(),
@@ -323,9 +330,15 @@ absl::Status PyClient::Defragment() {
       (!force_copy && (host_buffer_semantics ==
                        ifrt::Client::HostBufferSemantics::kImmutableZeroCopy));
   // TODO(phawkins): remove .ptr() after nanobind transition is complete.
-  TF_ASSIGN_OR_RETURN(DevicePutResult put,
-                      DevicePut(argument.ptr(), client->ifrt_client_.get(),
-                                device, options, ifrt::MemoryKind()));
+  TF_ASSIGN_OR_RETURN(
+      auto put_fn, DevicePut(argument.ptr(), client->ifrt_client_.get(), device,
+                             options, ifrt::MemoryKind()));
+  TF_ASSIGN_OR_RETURN(auto put, [&]() {
+    // Must release the GIL before calling IFRT because backends may
+    // decide to block/sleep for device buffer allocation.
+    nb::gil_scoped_release gil_release;
+    return std::move(put_fn)();
+  }());
 
   if (put.ifrt_array) {
     auto traceback = Traceback::Get();
@@ -336,61 +349,6 @@ absl::Status PyClient::Defragment() {
   } else {
     return put.owning_pybuffer;
   }
-}
-
-/* static */ absl::StatusOr<nb::list> PyClient::MakeCrossHostReceiveBuffers(
-    nb_class_ptr<PyClient> client, absl::Span<const Shape> shapes,
-    PjRtDevice* device) {
-  CHECK(device != nullptr);
-  absl::Mutex mu;
-  absl::StatusOr<std::vector<PjRtCrossHostRecvDescriptors>> recv_descriptors_or;
-  bool done = false;
-
-  TF_ASSIGN_OR_RETURN(
-      auto buffers,
-      client->pjrt_client()->MakeCrossHostReceiveBuffers(
-          shapes, device,
-          [&done, &recv_descriptors_or,
-           &mu](absl::StatusOr<PjRtCrossHostRecvState> recv_state_or) {
-            absl::MutexLock l(&mu);
-            if (recv_state_or.ok()) {
-              nb::gil_scoped_acquire gil;
-              recv_descriptors_or = std::move(recv_state_or->descriptors);
-            } else {
-              recv_descriptors_or = recv_state_or.status();
-            }
-            done = true;
-          }));
-
-  {
-    nb::gil_scoped_release gil_release;
-    absl::MutexLock l(&mu);
-    mu.Await(absl::Condition(&done));
-  }
-
-  TF_RETURN_IF_ERROR(recv_descriptors_or.status());
-  CHECK_EQ(buffers.size(), recv_descriptors_or->size());
-  nb::list result;
-  for (int i = 0; i < buffers.size(); ++i) {
-    auto& descriptors = recv_descriptors_or->at(i);
-    CHECK_EQ(descriptors.serialized_descriptors.size(), 1);
-    const std::string& desc = descriptors.serialized_descriptors[0];
-    nb::bytes py_desc = nb::bytes(desc.data(), desc.size());
-    auto* ifrt_client = llvm::dyn_cast_or_null<ifrt::PjRtCompatibleClient>(
-        client->ifrt_client());
-    if (ifrt_client == nullptr) {
-      throw XlaRuntimeError(
-          "This operation is implemented for a PjRt-compatible backend only.");
-    }
-    TF_ASSIGN_OR_RETURN(auto ifrt_array,
-                        ifrt_client->CreatePjRtArray(std::move(buffers[i])));
-    auto py_buf = PyArray::MakeFromSingleDeviceArray(client, Traceback::Get(),
-                                                     std::move(ifrt_array),
-                                                     /*weak_type=*/false,
-                                                     /*committed=*/false);
-    result.append(nb::make_tuple(std::move(py_desc), std::move(py_buf)));
-  }
-  return result;
 }
 
 namespace {
@@ -470,6 +428,7 @@ PyClient::CompileIfrtProgram(
     TF_ASSIGN_OR_RETURN(ifrt_loaded_executable,
                         client->ifrt_client_->GetDefaultCompiler()->Compile(
                             std::move(ifrt_program), std::move(ifrt_options)));
+    TF_RETURN_IF_ERROR(ifrt_loaded_executable->GetReadyFuture().Await());
     TF_ASSIGN_OR_RETURN(fingerprint, ifrt_loaded_executable->Fingerprint());
   }
   auto traceback = Traceback::Get();
@@ -484,8 +443,24 @@ PyClient::CompileIfrtProgram(
   mlir::MLIRContext context;
   TF_ASSIGN_OR_RETURN(mlir::OwningOpRef<mlir::ModuleOp> module,
                       ParseMlirModuleString(mlir_module, context));
+  if (options.executable_build_options.use_shardy_partitioner()) {
+    mlir::PassManager pm(&context);
+    // Since Shardy is inside the middle of the XLA pipeline, after converting
+    // down to HLO, we need to run the Shardy export pipeline to preserve the
+    // SDY ops and sharding attributes for when we come back from HLO to MLIR
+    // when Shardy propagation is run.
+    xla::sdy::addSdyRoundTripExportPipeline(pm);
+    // TODO(bartchr): remove setting `kPythonIntegrationComplete` in follow-up
+    // now that both JAX and PartIR are integrated with Shardy.
+    xla::sdy::addFrontendAttribute(*module,
+                                   xla::sdy::kPythonIntegrationComplete,
+                                   mlir::StringAttr::get(&context, "t"));
+    TF_RETURN_IF_ERROR(
+        tsl::StatusScopedDiagnosticHandler(&context).consumeStatus(
+            pm.run(*module)));
+  }
   return CompileIfrtProgram(
-      client, std::make_unique<xla::ifrt::XlaProgram>(module.get()),
+      client, std::make_unique<xla::ifrt::HloProgram>(module.get()),
       MakeIfrtCompileOptions(std::move(options), std::move(host_callbacks)));
 }
 
@@ -525,7 +500,7 @@ namespace {
 struct HeapProfileKey {
   Traceback* traceback;
   int64_t size;
-  PjRtDevice* device;
+  xla::PjRtDevice* device;
   bool operator==(const HeapProfileKey& other) const;
 };
 
@@ -674,7 +649,7 @@ PyClient::GetEmitPythonCallbackDescriptor(nb::callable callable,
 XLA_CPU_REGISTER_CUSTOM_CALL_TARGET_WITH_SYM("xla_python_cpu_callback",
                                              &XlaPythonCpuCallback);
 
-#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM || TENSORFLOW_USE_SYCL
 XLA_REGISTER_CUSTOM_CALL_TARGET_WITH_SYM(
     "xla_python_gpu_callback", &XlaPythonGpuCallback,
     absl::AsciiStrToUpper(PlatformUtil::CanonicalPlatformName("gpu").value()));
@@ -696,8 +671,7 @@ XLA_REGISTER_CUSTOM_CALL_TARGET_WITH_SYM(
   PyClient* c = nb::inst_ptr<PyClient>(self);
   absl::flat_hash_map<ifrt::Device*, nb_class_ptr<PyDevice>> devices;
   std::swap(devices, c->devices_);
-  absl::flat_hash_map<PjRtMemorySpace*, nb_class_ptr<PyMemorySpace>>
-      memory_spaces;
+  absl::flat_hash_map<ifrt::Memory*, nb_class_ptr<PyMemorySpace>> memory_spaces;
   std::swap(memory_spaces, c->memory_spaces_);
   return 0;
 }
@@ -747,14 +721,6 @@ PyType_Slot PyClient::slots_[] = {
           nb::arg("force_copy") = false,
           nb::arg("host_buffer_semantics") =
               PjRtClient::HostBufferSemantics::kImmutableZeroCopy)
-      .def(
-          "make_cross_host_receive_buffers",
-          [](nb_class_ptr<PyClient> client, absl::Span<const Shape> shapes,
-             PjRtDevice* device) {
-            return ValueOrThrow(PyClient::MakeCrossHostReceiveBuffers(
-                std::move(client), shapes, device));
-          },
-          nb::arg("shapes"), nb::arg("device"))
       .def(
           "compile",
           [](nb_class_ptr<PyClient> client, nb::bytes mlir_module,
@@ -819,10 +785,10 @@ PyType_Slot PyClient::slots_[] = {
           nb::arg("dtype"), nb::arg("shard_shape"), nb::arg("device"))
       .def("__getattr__",
            [](PyClient& client, std::string_view name) -> nb::object {
-             const auto& attrs = client.attributes();
+             const auto& attrs = client.Attributes().map();
              auto it = attrs.find(name);
              if (it != attrs.end()) {
-               return std::visit([](auto&& v) { return nb::cast(v); },
+               return std::visit([](auto&& v) { return nb::cast(v.value); },
                                  it->second);
              }
              throw nb::attribute_error(

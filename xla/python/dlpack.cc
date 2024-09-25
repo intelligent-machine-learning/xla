@@ -27,23 +27,24 @@ limitations under the License.
 #include <vector>
 
 #include "absl/algorithm/container.h"
-#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_join.h"
 #include "absl/types/span.h"
-#include "include/dlpack/dlpack.h"  // from @dlpack
+#include "include/dlpack/dlpack.h"
 #include "llvm/Support/Casting.h"
-#include "nanobind/nanobind.h"  // from @nanobind
+#include "nanobind/nanobind.h"
 #include "xla/layout.h"
-#include "xla/layout_util.h"
 #include "xla/pjrt/exceptions.h"
 #include "xla/pjrt/pjrt_client.h"
+#include "xla/pjrt/pjrt_common.h"
 #include "xla/pjrt/pjrt_compiler.h"
 #include "xla/pjrt/pjrt_layout.h"
 #include "xla/python/ifrt/array.h"
+#include "xla/python/ifrt/device.h"
 #include "xla/python/nb_class_ptr.h"
 #include "xla/python/pjrt_ifrt/pjrt_array.h"
 #include "xla/python/pjrt_ifrt/pjrt_client.h"
+#include "xla/python/pjrt_ifrt/pjrt_device.h"
 #include "xla/python/py_array.h"
 #include "xla/python/py_client.h"
 #include "xla/python/python_ref_manager.h"
@@ -256,7 +257,7 @@ absl::StatusOr<DLDeviceType> DLDeviceTypeForDevice(const PjRtDevice& device) {
 absl::StatusOr<DLDevice> DLDeviceForDevice(const PjRtDevice& device) {
   DLDevice context;
   TF_ASSIGN_OR_RETURN(context.device_type, DLDeviceTypeForDevice(device));
-  context.device_id = device.local_hardware_id();
+  context.device_id = device.local_hardware_id().value();
   return context;
 }
 
@@ -270,21 +271,24 @@ absl::StatusOr<PjRtDevice*> DeviceForDLDevice(const PjRtClient* cpu_client,
             "DLPack tensor is on CPU, but no CPU backend was provided.");
       }
       TF_RET_CHECK(cpu_client->platform_id() == CpuId());
-      return cpu_client->LookupAddressableDevice(context.device_id);
+      return cpu_client->LookupAddressableDevice(
+          xla::PjRtLocalDeviceId(context.device_id));
     case kDLCUDA:
       if (gpu_client == nullptr) {
         return InvalidArgument(
             "DLPack tensor is on GPU, but no GPU backend was provided.");
       }
       TF_RET_CHECK(gpu_client->platform_id() == CudaId());
-      return gpu_client->LookupAddressableDevice(context.device_id);
+      return gpu_client->LookupAddressableDevice(
+          xla::PjRtLocalDeviceId(context.device_id));
     case kDLROCM:
       if (gpu_client == nullptr) {
         return InvalidArgument(
             "DLPack tensor is on GPU, but no GPU backend was provided.");
       }
       TF_RET_CHECK(gpu_client->platform_id() == RocmId());
-      return gpu_client->LookupAddressableDevice(context.device_id);
+      return gpu_client->LookupAddressableDevice(
+          xla::PjRtLocalDeviceId(context.device_id));
     default:
       return InvalidArgument("Unknown/unsupported DLPack device type %d",
                              context.device_type);
@@ -338,7 +342,7 @@ absl::StatusOr<nb::capsule> BufferToDLPackManagedTensor(
   pack->tensor.manager_ctx = pack.get();
   pack->tensor.deleter = DLPackTensorDeleter;
   TF_ASSIGN_OR_RETURN(dt.device, DLDeviceForDevice(*pjrt_buffer->device()));
-  dt.device.device_id = pjrt_buffer->device()->local_hardware_id();
+  dt.device.device_id = pjrt_buffer->device()->local_hardware_id().value();
   dt.ndim = pjrt_buffer->dimensions().size();
   TF_ASSIGN_OR_RETURN(dt.dtype,
                       PrimitiveTypeToDLDataType(pjrt_buffer->element_type()));
@@ -426,19 +430,8 @@ absl::StatusOr<nb::object> DLPackManagedTensorToBuffer(
   // for non-default layouts, and will return wrong results if a non-default
   // layout is passed to a computation expecting default layouts. Remove this
   // special case when non-default layouts are better supported by JAX.
-  absl::StatusOr<Layout> default_layout_from_client =
-      device->client()->GetDefaultLayout(element_type, dimensions);
-  Layout default_layout;
-  if (default_layout_from_client.ok()) {
-    default_layout = *default_layout_from_client;
-  } else if (absl::IsUnimplemented(default_layout_from_client.status())) {
-    // TODO(skyewm): consider remove the fallback path when GetDefaultLayout is
-    // unimplemented.
-    Shape host_shape = ShapeUtil::MakeShape(element_type, dimensions);
-    default_layout = LayoutUtil::GetWithDefaultLayout(host_shape).layout();
-  } else {
-    return default_layout_from_client.status();
-  }
+  TF_ASSIGN_OR_RETURN(Layout default_layout, device->client()->GetDefaultLayout(
+                                                 element_type, dimensions));
   if (shape.layout() != default_layout) {
     return Unimplemented(
         "from_dlpack got array with non-default layout with minor-to-major "
@@ -478,8 +471,19 @@ absl::StatusOr<nb::object> DLPackManagedTensorToBuffer(
 }
 
 absl::StatusOr<nb::object> DLPackManagedTensorToBuffer(
-    const nb::capsule& tensor, PjRtDevice* device,
+    const nb::capsule& tensor, ifrt::Device* ifrt_device,
     nb_class_ptr<PyClient> client, std::optional<std::intptr_t> stream) {
+  ifrt::PjRtDevice* device =
+      llvm::dyn_cast_or_null<ifrt::PjRtDevice>(ifrt_device);
+  if (device == nullptr) {
+    throw XlaRuntimeError(
+        "DLPack is supported for PjRt-compatible backends only.");
+  }
+  if (!device->IsAddressable()) {
+    throw XlaRuntimeError(
+        "DLPack is only supported for devices addressable by the current "
+        "process.");
+  }
   if (std::string_view(tensor.name()) != kDlTensorCapsuleName) {
     return InvalidArgument(
         "DLPack tensor must be a capsule with name \"dltensor\", got \"%s\". "
@@ -515,11 +519,12 @@ absl::StatusOr<nb::object> DLPackManagedTensorToBuffer(
   if (dlmt->deleter) {
     on_delete_callback = [dlmt]() { dlmt->deleter(dlmt); };
   }
-  TF_ASSIGN_OR_RETURN(auto pjrt_buffer,
-                      device->client()->CreateViewOfDeviceBuffer(
-                          static_cast<char*>(dlmt->dl_tensor.data) +
-                              dlmt->dl_tensor.byte_offset,
-                          shape, device, on_delete_callback, stream));
+  TF_ASSIGN_OR_RETURN(
+      auto pjrt_buffer,
+      device->pjrt_device()->client()->CreateViewOfDeviceBuffer(
+          static_cast<char*>(dlmt->dl_tensor.data) +
+              dlmt->dl_tensor.byte_offset,
+          shape, device->pjrt_device(), on_delete_callback, stream));
   // We have taken ownership of the array inside the capsule; make sure the
   // capsule it cannot be used again.
   PyCapsule_SetName(tensor.ptr(), "used_dltensor");

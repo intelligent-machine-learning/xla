@@ -28,6 +28,7 @@ limitations under the License.
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/strings/cord.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
@@ -37,6 +38,7 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_input_output_alias_config.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_module_metadata.h"
+#include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/ir/hlo_schedule.h"
 #include "xla/iterator_util.h"
 #include "xla/printer.h"
@@ -163,10 +165,10 @@ class HloModule {
       std::unique_ptr<HloComputation> computation);
 
   // Removes an embedded computation.
-  Status RemoveEmbeddedComputation(HloComputation* to_remove);
+  absl::Status RemoveEmbeddedComputation(HloComputation* to_remove);
 
   // Removes unused computations.
-  Status RemoveUnusedComputations();
+  absl::Status RemoveUnusedComputations();
 
   // Marks duplicate fusions with the same name to be able to group them for
   // analysis purposes (e.g. through Xprof).
@@ -456,7 +458,7 @@ class HloModule {
       bool prohibit_empty_literal = true);
 
   // Convert an HloModule to or from a proto that includes module configuration
-  absl::StatusOr<HloModuleProtoWithConfig> ToProtoWithConfig() const;
+  HloModuleProtoWithConfig ToProtoWithConfig() const;
   static absl::StatusOr<std::unique_ptr<HloModule>> CreateFromProtoWithConfig(
       const HloModuleProtoWithConfig& proto,
       bool prohibit_empty_literal = true);
@@ -489,6 +491,9 @@ class HloModule {
 
   // Returns the NameUniquer for uniquing instruction names in this module.
   NameUniquer& instruction_name_uniquer() { return instruction_name_uniquer_; }
+
+  // Returns the NameUniquer for uniquing computation names in this module.
+  NameUniquer& computation_name_uniquer() { return computation_name_uniquer_; }
 
   // Assign a new unique dense id for an instruction
   int NewUniqueInstructionId() {
@@ -524,7 +529,7 @@ class HloModule {
   int unique_id() const { return unique_id_; }
 
   // Sets the schedule of the module to the given schedule.
-  Status set_schedule(HloSchedule schedule);
+  absl::Status set_schedule(HloSchedule schedule);
 
   // Clears the schedule of the module.
   void clear_schedule() { schedule_.reset(); }
@@ -535,6 +540,13 @@ class HloModule {
   // Returns the schedule of the module. CHECK fails if no schedule is set.
   const HloSchedule& schedule() const { return *schedule_; }
   HloSchedule& schedule() { return *schedule_; }
+
+  HloComputation* AddComputation(std::unique_ptr<HloComputation> computation,
+                                 bool is_entry) {
+    return AddComputationInternal(std::move(computation), is_entry,
+                                  /*uniquify_identifiers=*/false,
+                                  /*preserve_entry_layouts=*/true);
+  }
 
   HloComputation* AddComputationAndUnifyNamesAndIds(
       std::unique_ptr<HloComputation> computation, bool is_entry) {
@@ -558,7 +570,7 @@ class HloModule {
     computation->UniquifyName(&computation_name_uniquer_);
   }
 
-  Status CheckUniqueNamesAndIdsForComputationsAndInstructions() const;
+  absl::Status CheckUniqueNamesAndIdsForComputationsAndInstructions() const;
 
   // Checks if this config has a list of entry parameters' HLO shardings for
   // SPMD.
@@ -611,13 +623,14 @@ class HloModule {
         CrossProgramPrefetchInfo{parameter, index, alt_memory_offset});
   }
 
-  Status SetCrossProgramPrefetchOffset(int64_t prefetch_index, int64_t offset) {
+  absl::Status SetCrossProgramPrefetchOffset(int64_t prefetch_index,
+                                             int64_t offset) {
     TF_RET_CHECK(prefetch_index < cross_program_prefetches_.size());
     auto& [parameter, index, optional_offset] =
         cross_program_prefetches_[prefetch_index];
     TF_RET_CHECK(!optional_offset.has_value());
     optional_offset = offset;
-    return OkStatus();
+    return absl::OkStatus();
   }
 
   // Get the list of program arguments to be prefetch across programs.

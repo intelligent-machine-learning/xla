@@ -15,29 +15,40 @@ limitations under the License.
 
 #include "xla/service/hlo_verifier.h"
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include <gmock/gmock.h>
+#include <gtest/gtest.h>
 #include "absl/base/log_severity.h"
 #include "absl/log/scoped_mock_log.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
+#include "absl/strings/str_join.h"
 #include "absl/strings/str_replace.h"
 #include "absl/strings/string_view.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/layout.h"
+#include "xla/literal_util.h"
 #include "xla/service/hlo_module_config.h"
 #include "xla/service/hlo_parser.h"
 #include "xla/service/layout_assignment.h"
+#include "xla/shape.h"
 #include "xla/shape_util.h"
 #include "xla/tests/hlo_test_base.h"
+#include "xla/tsl/lib/core/status_test_util.h"
 #include "xla/xla.pb.h"
 #include "xla/xla_data.pb.h"
-#include "tsl/lib/core/status_test_util.h"
+#include "tsl/platform/platform.h"
 #include "tsl/platform/statusor.h"
+#include "tsl/platform/test.h"
 
 namespace xla {
 namespace {
@@ -1058,13 +1069,14 @@ TEST_F(HloVerifierTest, AsyncOpComputationParamWrongType) {
   HloModule Module
 
   async_computation {
-    p = f32[2,3] parameter(0)
-    ROOT custom-call = f32[3,2] custom-call(p), custom_call_target="foo"
+    p0 = f32[2,3] parameter(0)
+    ROOT p1 = f32[3,2] parameter(1)
   }
 
   ENTRY AsyncStartAndAsyncDone {
     p0 = f32[2,3] parameter(0)
-    async-start = ((f32[3,2]), f32[3,2], u32[]) async-start(p0), calls=async_computation
+    p1 = f32[3,2] parameter(1)
+    async-start = ((f32[3,2], f32[3,2]), f32[3,2], u32[]) async-start(p0, p1), calls=async_computation
     ROOT async-done = f32[3,2] async-done(async-start), calls=async_computation
   }
   )";
@@ -1083,13 +1095,14 @@ TEST_F(HloVerifierTest, AsyncOpComputationRootWrongType) {
   HloModule Module
 
   async_computation {
-    p = f32[2,3] parameter(0)
-    ROOT custom-call = f32[3,2] custom-call(p), custom_call_target="foo"
+    p0 = f32[2,3] parameter(0)
+    ROOT p1 = f32[3,2] parameter(1)
   }
 
   ENTRY AsyncStartAndAsyncDone {
     p0 = f32[2,3] parameter(0)
-    async-start = ((f32[2,3]), f32[2,3], u32[]) async-start(p0), calls=async_computation
+    p1 = f32[3,2] parameter(1)
+    async-start = ((f32[2,3], f32[3,2]), f32[2,3], u32[]) async-start(p0, p1), calls=async_computation
     ROOT async-done = f32[3,2] async-done(async-start), calls=async_computation
   }
   )";
@@ -1987,9 +2000,10 @@ TEST_F(HloVerifierTest, FusionNestedComputationThreadVerifier) {
   )";
   TF_ASSERT_OK_AND_ASSIGN(auto module,
                           ParseAndReturnUnverifiedModule(kModuleStr));
-  EXPECT_THAT(
-      verifier().Run(module.get()).status().message(),
-      HasSubstr("Nested computations expects same computation's thread name"));
+  EXPECT_THAT(verifier().Run(module.get()).status().message(),
+              HasSubstr("Nested computations expects same computation's thread "
+                        "name: parallel_thread vs main, in called computation "
+                        "`add` vs caller computation `fused_computation`"));
 }
 
 TEST_F(HloVerifierTest, AllReduceVerifier) {
@@ -2489,6 +2503,81 @@ ENTRY computation {
                    .status());
 }
 
+TEST_F(HloVerifierTest, VerifyInstructionNameChanged) {
+  const char* const hlo = R"(
+HloModule module
+
+ENTRY computation {
+  p0 = f32[32] parameter(0), metadata={scheduling_name="p0"}
+  p1 = f32[32] parameter(1), metadata={scheduling_name="p1"}
+  ROOT add0 = f32[32] add(p0,p1), metadata={scheduling_name="add_changed"}
+}
+)";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(hlo));
+  auto status = HloVerifier{HloVerifierOpts{}.VerifyInstructionNameUnchanged()}
+                    .Run(module.get())
+                    .status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(status.message(),
+              HasSubstr("Expected instruction name to remain the same."));
+}
+
+TEST_F(HloVerifierTest, VerifyInstructionNameUnchanged) {
+  const char* const hlo = R"(
+HloModule module
+
+ENTRY computation {
+  p0 = f32[32] parameter(0), metadata={scheduling_name="p0"}
+  p1 = f32[32] parameter(1), metadata={scheduling_name="p1"}
+  ROOT add0 = f32[32] add(p0,p1), metadata={scheduling_name="add0"}
+}
+)";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(hlo));
+  TF_ASSERT_OK(HloVerifier{HloVerifierOpts{}.VerifyInstructionNameUnchanged()}
+                   .Run(module.get())
+                   .status());
+}
+
+TEST_F(HloVerifierTest, VerifyInstructionNameSchedulingNameNotPresent) {
+  const char* const hlo = R"(
+HloModule module
+
+ENTRY computation {
+  p0 = f32[32] parameter(0)
+  p1 = f32[32] parameter(1)
+  ROOT add0 = f32[32] add(p0,p1)
+}
+)";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(hlo));
+  TF_ASSERT_OK(HloVerifier{HloVerifierOpts{}.VerifyInstructionNameUnchanged()}
+                   .Run(module.get())
+                   .status());
+}
+
+TEST_F(HloVerifierTest, VerifyInstructionNameChangedOkWithRematAndClones) {
+  const char* const hlo = R"(
+HloModule module
+
+ENTRY computation {
+  p0 = f32[32] parameter(0), metadata={scheduling_name="p0"}
+  p1 = f32[32] parameter(1), metadata={scheduling_name="p1"}
+  add0.remat = f32[32] add(p0,p1), metadata={scheduling_name="add0"}
+  ROOT add1.clone = f32[32] add(add0.remat, p0), metadata={scheduling_name="add1"}
+}
+)";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(hlo));
+  auto status = HloVerifier{HloVerifierOpts{}.VerifyInstructionNameUnchanged()}
+                    .Run(module.get())
+                    .status();
+  TF_ASSERT_OK(HloVerifier{HloVerifierOpts{}.VerifyInstructionNameUnchanged()}
+                   .Run(module.get())
+                   .status());
+}
+
 TEST_F(HloVerifierTest, ReshapeIsNotBitcast) {
   const char* const hlo = R"(
 HloModule Module
@@ -2763,7 +2852,7 @@ TEST_F(HloVerifierTest, DisableS4Veridication) {
 }
 
 TEST(MetadataTrackerTest, MetadataTrackerLogsInfo) {
-  if (tsl::testing::kIsOpenSource) {
+  if (tsl::kIsOpenSource) {
     return;
   }
   constexpr absl::string_view hlo = R"(
@@ -2821,7 +2910,7 @@ ENTRY entry {
 
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
                           ParseAndReturnUnverifiedModule(kHlo));
-  Status status = verifier().Run(module.get()).status();
+  absl::Status status = verifier().Run(module.get()).status();
 
   TF_ASSERT_OK(status);
 }
@@ -2839,7 +2928,7 @@ ENTRY entry {
 
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
                           ParseAndReturnUnverifiedModule(kHlo));
-  Status status = verifier().Run(module.get()).status();
+  absl::Status status = verifier().Run(module.get()).status();
 
   ASSERT_FALSE(status.ok());
   EXPECT_THAT(status.message(), HasSubstr("should be compatible"));
@@ -2858,7 +2947,7 @@ ENTRY entry {
 
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
                           ParseAndReturnUnverifiedModule(kHlo));
-  Status status = verifier().Run(module.get()).status();
+  absl::Status status = verifier().Run(module.get()).status();
 
   TF_ASSERT_OK(status);
 }
@@ -2876,10 +2965,29 @@ ENTRY entry {
 
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
                           ParseAndReturnUnverifiedModule(kHlo));
-  Status status = verifier().Run(module.get()).status();
+  absl::Status status = verifier().Run(module.get()).status();
 
   ASSERT_FALSE(status.ok());
   EXPECT_THAT(status.message(), HasSubstr("should be compatible"));
+}
+
+TEST_F(HloVerifierTestLayoutSensitive, AliasedMemorySpaceMismatchReported) {
+  constexpr absl::string_view kHlo = R"(
+HloModule module, input_output_alias={{}: (0, {}, must-alias)},
+                  entry_computation_layout={(f32[10]{0:S(5)})->f32[10]{0}}
+
+ENTRY entry {
+  x = f32[10]{0} parameter(0)
+  ROOT add = f32[10]{0} add(x, x)
+})";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnUnverifiedModule(kHlo));
+  absl::Status status = verifier().Run(module.get()).status();
+
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(status.message(),
+              HasSubstr("Shape and memory space of the result"));
 }
 
 TEST_F(HloVerifierTestLayoutSensitive, LayoutOK) {
@@ -2895,7 +3003,7 @@ ENTRY entry {
 
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
                           ParseAndReturnUnverifiedModule(kHlo));
-  Status status = verifier().Run(module.get()).status();
+  absl::Status status = verifier().Run(module.get()).status();
 
   TF_ASSERT_OK(status);
 }
@@ -2912,7 +3020,7 @@ ENTRY entry {
 
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
                           ParseAndReturnUnverifiedModule(kHlo));
-  Status status = verifier().Run(module.get()).status();
+  absl::Status status = verifier().Run(module.get()).status();
 
   TF_ASSERT_OK(status);
 }
@@ -3023,6 +3131,33 @@ TEST_F(HloVerifierTestLayoutSensitive,
   EXPECT_THAT(status.message(),
               HasSubstr("DynamicSlice instruction shouldn't change layout "
                         "memory space from device to host"));
+}
+
+TEST_F(HloVerifierTestLayoutSensitive,
+       MismatchedMinorToMajorSizeAndDimensionSize) {
+  const char* const hlo_string = R"(
+  HloModule m
+
+  ENTRY main {
+    data_param = f32[2048,2048]{1,0} parameter(0)
+    add = f32[2048,2048]{1,0} add(data_param, data_param)
+    ROOT const = f32[] constant(0)
+  })";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnUnverifiedModule(hlo_string));
+  // Programmatically mess up the minor-to-major rather than in the raw string,
+  // because the hlo parser fails if the minor-to-major is not the same size as
+  // the dimensions.
+  HloInstruction* instruction =
+      module->entry_computation()->parameter_instruction(0)->users().at(0);
+  Layout* layout = instruction->mutable_shape()->mutable_layout();
+  layout->add_minor_to_major(2);
+
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(status.message(),
+              HasSubstr("Instruction has mismatched minor-to-major size and "
+                        "dimension size: "));
 }
 }  // namespace
 }  // namespace xla

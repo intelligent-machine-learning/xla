@@ -14,14 +14,21 @@ limitations under the License.
 ==============================================================================*/
 #include "xla/service/gpu/fusions/loop.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
+#include <tuple>
 #include <utility>
 #include <vector>
 
+#include "absl/log/check.h"
+#include "absl/log/log.h"
 #include "absl/numeric/bits.h"
+#include "absl/status/status.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Type.h"
+#include "mlir/IR/MLIRContext.h"
+#include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/layout_util.h"
@@ -33,18 +40,22 @@ limitations under the License.
 #include "xla/service/gpu/ir_emitter_context.h"
 #include "xla/service/gpu/launch_dimensions.h"
 #include "xla/service/gpu/model/indexing_analysis.h"
+#include "xla/service/gpu/model/indexing_map.h"
 #include "xla/service/gpu/parallel_loop_emitter.h"
 #include "xla/service/llvm_ir/fused_ir_emitter.h"
 #include "xla/service/llvm_ir/ir_array.h"
 #include "xla/shape.h"
-#include "xla/status.h"
+#include "xla/shape_util.h"
+#include "xla/util.h"
+#include "tsl/platform/macros.h"
+#include "tsl/platform/statusor.h"
 
 namespace xla {
 namespace gpu {
 namespace {
 
 const Shape& GetElementShape(const HloFusionAnalysis& analysis) {
-  const Shape* shape = &analysis.fusion_roots().front()->shape();
+  const Shape* shape = &analysis.fusion_root(0).shape();
   while (shape->IsTuple()) {
     shape = &shape->tuple_shapes(0);
   }
@@ -70,13 +81,13 @@ int ComputeMaxUnrollFactor(int64_t num_elements) {
 std::pair<bool /*enabled*/, int> RowVectorizationEnabled(
     const HloFusionAdaptor& fusion, int64_t out_rank) {
   auto roots = fusion.GetRoots();
-  const auto is_row_major = [](auto instr) {
+  const auto is_row_major = [](const HloInstruction* instr) {
     // Only tested when the inputs are row-major. So only enable that case.
     // Maybe it would work if only the inner dimensions is contiguous.
-    return LayoutUtil::IsMonotonicWithDim0Major(instr.shape().layout());
+    return LayoutUtil::IsMonotonicWithDim0Major(instr->shape().layout());
   };
   bool row_vectorized = roots.size() == 1 && !roots[0].shape().IsTuple() &&
-                        is_row_major(roots[0]);
+                        is_row_major(&roots[0].instruction());
   if (!row_vectorized) {
     return {false, 0};
   }
@@ -125,15 +136,17 @@ std::pair<bool /*enabled*/, int> RowVectorizationEnabled(
             row_vectorized = false;
             return TraversalResult::kInterrupt;
         }
-      },
-      [&](auto argument) {
-        if (argument.shape().rank() == out_rank) {
-          ++num_big_inputs;
-        }
-        if (!is_row_major(argument)) {
-          row_vectorized = false;
-        }
       });
+  if (row_vectorized) {
+    for (const HloInstruction* argument : fusion.GetParameters()) {
+      if (argument->shape().rank() == out_rank) {
+        ++num_big_inputs;
+      }
+      if (!is_row_major(argument)) {
+        row_vectorized = false;
+      }
+    };
+  }
   // Trigger only when there is a row broadcasting.
   return std::make_pair(row_vectorized && some_row_broadcasting,
                         num_big_inputs);
@@ -143,6 +156,11 @@ std::pair<bool /*enabled*/, int> RowVectorizationEnabled(
 
 LaunchDimensionsConfig ComputeLoopFusionConfig(
     const HloFusionAnalysis& analysis) {
+  return ComputeLoopFusionConfig(analysis, GetElementShape(analysis));
+}
+
+LaunchDimensionsConfig ComputeLoopFusionConfig(
+    const HloFusionAnalysis& analysis, const Shape& element_shape) {
   int unroll_factor = 1;
   // Unrolling is good to read large inputs with small elements
   // due to vector loads, but increases the register pressure when one
@@ -150,7 +168,6 @@ LaunchDimensionsConfig ComputeLoopFusionConfig(
   // Therefore for fusions with small outputs prefer to use one thread
   // per output element = no unroll.
   // Call 'small' fusions that use less threads than the GPU has.
-  const auto& element_shape = GetElementShape(analysis);
   int64_t num_elements = ShapeUtil::ElementsIn(element_shape);
   int64_t n_threads_max = analysis.device_info().threads_per_core_limit() *
                           analysis.device_info().core_count();
@@ -160,43 +177,42 @@ LaunchDimensionsConfig ComputeLoopFusionConfig(
   }
   // CHECK that unroll_factor is a power-of-2, as needed by the logic below.
   CHECK(absl::has_single_bit(static_cast<uint64_t>(unroll_factor)));
-  if (analysis.input_output_info().has_4_bit_output && unroll_factor == 1) {
-    // Ensure a single thread writes to a byte containing two int4 values by
-    // setting unroll_factor to 2. unroll_factor is always a power of 2, so
-    // setting it to 2 here ensures unroll_factor is even when there are 4-bit
-    // outputs. Setting unroll_factor is safe even if there are an odd number of
-    // elements, as the parallel loop emitter will insert a bounds check in this
-    // case to ensure the out-of-bounds element is not computed and written.
-    // Setting unroll_factor is safe even if MayPreventVectorization returns
-    // false, as the MayPreventVectorization check is an optimization, not a
-    // correctness requirement.
-    unroll_factor = 2;
-  }
+  // Ensure a single thread writes to a byte containing multiple values by
+  // setting unroll_factor to an appropriate number. Setting unroll_factor is
+  // safe even if the new unroll_factor doesn't divide the number of elements,
+  // as the parallel loop emitter will insert a bounds check in this case to
+  // ensure the out-of-bounds element is not computed and written. Setting
+  // unroll_factor is safe even if MayPreventVectorization returns false, as
+  // the MayPreventVectorization check is an optimization, not a correctness
+  // requirement.
+  unroll_factor = std::max(
+      unroll_factor,
+      CeilOfRatio(8, analysis.input_output_info().smallest_output_dtype_bits));
+  CHECK(absl::has_single_bit(static_cast<uint64_t>(unroll_factor)));
   VLOG(2) << "Unroll factor: " << unroll_factor;
 
   bool row_vectorized;
   int num_big_inputs;
   std::tie(row_vectorized, num_big_inputs) =
       RowVectorizationEnabled(analysis.fusion(), element_shape.rank());
-  bool few_waves = !HloAnyOf(
-      analysis.fusion().GetRoots(), analysis.fusion(), [&](auto instr) {
-        if (instr.opcode() == HloOpcode::kParameter ||
-            instr.opcode() == HloOpcode::kConstant ||
-            HloInstruction::IsOpElementwise(instr.opcode())) {
-          return false;
-        }
-        if (auto broadcast =
-                DynCast<HloBroadcastInstruction>(&instr.instruction())) {
-          if (broadcast->dimensions().empty() ||
-              // More than 3 big inputs cause a speed regression.
-              (row_vectorized && num_big_inputs <= 3)) {
-            return false;
-          }
-        }
-        VLOG(2) << "few_waves not enabled due to: "
-                << instr.instruction().ToString();
-        return true;
-      });
+  bool few_waves = !HloAnyOf(analysis.fusion(), [&](auto instr) {
+    if (instr.opcode() == HloOpcode::kParameter ||
+        instr.opcode() == HloOpcode::kConstant ||
+        HloInstruction::IsOpElementwise(instr.opcode())) {
+      return false;
+    }
+    if (auto broadcast =
+            DynCast<HloBroadcastInstruction>(&instr.instruction())) {
+      if (broadcast->dimensions().empty() ||
+          // More than 3 big inputs cause a speed regression.
+          (row_vectorized && num_big_inputs <= 3)) {
+        return false;
+      }
+    }
+    VLOG(2) << "few_waves not enabled due to: "
+            << instr.instruction().ToString();
+    return true;
+  });
 
   LaunchDimensionsConfig launch_config{unroll_factor, few_waves,
                                        row_vectorized};
@@ -229,7 +245,8 @@ std::optional<IndexingMap> LoopFusion::ComputeThreadIdToInputIndexing(
   if (!thread_id_to_output_indexing.has_value()) {
     return std::nullopt;
   }
-  const HloInstruction* fusion_root = analysis_.fusion_roots()[root_index];
+  const HloInstruction* fusion_root =
+      &analysis_.fusion_root(root_index).instruction();
   auto output_to_input_indexing =
       ComputeOutputToInputIndexing(fusion_root, /*output_id=*/0, ctx);
   IndexingMapSet output_to_input_indexing_set =
@@ -239,7 +256,7 @@ std::optional<IndexingMap> LoopFusion::ComputeThreadIdToInputIndexing(
   CHECK_EQ(output_to_input_indexing_set.size(), 1);
   IndexingMap thread_id_to_input_indexing_map = ComposeIndexingMaps(
       *thread_id_to_output_indexing, *output_to_input_indexing_set.begin());
-  thread_id_to_input_indexing_map.Simplify(GetIndexingMapForInstruction);
+  thread_id_to_input_indexing_map.Simplify();
   return thread_id_to_input_indexing_map;
 }
 

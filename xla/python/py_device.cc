@@ -29,27 +29,29 @@ limitations under the License.
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_join.h"
-#include "nanobind/nanobind.h"  // from @nanobind
-#include "nanobind/stl/optional.h"  // from @nanobind  // IWYU pragma: keep
-#include "nanobind/stl/string.h"  // from @nanobind  // IWYU pragma: keep
-#include "nanobind/stl/string_view.h"  // from @nanobind  // IWYU pragma: keep
-#include "nanobind/stl/variant.h"  // from @nanobind  // IWYU pragma: keep
-#include "nanobind/stl/vector.h"  // from @nanobind  // IWYU pragma: keep
+#include "llvm/Support/Casting.h"
+#include "nanobind/nanobind.h"
+#include "nanobind/stl/optional.h"  // IWYU pragma: keep
+#include "nanobind/stl/string.h"  // IWYU pragma: keep
+#include "nanobind/stl/string_view.h"  // IWYU pragma: keep
+#include "nanobind/stl/variant.h"  // IWYU pragma: keep
+#include "nanobind/stl/vector.h"  // IWYU pragma: keep
 #include "xla/layout_util.h"
 #include "xla/literal.h"
-#include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/status_casters.h"
 #include "xla/python/ifrt/device.h"
 #include "xla/python/nb_class_ptr.h"
 #include "xla/python/nb_helpers.h"
+#include "xla/python/pjrt_ifrt/pjrt_client.h"
+#include "xla/python/pjrt_ifrt/pjrt_device.h"
 #include "xla/python/py_client.h"
 #include "xla/python/py_memory_space.h"
 #include "xla/python/python_ref_manager.h"
 #include "xla/python/types.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
+#include "xla/tsl/framework/allocator.h"
 #include "xla/util.h"
-#include "tsl/framework/allocator.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/statusor.h"
 
@@ -60,9 +62,9 @@ namespace xla {
 PyDevice::PyDevice(nb_class_ptr<PyClient> client, ifrt::Device* device)
     : client_(std::move(client)), device_(device) {}
 
-int PyDevice::id() const { return device_->id(); }
+int PyDevice::id() const { return device_->Id().value(); }
 
-int PyDevice::process_index() const { return device_->process_index(); }
+int PyDevice::process_index() const { return device_->ProcessIndex(); }
 
 std::string_view PyDevice::platform() const {
   // TODO(phawkins): this is a temporary backwards
@@ -79,12 +81,15 @@ std::string_view PyDevice::platform() const {
   }
 }
 
-std::string_view PyDevice::device_kind() const {
-  return device_->device_kind();
-}
+std::string_view PyDevice::device_kind() const { return device_->Kind(); }
 
 std::optional<int> PyDevice::local_hardware_id() const {
-  int local_hardware_id = device_->local_hardware_id();
+  // TODO(phawkins): consider supporting this for non-PJRT devices.
+  ifrt::PjRtDevice* device = llvm::dyn_cast<ifrt::PjRtDevice>(device_);
+  if (device == nullptr || !device->IsAddressable()) {
+    return std::nullopt;
+  }
+  int local_hardware_id = device->pjrt_device()->local_hardware_id().value();
   if (local_hardware_id == -1) {
     return std::nullopt;
   }
@@ -98,7 +103,13 @@ std::string_view PyDevice::Repr() const { return device_->ToString(); }
 absl::Status PyDevice::TransferToInfeed(LiteralSlice literal) {
   GlobalPyRefManager()->CollectGarbage();
   nb::gil_scoped_release gil_release;
-  return device_->TransferToInfeed(literal);
+  auto client = llvm::dyn_cast<ifrt::PjRtClient>(client_->ifrt_client());
+  auto device = llvm::dyn_cast<ifrt::PjRtDevice>(device_);
+  if (client == nullptr || device == nullptr) {
+    return xla::InvalidArgument(
+        "TransferToInfeed is only supported for PjRt devices.");
+  }
+  return client->TransferToInfeed(device, literal);
 }
 
 absl::StatusOr<nb::object> PyDevice::TransferFromOutfeed(Shape shape) {
@@ -106,6 +117,12 @@ absl::StatusOr<nb::object> PyDevice::TransferFromOutfeed(Shape shape) {
   std::shared_ptr<Literal> literal;
   {
     nb::gil_scoped_release gil_release;
+    auto client = llvm::dyn_cast<ifrt::PjRtClient>(client_->ifrt_client());
+    auto device = llvm::dyn_cast<ifrt::PjRtDevice>(device_);
+    if (client == nullptr || device == nullptr) {
+      return xla::InvalidArgument(
+          "TransferFromOutfeed is only supported for PjRt devices.");
+    }
     ShapeUtil::ForEachMutableSubshape(
         &shape, [](Shape* subshape, const ShapeIndex&) {
           if (!subshape->has_layout()) {
@@ -113,23 +130,23 @@ absl::StatusOr<nb::object> PyDevice::TransferFromOutfeed(Shape shape) {
           }
         });
     literal = std::make_shared<Literal>(shape);
-    TF_RETURN_IF_ERROR(device_->TransferFromOutfeed(literal.get()));
+    TF_RETURN_IF_ERROR(client->TransferFromOutfeed(device, literal.get()));
   }
   return LiteralToPython(std::move(literal));
 }
 
 absl::StatusOr<nb_class_ptr<PyMemorySpace>> PyDevice::Memory(
     std::string_view kind) const {
-  xla::PjRtMemorySpace* result_memory_space = nullptr;
-  for (auto* memory_space : device_->memory_spaces()) {
-    if (memory_space->memory_space_kind() == kind) {
+  ifrt::Memory* result_memory_space = nullptr;
+  for (auto* memory_space : device_->Memories()) {
+    if (memory_space->Kind().memory_kind() == kind) {
       if (result_memory_space != nullptr) {
         std::string memories = absl::StrJoin(
-            device_->memory_spaces(), ", ",
+            device_->Memories(), ", ",
             [](std::string* out, const auto& memory_space) {
-              absl::StrAppend(out, memory_space->memory_space_kind());
+              absl::StrAppend(out, *memory_space->Kind().memory_kind());
             });
-        auto device_kind = device_->device_kind();
+        auto device_kind = device_->Kind();
         return xla::InvalidArgument(
             "Found more than one addressable memory for "
             "kind %s which is not allowed. There can only "
@@ -142,12 +159,12 @@ absl::StatusOr<nb_class_ptr<PyMemorySpace>> PyDevice::Memory(
     }
   }
   if (result_memory_space == nullptr) {
-    std::string memories =
-        absl::StrJoin(device_->memory_spaces(), ", ",
-                      [](std::string* out, const auto& memory_space) {
-                        absl::StrAppend(out, memory_space->memory_space_kind());
-                      });
-    auto device_kind = device_->device_kind();
+    std::string memories = absl::StrJoin(
+        device_->Memories(), ", ",
+        [](std::string* out, const auto& memory_space) {
+          absl::StrAppend(out, *memory_space->Kind().memory_kind());
+        });
+    auto device_kind = device_->Kind();
     return xla::InvalidArgument(
         "Could not find memory addressable by device %s. Device %s "
         "can address the following memory kinds: %s. "
@@ -158,13 +175,13 @@ absl::StatusOr<nb_class_ptr<PyMemorySpace>> PyDevice::Memory(
 }
 
 absl::StatusOr<nb_class_ptr<PyMemorySpace>> PyDevice::DefaultMemory() const {
-  TF_ASSIGN_OR_RETURN(auto* memory_space, device_->default_memory_space());
+  TF_ASSIGN_OR_RETURN(auto* memory_space, device_->DefaultMemory());
   return client_->GetPyMemorySpace(memory_space);
 }
 
 nb::list PyDevice::AddressableMemories() const {
   nb::list memory_spaces;
-  for (auto* memory_space : device_->memory_spaces()) {
+  for (auto* memory_space : device_->Memories()) {
     memory_spaces.append(client_->GetPyMemorySpace(memory_space));
   }
   return memory_spaces;
@@ -172,8 +189,13 @@ nb::list PyDevice::AddressableMemories() const {
 
 absl::StatusOr<std::optional<nb::dict>> PyDevice::MemoryStats() const {
   GlobalPyRefManager()->CollectGarbage();
+  ifrt::PjRtDevice* device = llvm::dyn_cast<ifrt::PjRtDevice>(device_);
+  if (device == nullptr || !device->IsAddressable()) {
+    return xla::InvalidArgument(
+        "MemoryStats is only supported for addressable PjRt devices.");
+  }
   absl::StatusOr<tsl::AllocatorStats> maybe_stats =
-      device_->GetAllocatorStats();
+      device->pjrt_device()->GetAllocatorStats();
   if (absl::IsUnimplemented(maybe_stats.status())) {
     return std::nullopt;
   }
@@ -205,7 +227,13 @@ absl::StatusOr<std::optional<nb::dict>> PyDevice::MemoryStats() const {
 
 absl::StatusOr<std::intptr_t> PyDevice::GetStreamForExternalReadyEvents()
     const {
-  return device_->GetStreamForExternalReadyEvents();
+  ifrt::PjRtDevice* device = llvm::dyn_cast<ifrt::PjRtDevice>(device_);
+  if (device == nullptr || !device->IsAddressable()) {
+    return xla::InvalidArgument(
+        "GetStreamForExternalReadyEvents is only supported for addressable "
+        "PjRt devices.");
+  }
+  return device->pjrt_device()->GetStreamForExternalReadyEvents();
 }
 
 /* static */ int PyDevice::tp_traverse(PyObject* self, visitproc visit,
@@ -269,6 +297,7 @@ PyType_Slot PyDevice::slots_[] = {
       .def("live_buffers",
            [](nb::handle device) {
              PythonDeprecationWarning(
+                 /*stacklevel=*/1,
                  "Per device live_buffers() is deprecated. Please "
                  "use the jax.live_arrays() for jax.Arrays instead.");
              return nb::list();
@@ -293,11 +322,11 @@ PyType_Slot PyDevice::slots_[] = {
         try {
           auto device = nb::cast<PyDevice*>(nb::handle(self));
           auto name = nb::cast<std::string_view>(nb::handle(key));
-          const auto& attrs = device->device_->Attributes();
+          const auto& attrs = device->device_->Attributes().map();
           auto it = attrs.find(name);
           if (it != attrs.end()) {
-            auto result =
-                std::visit([](auto&& v) { return nb::cast(v); }, it->second);
+            auto result = std::visit([](auto&& v) { return nb::cast(v.value); },
+                                     it->second);
             return result.release().ptr();
           }
           PyErr_SetNone(PyExc_AttributeError);

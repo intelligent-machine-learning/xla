@@ -36,6 +36,7 @@ namespace ifrt {
 // * Add kString.
 class DType {
  public:
+  // LINT.IfChange
   enum Kind {
     // Invalid data type.
     kInvalid = 0,
@@ -44,6 +45,7 @@ class DType {
     kPred = 1,
 
     // Signed integral values of fixed width.
+    kS2 = 26,
     kS4 = 21,
     kS8 = 2,
     kS16 = 3,
@@ -51,6 +53,7 @@ class DType {
     kS64 = 5,
 
     // Unsigned integral values of fixed width.
+    kU2 = 27,
     kU4 = 22,
     kU8 = 6,
     kU16 = 7,
@@ -89,6 +92,7 @@ class DType {
     // collision.
     kString = 99,
   };
+  // LINT.ThenChange(dtype.proto:DTypeProtoKind)
 
   explicit DType(Kind kind) : kind_(kind) {}
   DType(const DType&) = default;

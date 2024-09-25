@@ -14,6 +14,7 @@
 # ============================================================================
 
 name: Clang Format
+permissions: read-all
 on:
   pull_request:
 
@@ -25,6 +26,7 @@ jobs:
         shell: bash
     timeout-minutes: 1
     if: |
+      github.event.sender.type == 'User' ||
       contains(github.event.pull_request.body, 'FORCE_TEST_ACTIONS')
     steps:
       - name: "Checking out repository"

@@ -1,6 +1,6 @@
 load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
 load(
-    "@tsl//tsl:tsl.bzl",
+    "@xla//xla/tsl:tsl.bzl",
     "clean_dep",
 )
 
@@ -66,6 +66,30 @@ config_setting(
     visibility = ["//visibility:public"],
 )
 
+config_setting(
+    name = "build_with_mkl_opensource",
+    define_values = {
+        "build_with_mkl": "true",
+        "build_with_mkl_opensource": "true",
+    },
+)
+
+config_setting(
+    name = "build_with_mkldnn_openmp",
+    define_values = {
+        "build_with_mkl": "true",
+        "build_with_openmp": "true",
+    },
+)
+
+config_setting(
+    name = "build_with_mkl_aarch64_openmp",
+    define_values = {
+        "build_with_mkl_aarch64": "true",
+        "build_with_openmp": "true",
+    },
+)
+
 filegroup(
     name = "LICENSE",
     srcs = [
@@ -126,13 +150,13 @@ cc_library(
     }),
     visibility = ["//visibility:public"],
     deps = select({
-        clean_dep("@tsl//tsl:linux_x86_64"): [
+        clean_dep("@xla//xla/tsl:linux_x86_64"): [
             ":mkl_libs_linux",
         ],
-        clean_dep("@tsl//tsl:macos"): [
+        clean_dep("@xla//xla/tsl:macos"): [
             ":mkl_libs_darwin",
         ],
-        clean_dep("@tsl//tsl:windows"): [
+        clean_dep("@xla//xla/tsl:windows"): [
             ":mkl_libs_windows",
         ],
         "//conditions:default": [],

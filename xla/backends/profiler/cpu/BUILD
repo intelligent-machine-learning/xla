@@ -1,10 +1,10 @@
-load("@tsl//tsl:tsl.bzl", "internal_visibility")
 load("@tsl//tsl/platform:rules_cc.bzl", "cc_library")
 load("@tsl//tsl/profiler/builds:build_config.bzl", "tf_profiler_copts")
 load(
     "//xla:xla.bzl",
     "xla_cc_test",
 )
+load("//xla/tsl:tsl.bzl", "internal_visibility")
 
 # copybara:uncomment package(default_applicable_licenses = ["//tensorflow:license"])
 
@@ -37,7 +37,9 @@ cc_library(
         "@com_google_absl//absl/status",
         "@tsl//tsl/platform:errors",
         "@tsl//tsl/profiler/backends/cpu:host_tracer_utils",
+        "@tsl//tsl/profiler/backends/cpu:threadpool_listener",
         "@tsl//tsl/profiler/backends/cpu:traceme_recorder",
+        "@tsl//tsl/profiler/lib:profiler_collection",
         "@tsl//tsl/profiler/lib:profiler_interface",
         "@tsl//tsl/profiler/protobuf:xplane_proto_cc",
         "@tsl//tsl/profiler/utils:time_utils",
@@ -92,9 +94,9 @@ cc_library(
     ]),
     deps = [
         ":metadata_utils",
-        "//xla:status",
         "//xla/service:hlo_proto_cc",
         "//xla/service:xla_debug_info_manager",
+        "@com_google_absl//absl/status",
         "@tsl//tsl/profiler/lib:profiler_factory",
         "@tsl//tsl/profiler/lib:profiler_interface",
         "@tsl//tsl/profiler/protobuf:profiler_options_proto_cc",
@@ -126,15 +128,18 @@ xla_cc_test(
     srcs = ["host_tracer_test.cc"],
     deps = [
         ":host_tracer_impl",
+        "//xla/tsl/lib/core:status_test_util",
         "@com_google_absl//absl/types:optional",
         "@com_google_googletest//:gtest_main",
-        "@tsl//tsl/lib/core:status_test_util",
+        "@tsl//tsl/platform:blocking_counter",
         "@tsl//tsl/platform:env",
         "@tsl//tsl/platform:test",
         "@tsl//tsl/platform:types",
         "@tsl//tsl/profiler/lib:profiler_interface",
         "@tsl//tsl/profiler/lib:traceme",
         "@tsl//tsl/profiler/protobuf:xplane_proto_cc",
+        "@tsl//tsl/profiler/utils:tf_xplane_visitor",
+        "@tsl//tsl/profiler/utils:timespan",
         "@tsl//tsl/profiler/utils:xplane_schema",
         "@tsl//tsl/profiler/utils:xplane_visitor",
     ],

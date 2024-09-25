@@ -17,12 +17,10 @@ limitations under the License.
 
 #include <memory>
 #include <optional>
+#include <string>
 
-#include "mlir/Dialect/Arith/IR/Arith.h"  // from @llvm-project  // IWYU pragma: keep
-#include "mlir/Dialect/GPU/IR/GPUDialect.h"  // from @llvm-project  // IWYU pragma: keep
-#include "mlir/Dialect/LLVMIR/LLVMDialect.h"  // from @llvm-project  // IWYU pragma: keep
-#include "mlir/Dialect/SCF/IR/SCF.h"  // from @llvm-project  // IWYU pragma: keep
-#include "mlir/Pass/Pass.h"  // from @llvm-project
+#include "mlir/IR/Value.h"
+#include "mlir/Pass/Pass.h"
 #include "xla/service/gpu/model/indexing_map.h"
 
 namespace xla {
@@ -34,15 +32,25 @@ namespace gpu {
 // Returns the range of a given value, if it can be statically determined.
 std::optional<Interval> GetRange(mlir::Value value);
 
+// Returns the range for the induction variable, if it can be statically
+// determined.
+std::optional<Interval> GetIVRange(mlir::Value iv);
+
+std::unique_ptr<mlir::Pass> CreateEraseDeadFunctionsPass();
 std::unique_ptr<mlir::Pass> CreateExpandFloatOpsPass(bool pre_ampere);
-std::unique_ptr<mlir::Pass> CreateLowerFuncPass();
-std::unique_ptr<mlir::Pass> CreateLowerTensorsPass();
+std::unique_ptr<mlir::Pass> CreateConvertPureCallOpsPass();
+std::unique_ptr<mlir::Pass> CreateFlattenTensorsPass();
+std::unique_ptr<mlir::Pass> CreateLowerTensorsPass(
+    bool is_amd_gpu = false, const std::string& gpu_arch = "6.0");
 std::unique_ptr<mlir::Pass> CreateLowerToLLVMPass();
 std::unique_ptr<mlir::Pass> CreateLowerXlaGpuToScfPass();
 std::unique_ptr<mlir::Pass> CreateMergePointersToSameSlicePass();
+std::unique_ptr<mlir::Pass> CreateOptimizeLoopsPass();
 std::unique_ptr<mlir::Pass> CreatePropagateSliceIndicesPass();
 std::unique_ptr<mlir::Pass> CreateSimplifyAffinePass();
 std::unique_ptr<mlir::Pass> CreateSimplifyArithPass();
+std::unique_ptr<mlir::Pass> CreateUnswitchLoopsPass();
+std::unique_ptr<mlir::Pass> CreateVectorizeLoadsAndStoresPass();
 
 #define GEN_PASS_REGISTRATION
 #include "xla/service/gpu/fusions/mlir/passes.h.inc"

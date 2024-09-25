@@ -16,6 +16,7 @@ limitations under the License.
 #ifndef XLA_SERVICE_HLO_CREATION_UTILS_H_
 #define XLA_SERVICE_HLO_CREATION_UTILS_H_
 
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -24,7 +25,6 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/literal_util.h"
-#include "xla/statusor.h"
 #include "xla/xla_data.pb.h"
 
 namespace xla {
@@ -43,7 +43,8 @@ absl::StatusOr<HloInstruction*> MakeUnaryHlo(
 // `lhs` and `rhs` (`lhs` and `rhs` must be in the same computation).
 absl::StatusOr<HloInstruction*> MakeBinaryHlo(
     HloOpcode opcode, HloInstruction* lhs, HloInstruction* rhs,
-    const OpMetadata* metadata = nullptr);
+    const OpMetadata* metadata = nullptr,
+    const FrontendAttributes* frontend_attributes = nullptr);
 
 // Creates a kCopy HLO.
 HloInstruction* MakeCopyHlo(HloInstruction* from, const Shape& to);
@@ -52,21 +53,24 @@ HloInstruction* MakeCopyHlo(HloInstruction* from, const Shape& to);
 // `lhs` and `rhs` (`lhs` and `rhs` must be in the same computation).
 absl::StatusOr<HloInstruction*> MakeCompareHlo(
     Comparison::Direction direction, HloInstruction* lhs, HloInstruction* rhs,
-    const OpMetadata* metadata = nullptr);
+    const OpMetadata* metadata = nullptr,
+    const FrontendAttributes* frontend_attributes = nullptr);
 
 // Creates a pad HLO instruction and adds it to the computation containing
 // `operand` and `padding_value` (`operand` and `padding_value` must be in the
 // same computation).
 absl::StatusOr<HloInstruction*> MakePadHlo(
     HloInstruction* operand, HloInstruction* padding_value,
-    const PaddingConfig& padding_config, const OpMetadata* metadata = nullptr);
+    const PaddingConfig& padding_config, const OpMetadata* metadata = nullptr,
+    const FrontendAttributes* frontend_attributes = nullptr);
 
 // Creates a slice HLO instruction and adds it to the computation containing
 // `operand`.
 absl::StatusOr<HloInstruction*> MakeSliceHlo(
     HloInstruction* operand, absl::Span<const int64_t> start_indices,
     absl::Span<const int64_t> limit_indices, absl::Span<const int64_t> strides,
-    const OpMetadata* metadata = nullptr);
+    const OpMetadata* metadata = nullptr,
+    const FrontendAttributes* frontend_attributes = nullptr);
 
 // Creates a convolution HLO instruction and adds it to the computation
 // containing `lhs` and `rhs` (`lhs` and `rhs` must be in the same computation).
@@ -78,7 +82,8 @@ absl::StatusOr<HloInstruction*> MakeConvolveHlo(
     const ConvolutionDimensionNumbers& dimension_numbers,
     const PrecisionConfig& precision_config,
     std::optional<PrimitiveType> preferred_element_type,
-    const OpMetadata* metadata = nullptr);
+    const OpMetadata* metadata = nullptr,
+    const FrontendAttributes* frontend_attributes = nullptr);
 
 // Creates a transpose HLO instruction and adds it to the computation containing
 // `operand`.
@@ -121,14 +126,15 @@ absl::StatusOr<HloInstruction*> MakeDynamicUpdateSliceHlo(
 
 // Creates a broadcast HLO instruction and adds it to the computation containing
 // `operand`.
-HloInstruction* MakeBroadcastHlo(HloInstruction* operand,
-                                 absl::Span<const int64_t> broadcast_dimensions,
-                                 absl::Span<const int64_t> result_shape_bounds,
-                                 const OpMetadata* metadata = nullptr);
-HloInstruction* MakeBroadcastHlo(HloInstruction* operand,
-                                 absl::Span<const int64_t> broadcast_dimensions,
-                                 const Shape& shape,
-                                 const OpMetadata* metadata = nullptr);
+HloInstruction* MakeBroadcastHlo(
+    HloInstruction* operand, absl::Span<const int64_t> broadcast_dimensions,
+    absl::Span<const int64_t> result_shape_bounds,
+    const OpMetadata* metadata = nullptr,
+    const FrontendAttributes* frontend_attributes = nullptr);
+HloInstruction* MakeBroadcastHlo(
+    HloInstruction* operand, absl::Span<const int64_t> broadcast_dimensions,
+    const Shape& shape, const OpMetadata* metadata = nullptr,
+    const FrontendAttributes* frontend_attributes = nullptr);
 
 // Creates a GetTupleElement HLO instruction and adds it to the computation
 // containing `operand`.
@@ -141,7 +147,8 @@ absl::StatusOr<HloInstruction*> MakeGetTupleElementHlo(
 // contained in the same computation).
 absl::StatusOr<HloInstruction*> MakeConcatHlo(
     absl::Span<HloInstruction* const> operands, int64_t dimension,
-    const OpMetadata* metadata = nullptr);
+    const OpMetadata* metadata = nullptr,
+    const FrontendAttributes* frontend_attributes = nullptr);
 
 // Creates a Convert HLO instruction that converts the given instruction to have
 // the given primitive type.
@@ -191,23 +198,30 @@ absl::StatusOr<HloInstruction*> MakeReduceWindowHlo(
     HloInstruction* operand, HloInstruction* init_value, const Window& window,
     HloComputation* reduce_computation, const OpMetadata* metadata = nullptr);
 
+absl::StatusOr<HloInstruction*> MakeReduceWindowHlo(
+    HloInstruction* operand, HloInstruction* init_value, const Window& window,
+    HloOpcode binary_opcode, const OpMetadata* metadata = nullptr);
+
 // Creates a Reduce HLO instruction and adds it to the computation containing
 // the operand. This will create the sub-computation needed for the reduction in
 // the given module. binary_opcode should represent a binary operation.
 absl::StatusOr<HloInstruction*> MakeReduceHlo(
     HloInstruction* operand, HloInstruction* init_value,
     absl::Span<const int64_t> dimensions, HloOpcode binary_opcode,
-    const OpMetadata* metadata = nullptr);
+    const OpMetadata* metadata = nullptr,
+    const FrontendAttributes* frontend_attributes = nullptr);
 
 absl::StatusOr<HloInstruction*> MakeReduceHlo(
     HloInstruction* operand, HloInstruction* init_value,
     absl::Span<const int64_t> dimensions, HloComputation* reduce_computation,
-    const OpMetadata* metadata = nullptr);
+    const OpMetadata* metadata = nullptr,
+    const FrontendAttributes* frontend_attributes = nullptr);
 
 absl::StatusOr<HloInstruction*> MakeReduceHlo(
     HloInstruction* operand, HloInstruction* init_value,
     HloOpcode binary_opcode, HloModule* module,
-    const OpMetadata* metadata = nullptr);
+    const OpMetadata* metadata = nullptr,
+    const FrontendAttributes* frontend_attributes = nullptr);
 
 // Generic helper function to create a reduction.
 //
@@ -220,7 +234,8 @@ absl::StatusOr<HloInstruction*> MakeReduceHlo(
     absl::Span<HloInstruction* const> operands,
     absl::Span<HloInstruction* const> init_values,
     absl::Span<const int64_t> dimensions, HloComputation* reduce_computation,
-    const OpMetadata* metadata = nullptr);
+    const OpMetadata* metadata = nullptr,
+    const FrontendAttributes* frontend_attributes = nullptr);
 
 // Creates a Reverse HLO instruction and adds it to the computation containing
 // `operand`.
@@ -234,7 +249,9 @@ absl::StatusOr<HloInstruction*> MakeReverseHlo(
 // select instead. `pred` is broadcasted up from a scalar if necessary.
 absl::StatusOr<HloInstruction*> MakeSelectHlo(
     HloInstruction* pred, HloInstruction* on_true, HloInstruction* on_false,
-    HloInstruction* derived_from = nullptr);
+    HloInstruction* derived_from = nullptr,
+    const OpMetadata* metadata = nullptr,
+    const FrontendAttributes* frontend_attributes = nullptr);
 
 // Forwards the first operand if operands.size() == 1, or creates a tuple
 // instruction with all the operands. Crashes if `operands` is empty.
@@ -376,6 +393,26 @@ absl::StatusOr<std::unique_ptr<HloComputation>> CreateComputationWithSignature(
 // Expands a general degenerate reshape operation to a sequence of degenerate
 // adding and removing reshapes that changes only a single dimension.
 HloInstruction* ExpandDegenerateReshape(HloInstruction* inst);
+
+// Creates a scalar constant with the given shape and native value.
+template <typename NativeT>
+std::unique_ptr<HloInstruction> MakeScalarConstantWithShape(const Shape& shape,
+                                                            NativeT value) {
+  return primitive_util::PrimitiveTypeSwitch<std::unique_ptr<HloInstruction>>(
+      [&](auto literal_constant) -> std::unique_ptr<HloInstruction> {
+        if constexpr (primitive_util::IsIntegralType(literal_constant) ||
+                      primitive_util::IsFloatingPointType(literal_constant)) {
+          auto constant = HloInstruction::CreateConstant(
+              LiteralUtil::CreateR0<NativeT>(value)
+                  .Convert(shape.element_type())
+                  .value());
+          *constant->mutable_shape() = shape;
+          return std::move(constant);
+        }
+        LOG(FATAL) << "Provided shape is not a float or int type.";
+      },
+      shape.element_type());
+}
 
 }  // namespace xla
 

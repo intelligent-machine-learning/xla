@@ -34,8 +34,11 @@ limitations under the License.
 #include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/container/inlined_vector.h"
 #include "absl/functional/any_invocable.h"
 #include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "absl/types/span.h"
@@ -45,12 +48,110 @@ limitations under the License.
 #include "xla/map_util.h"
 #include "xla/service/heap_simulator/allocation_block.h"
 #include "xla/service/hlo_value.h"
-#include "xla/service/memory_space_assignment/repacking.h"
 #include "xla/service/time_utils.h"
-#include "xla/status.h"
 #include "xla/util.h"
 
 namespace xla {
+namespace {
+
+constexpr int64_t kMaxMemoryMapDimensionSize = 100;
+
+struct AsciiMemoryMapParameters {
+  int64_t memory_block_size = 1;
+  int64_t end_of_last_occupied_chunk = -1;
+};
+
+// Given a set of BufferIntervalTreeNodes, returns the best memory block size(to
+// visually represent all chunks in a compact fashion) and the maximum chunk end
+// of all occupied chunks. The best memory block size is the greatest common
+// divisor of all chunk offsets and chunk ends. These are parameters required to
+// construct a compact memory map.
+AsciiMemoryMapParameters GetAsciiMemoryMapParameters(
+    std::vector<const BufferIntervalTreeNode*>& nodes) {
+  CHECK(!nodes.empty());
+  int64_t min_chunk_offset = std::numeric_limits<int64_t>::max();
+  int64_t end_of_last_occupied_chunk = -1;
+  int64_t memory_block_size = nodes.front()->chunk.offset;
+  for (const BufferIntervalTreeNode* node : nodes) {
+    min_chunk_offset = std::min(min_chunk_offset, node->chunk.offset);
+    end_of_last_occupied_chunk =
+        std::max(end_of_last_occupied_chunk, node->chunk.chunk_end());
+    memory_block_size = std::gcd(memory_block_size, node->chunk.offset);
+    memory_block_size = std::gcd(memory_block_size, node->chunk.chunk_end());
+  }
+  VLOG(3) << " min_chunk_offset: " << min_chunk_offset
+          << " end_of_last_occupied_chunk: " << end_of_last_occupied_chunk
+          << " memory_block_size: " << memory_block_size;
+  return {memory_block_size, end_of_last_occupied_chunk};
+}
+
+// Returns a memory map for the given time interval [start, end].
+// The memory map is a 2D array of size [n, m], where n is the number of memory
+// blocks and m is the number of time steps. Each row represents a memory block
+// and each column represents a time step. The value at (i, j) indicates whether
+// there is a buffer occupying the entire memory block at time j.
+std::vector<std::vector<bool>> GetMemoryMap(
+    int64_t start, int64_t end, int64_t memory_block_size,
+    int64_t num_memory_blocks,
+    std::vector<const BufferIntervalTreeNode*>& nodes) {
+  int64_t total_time = end - start + 1;
+  std::vector<std::vector<bool>> memory_map(
+      num_memory_blocks, std::vector<bool>(total_time, false));
+  for (const BufferIntervalTreeNode* node : nodes) {
+    for (int64_t i = node->chunk.offset / memory_block_size;
+         i < node->chunk.chunk_end() / memory_block_size; ++i) {
+      for (int64_t j = std::max(node->start - start, int64_t{0});
+           j <= std::min(node->end - start, end - start); ++j) {
+        memory_map[i][j] = true;
+      }
+    }
+  }
+  return memory_map;
+}
+
+// Given a list of BufferIntervalTreeNodes, returns a string representation of
+// the nodes.
+std::string BufferIntervalTreeNodesToString(
+    absl::Span<const BufferIntervalTreeNode* const> nodes) {
+  std::string output;
+  for (const BufferIntervalTreeNode* node : nodes) {
+    absl::StrAppend(&output, node->ToString(), "\n");
+  }
+  return output;
+}
+
+// Returns a string representation of the memory map of occupied memory blocks
+// for the given time interval [start, end].
+std::string MemoryMapToString(int64_t start, int64_t end,
+                              int64_t memory_block_size, int64_t group_size,
+                              std::vector<std::vector<bool>>& memory_map) {
+  int64_t num_memory_blocks = memory_map.size();
+  int64_t total_time = memory_map.front().size();
+  std::string output = "\n";
+  absl::StrAppend(&output, "Memory map for time: [", start, ",", end,
+                  "], memory_block_size: ", memory_block_size,
+                  ", group_size: ", group_size, "\n\n");
+  for (int64_t i = num_memory_blocks - 1; i >= 0; --i) {
+    for (int64_t j = 0; j < total_time; ++j) {
+      if (group_size && j % group_size == 0) {
+        absl::StrAppend(&output, " ");
+      }
+      absl::StrAppend(&output, memory_map[i][j] ? "#" : ".");
+    }
+    absl::StrAppend(&output, " ", std::to_string((i + 1) * memory_block_size),
+                    "\n");
+  }
+  for (int64_t j = start; j <= end; ++j) {
+    if (group_size && j % group_size == 0) {
+      absl::StrAppend(&output, " ");
+    }
+    absl::StrAppend(&output, std::to_string(j % 10));
+  }
+  absl::StrAppend(&output, "\n\n");
+  return output;
+}
+
+}  // namespace
 
 using absl::flat_hash_map;
 using absl::flat_hash_set;
@@ -71,6 +172,11 @@ HeapSimulator::Chunk HeapSimulator::Chunk::FromOffsetSize(int64_t offset,
 
 std::string HeapSimulator::Chunk::ToString() const {
   return absl::StrCat("[", offset, ",", chunk_end(), ")");
+}
+
+std::string BufferIntervalTreeNode::ToString() const {
+  return absl::StrCat("start: ", start, " end: ", end,
+                      " chunk: ", chunk.ToString());
 }
 
 bool HeapSimulator::Chunk::OverlapsWith(Chunk other_chunk) const {
@@ -196,7 +302,7 @@ absl::StatusOr<HeapSimulator::Result<HloValue>> HeapSimulator::Run(
 
 // Runs a heap simulation for the given 'computation', assuming the given
 // 'instruction_sequence'.
-Status HeapSimulator::RunComputation(
+absl::Status HeapSimulator::RunComputation(
     const HloComputation& computation,
     const HloInstructionSequence& instruction_sequence,
     const HloAliasAnalysis& alias_analysis, HloLiveRange* hlo_live_range) {
@@ -383,7 +489,7 @@ Status HeapSimulator::RunComputation(
       Free(value, value->instruction());
     }
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 HeapSimulator::HeapSimulator(
@@ -557,7 +663,7 @@ void NoFragmentationStatsHeap<BufferType>::Free(const BufferType* buffer,
 }
 
 template <typename BufferType>
-StatusOr<HeapSimulator::Result<BufferType>>
+absl::StatusOr<HeapSimulator::Result<BufferType>>
 NoFragmentationStatsHeap<BufferType>::Finish() {
   // The result.chunk_map is empty, since we only collect stats, and don't
   // actually compute chunk assignments.
@@ -848,6 +954,16 @@ bool BufferIntervalTree::Remove(int64_t start, int64_t end,
 std::vector<Chunk> BufferIntervalTree::ChunksOverlappingInTime(
     int64_t start, int64_t end) const {
   std::vector<Chunk> result;
+  for (const BufferIntervalTreeNode* node :
+       NodesOverlappingInTime(start, end)) {
+    result.push_back(node->chunk);
+  }
+  return result;
+}
+
+std::vector<const BufferIntervalTreeNode*>
+BufferIntervalTree::NodesOverlappingInTime(int64_t start, int64_t end) const {
+  std::vector<const BufferIntervalTreeNode*> result;
   if (root_ == nullptr) {
     return result;
   }
@@ -863,7 +979,7 @@ std::vector<Chunk> BufferIntervalTree::ChunksOverlappingInTime(
       visiting_stack.push_back(top->left);
     }
     if (top->start <= end && top->end >= start) {
-      result.push_back(top->chunk);
+      result.push_back(top);
     }
     if (end < top->start) {
       continue;
@@ -873,6 +989,34 @@ std::vector<Chunk> BufferIntervalTree::ChunksOverlappingInTime(
     }
   }
   return result;
+}
+
+std::string BufferIntervalTree::NodesOverlappingInTimeToAsciiArt(
+    int64_t start, int64_t end, int64_t group_size) const {
+  std::vector<const BufferIntervalTreeNode*> nodes =
+      NodesOverlappingInTime(start, end);
+  if (nodes.empty()) {
+    return "No nodes overlapping in time. Memory is free!";
+  }
+  auto [memory_block_size, end_of_last_occupied_chunk] =
+      GetAsciiMemoryMapParameters(nodes);
+  CHECK_GE(end_of_last_occupied_chunk, 0);
+  CHECK_NE(memory_block_size, 0);
+  int64_t total_time = end - start + 1;
+  int64_t num_memory_blocks = end_of_last_occupied_chunk / memory_block_size;
+  if (total_time > kMaxMemoryMapDimensionSize ||
+      num_memory_blocks > kMaxMemoryMapDimensionSize) {
+    std::string output;
+    absl::StrAppend(
+        &output,
+        "\nCannot print memory usage to ASCII art. Printing nodes instead!\n\n",
+        BufferIntervalTreeNodesToString(nodes));
+    return output;
+  }
+  std::vector<std::vector<bool>> memory_map =
+      GetMemoryMap(start, end, memory_block_size, num_memory_blocks, nodes);
+  return MemoryMapToString(start, end, memory_block_size, group_size,
+                           memory_map);
 }
 
 template <typename BufferType>
@@ -939,7 +1083,9 @@ void GlobalDecreasingSizeBestFitHeap<BufferType>::SlicedBufferInterval::Slice(
         full_buffer_interval_.need_allocation});
   }
 
-  CHECK_EQ(size_total, full_buffer_interval_.size);
+  CHECK_EQ(size_total, full_buffer_interval_.size)
+      << " slice sizes: {" << absl::StrJoin(slice_sizes_sorted_by_offset, ", ")
+      << "};";
 }
 
 template <typename BufferType>
@@ -1868,9 +2014,8 @@ GlobalDecreasingSizeBestFitHeap<BufferType>::SlicedAllocationFinder::Find()
   if (preferred_offset_ >= 0) {
     ChunksSortedBySliceTime chunks = FindForOffset(preferred_offset_);
     if (!chunks.empty()) {
-      VLOG(1) << "SlicedAllocationFinder found chunks: "
-              << "{ " << absl::StrJoin(chunks, ", ", absl::StreamFormatter())
-              << " }";
+      VLOG(1) << "SlicedAllocationFinder found chunks: " << "{ "
+              << absl::StrJoin(chunks, ", ", absl::StreamFormatter()) << " }";
       return chunks;
     }
   }
@@ -1902,9 +2047,8 @@ GlobalDecreasingSizeBestFitHeap<BufferType>::SlicedAllocationFinder::Find()
     VLOG(3) << "SlicedAllocationFinder::Find() searching " << root->ToString();
     ChunksSortedBySliceTime chunks = FindInRoot(*root);
     if (!chunks.empty()) {
-      VLOG(1) << "SlicedAllocationFinder found chunks: "
-              << "{ " << absl::StrJoin(chunks, ", ", absl::StreamFormatter())
-              << " }";
+      VLOG(1) << "SlicedAllocationFinder found chunks: " << "{ "
+              << absl::StrJoin(chunks, ", ", absl::StreamFormatter()) << " }";
       return chunks;
     }
   }
@@ -1938,10 +2082,11 @@ GlobalDecreasingSizeBestFitHeap<
 }
 
 template <typename BufferType>
-Status GlobalDecreasingSizeBestFitHeap<BufferType>::SlicedAllocationFinder::
-    DoesPermutationFit(absl::Span<const int64_t> permutation_of_slice_times,
-                       const FreeChunkRoot& root, int64_t offset) const {
-  Status result =
+absl::Status GlobalDecreasingSizeBestFitHeap<BufferType>::
+    SlicedAllocationFinder::DoesPermutationFit(
+        absl::Span<const int64_t> permutation_of_slice_times,
+        const FreeChunkRoot& root, int64_t offset) const {
+  absl::Status result =
       DoesPermutationFitImpl(permutation_of_slice_times, root, offset);
   VLOG(3) << "SlicedAllocationFinder::DoesPermutationFit\n"
           << "  permutation of slice times: [ "
@@ -1953,9 +2098,10 @@ Status GlobalDecreasingSizeBestFitHeap<BufferType>::SlicedAllocationFinder::
 }
 
 template <typename BufferType>
-Status GlobalDecreasingSizeBestFitHeap<BufferType>::SlicedAllocationFinder::
-    DoesPermutationFitImpl(absl::Span<const int64_t> permutation_of_slice_times,
-                           const FreeChunkRoot& root, int64_t offset) const {
+absl::Status GlobalDecreasingSizeBestFitHeap<BufferType>::
+    SlicedAllocationFinder::DoesPermutationFitImpl(
+        absl::Span<const int64_t> permutation_of_slice_times,
+        const FreeChunkRoot& root, int64_t offset) const {
   if (permutation_of_slice_times.size() != sorted_slice_sizes_.size()) {
     return InvalidArgumentStrCat(
         sorted_slice_sizes_.size(), " slices times expected in permutation. ",
@@ -2036,7 +2182,7 @@ Status GlobalDecreasingSizeBestFitHeap<BufferType>::SlicedAllocationFinder::
                           "have caught such a condition earlier.");
   }
 
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 // Future opportunities:
@@ -2119,7 +2265,7 @@ GlobalDecreasingSizeBestFitHeap<BufferType>::SlicedAllocationFinder::
 }
 
 template <typename BufferType>
-StatusOr<HeapSimulator::Result<BufferType>>
+absl::StatusOr<HeapSimulator::Result<BufferType>>
 GlobalDecreasingSizeBestFitHeap<BufferType>::Finish() {
   std::vector<BufferInterval> sorted_buffer_intervals =
       GetSortedBufferIntervals();
@@ -2396,7 +2542,7 @@ ConstrainedGlobalDecreasingSizeBestFitHeap::Finish() {
 }
 
 template <typename BufferType>
-StatusOr<HeapSimulator::Result<BufferType>>
+absl::StatusOr<HeapSimulator::Result<BufferType>>
 ChooseBestHeapAlgorithm<BufferType>::Finish() {
   DCHECK(!algorithms_.empty());
   std::vector<Result> results(algorithms_.size());

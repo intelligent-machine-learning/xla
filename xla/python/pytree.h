@@ -31,7 +31,7 @@ limitations under the License.
 #include "absl/container/inlined_vector.h"
 #include "absl/hash/hash.h"
 #include "absl/types/span.h"
-#include "nanobind/nanobind.h"  // from @nanobind
+#include "nanobind/nanobind.h"
 #include "xla/python/nb_class_ptr.h"
 #include "xla/python/pytree.pb.h"
 
@@ -45,6 +45,7 @@ enum class PyTreeKind {
   kList,        // A list
   kDict,        // A dict
   kCustom,      // A custom type.
+  kDataclass,   // A dataclass.
 };
 
 // Registry of custom node types.
@@ -73,12 +74,20 @@ class PyTreeRegistry : public std::enable_shared_from_this<PyTreeRegistry> {
     // of an iterable and an aux_data object
     std::pair<nanobind::iterable, nanobind::object> ToIterable(
         nanobind::handle o) const;
+
+    // For dataclasses.
+    std::vector<nanobind::str> data_fields;
+    std::vector<nanobind::str> meta_fields;
   };
 
   // Registers a new custom type. Objects of `type` will be treated as container
   // node types in PyTrees.
   void Register(nanobind::object type, nanobind::callable to_iterable,
                 nanobind::callable from_iterable);
+  // Same, but for dataclasses.
+  void RegisterDataclass(nanobind::object type,
+                         std::vector<nanobind::str> data_fields,
+                         std::vector<nanobind::str> meta_fields);
 
   // Finds the custom type registration for `type`. Returns nullptr if none
   // exists.

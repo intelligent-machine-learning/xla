@@ -20,8 +20,8 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/service/hlo_parser.h"
 #include "xla/tests/hlo_test_base.h"
+#include "xla/tsl/lib/core/status_test_util.h"
 #include "xla/util.h"
-#include "tsl/lib/core/status_test_util.h"
 
 namespace xla {
 namespace {
@@ -319,7 +319,7 @@ ENTRY main {
     pipeline.AddInvariantChecker<BarBlowerUpper>();
     pipeline.AddPass<FooToBarModulePass>();
 
-    Status status = pipeline.Run(module.get()).status();
+    absl::Status status = pipeline.Run(module.get()).status();
     ASSERT_IS_NOT_OK(status);
     EXPECT_THAT(status.message(),
                 ::testing::HasSubstr("Module has instruction named bar"));
@@ -331,7 +331,7 @@ ENTRY main {
     HloPassPipeline pipeline(TestName());
     pipeline.AddInvariantChecker<BarBlowerUpper>();
 
-    Status status = pipeline.Run(module.get()).status();
+    absl::Status status = pipeline.Run(module.get()).status();
     ASSERT_IS_NOT_OK(status);
     EXPECT_THAT(status.message(),
                 ::testing::HasSubstr("Module has instruction named bar"));
@@ -356,7 +356,7 @@ ENTRY main {
   HloPassPipeline pipeline(TestName());
   pipeline.AddPass<BazToQuxModuleGroupPass>();
 
-  Status status = pipeline.Run(module.get()).status();
+  absl::Status status = pipeline.Run(module.get()).status();
   ASSERT_IS_NOT_OK(status);
   EXPECT_THAT(
       status.message(),

@@ -15,11 +15,17 @@ limitations under the License.
 
 #include "xla/service/tuple_simplifier.h"
 
-#include <queue>
+#include <cstdint>
 
+#include "absl/container/flat_hash_set.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/shape_util.h"
+#include "tsl/platform/errors.h"
+#include "tsl/platform/statusor.h"
 #include "xla/service/gpu/gpu_flash_attn.h"
 
 namespace xla {
@@ -74,8 +80,8 @@ absl::StatusOr<bool> TupleSimplifier::Run(
         TF_ASSIGN_OR_RETURN(bool c, RemoveWholeTuple(instruction));
         changed |= c;
       } else {
-        auto ancestor = instruction->LatestNonGteAncestorAndIndex();
-        if (ancestor.first == instruction) {
+        auto [ancestor, index] = instruction->LatestNonGteAncestorAndIndex();
+        if (ancestor == instruction) {
           continue;
         }
         // If possible replace a chain of GTE with the operation which produces
@@ -97,13 +103,13 @@ absl::StatusOr<bool> TupleSimplifier::Run(
         // if only a subset of tuple's elements are used, this transform
         // optimizes them one at a time, and after the last use is optimized,
         // the Tuple will also be deleted.
-        HloInstruction* replacement = ancestor.first;
-        for (int i = 0; i < ancestor.second.size(); ++i) {
+        HloInstruction* replacement = ancestor;
+        for (int i = 0; i < index.size(); ++i) {
           if (replacement->opcode() != HloOpcode::kTuple) {
             replacement = nullptr;
             break;
           }
-          replacement = replacement->mutable_operand(ancestor.second[i]);
+          replacement = replacement->mutable_operand(index[i]);
         }
 
         if (replacement) {
@@ -117,6 +123,11 @@ absl::StatusOr<bool> TupleSimplifier::Run(
       }
     }
   }
+
+  if (module->has_schedule()) {
+    TF_RETURN_IF_ERROR(module->schedule().Update());
+  }
+
   return changed;
 }
 

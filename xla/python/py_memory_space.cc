@@ -20,8 +20,8 @@ limitations under the License.
 #include <string_view>
 #include <utility>
 
-#include "nanobind/nanobind.h"  // from @nanobind
-#include "nanobind/stl/string_view.h"  // from @nanobind  // IWYU pragma: keep
+#include "nanobind/nanobind.h"
+#include "nanobind/stl/string_view.h"  // IWYU pragma: keep
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/python/ifrt/device.h"
 #include "xla/python/nb_class_ptr.h"
@@ -32,8 +32,8 @@ namespace nb = ::nanobind;
 namespace xla {
 
 PyMemorySpace::PyMemorySpace(nb_class_ptr<PyClient> client,
-                             PjRtMemorySpace* memory_space)
-    : client_(std::move(client)), memory_space_(memory_space) {}
+                             ifrt::Memory* memory)
+    : client_(std::move(client)), memory_(memory) {}
 
 int PyMemorySpace::process_index() const { return client_->process_index(); }
 
@@ -53,20 +53,16 @@ std::string_view PyMemorySpace::platform() const {
 }
 
 std::string_view PyMemorySpace::kind() const {
-  return memory_space_->memory_space_kind();
+  return *memory_->Kind().memory_kind();
 }
 
-std::string_view PyMemorySpace::Str() const {
-  return memory_space_->DebugString();
-}
+std::string_view PyMemorySpace::Str() const { return memory_->DebugString(); }
 
-std::string_view PyMemorySpace::Repr() const {
-  return memory_space_->ToString();
-}
+std::string_view PyMemorySpace::Repr() const { return memory_->ToString(); }
 
 nb::list PyMemorySpace::AddressableByDevices() const {
   nb::list devices;
-  for (ifrt::Device* device : memory_space_->devices()) {
+  for (ifrt::Device* device : memory_->Devices()) {
     devices.append(client_->GetPyDevice(device));
   }
   return devices;

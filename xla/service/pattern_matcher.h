@@ -16,34 +16,43 @@ limitations under the License.
 #ifndef XLA_SERVICE_PATTERN_MATCHER_H_
 #define XLA_SERVICE_PATTERN_MATCHER_H_
 
-#include <functional>
+#include <cstddef>
+#include <cstdint>
 #include <ios>
 #include <memory>
 #include <optional>
 #include <ostream>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "absl/algorithm/container.h"
 #include "absl/container/inlined_vector.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/str_replace.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "absl/utility/utility.h"
+#include "xla/comparison_util.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/ir/hlo_sharding.h"
 #include "xla/hlo/ir/ptrvec.h"
+#include "xla/layout.h"
 #include "xla/layout_util.h"
+#include "xla/literal.h"
 #include "xla/service/hlo_parser.h"
+#include "xla/shape.h"
 #include "xla/shape_util.h"
+#include "xla/util.h"
 #include "xla/xla_data.pb.h"
 
 namespace xla {
@@ -2680,12 +2689,14 @@ XLA_UNOP_PATTERN(Cos)
 XLA_UNOP_PATTERN(AllReduceStart)
 XLA_UNOP_PATTERN(AllReduceDone)
 XLA_UNOP_PATTERN(AllToAll)
+XLA_UNOP_PATTERN(AsyncDone)
 XLA_UNOP_PATTERN(CollectiveBroadcast)
 XLA_UNOP_PATTERN(CollectivePermute)
 XLA_UNOP_PATTERN(CollectivePermuteStart)
 XLA_UNOP_PATTERN(CollectivePermuteDone)
 XLA_UNOP_PATTERN(Domain)
 XLA_UNOP_PATTERN(Exp)
+XLA_UNOP_PATTERN(Expm1)
 XLA_UNOP_PATTERN(Fft)
 XLA_UNOP_PATTERN(Floor)
 XLA_UNOP_PATTERN(GetTupleElement)
@@ -2849,6 +2860,7 @@ inline auto WithOperands(Matcher&& m, int64_t operand_num, FirstArg&& first_arg,
 XLA_VARIADIC_OP_PATTERN(AfterAll);
 XLA_VARIADIC_OP_PATTERN(AllGather)
 XLA_VARIADIC_OP_PATTERN(AllReduce)
+XLA_VARIADIC_OP_PATTERN(AsyncStart)
 XLA_VARIADIC_OP_PATTERN(Concatenate);
 XLA_VARIADIC_OP_PATTERN(Conditional);
 XLA_VARIADIC_OP_PATTERN(DynamicSlice)

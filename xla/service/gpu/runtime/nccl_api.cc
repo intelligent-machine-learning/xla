@@ -32,13 +32,14 @@ limitations under the License.
 #include "absl/types/span.h"
 #include "xla/primitive_util.h"
 #include "xla/service/collective_ops_utils.h"
-#include "xla/service/gpu/nccl_clique_key.h"
+#include "xla/service/gpu/runtime/nccl_clique_key.h"
 #include "xla/stream_executor/device_memory.h"
+#include "xla/stream_executor/device_memory_allocator.h"
 #include "xla/stream_executor/gpu/gpu_activation.h"
 #include "xla/stream_executor/gpu/gpu_stream.h"
 #include "xla/stream_executor/stream.h"
+#include "xla/tsl/concurrency/ref_count.h"
 #include "xla/xla_data.pb.h"
-#include "tsl/concurrency/ref_count.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/logging.h"
 #include "tsl/platform/statusor.h"
@@ -53,6 +54,12 @@ limitations under the License.
 #else
 #include "third_party/nccl/nccl.h"
 #endif  // TENSORFLOW_USE_ROCM
+
+#if (defined(PLATFORM_GOOGLE) && !defined(TENSORFLOW_USE_ROCM))
+#define WITH_PERSISTENT_PLAN_ALLOCATOR_SUPPORT true
+#else
+#define WITH_PERSISTENT_PLAN_ALLOCATOR_SUPPORT false
+#endif
 
 namespace xla::gpu {
 
@@ -158,19 +165,6 @@ static ncclRedOp_t ToNcclReduction(ReductionKind kind) {
   }
 }
 
-static std::string_view ToString(ReductionKind reduction_kind) {
-  switch (reduction_kind) {
-    case ReductionKind::SUM:
-      return "sum";
-    case ReductionKind::PRODUCT:
-      return "prod";
-    case ReductionKind::MIN:
-      return "min";
-    case ReductionKind::MAX:
-      return "max";
-  }
-}
-
 //==-----------------------------------------------------------------------===//
 // Casting between opaque API structs and NCCL types.
 //==-----------------------------------------------------------------------===//
@@ -183,7 +177,7 @@ static ncclComm_t Cast(NcclApi::NcclCommHandle comm) {
   return reinterpret_cast<ncclComm_t>(comm);
 }
 
-#ifdef PLATFORM_GOOGLE
+#if WITH_PERSISTENT_PLAN_ALLOCATOR_SUPPORT
 static ncclPersistentPlanAllocator* Cast(
     NcclApi::NcclPersistentPlanAllocatorHandle handle) {
   return reinterpret_cast<ncclPersistentPlanAllocator*>(handle);
@@ -198,7 +192,7 @@ static NcclApi::NcclPersistentPlanAllocatorHandle Cast(
     ncclPersistentPlanAllocator* ptr) {
   return reinterpret_cast<NcclApi::NcclPersistentPlanAllocatorHandle>(ptr);
 }
-#endif  // PLATFORM_GOOGLE
+#endif  // WITH_PERSISTENT_PLAN_ALLOCATOR_SUPPORT
 
 //==-----------------------------------------------------------------------===//
 // NcclApi::PersistentPlanAllocator
@@ -216,7 +210,7 @@ PersistentPlanAllocator::PersistentPlanAllocator(
       stream_(stream) {
   // NCCL persistent plan allocator is implemented as NCCL patch that is not yet
   // open sourced and can't be used from OSS XLA.
-#ifdef PLATFORM_GOOGLE
+#if WITH_PERSISTENT_PLAN_ALLOCATOR_SUPPORT
   auto* nccl_allocator = new ncclPersistentPlanAllocator;
   nccl_allocator->ctl = this;
 
@@ -237,13 +231,13 @@ PersistentPlanAllocator::PersistentPlanAllocator(
   };
 
   handle_ = Cast(nccl_allocator);
-#endif  // PLATFORM_GOOGLE
+#endif  // WITH_PERSISTENT_PLAN_ALLOCATOR_SUPPORT
 }
 
 PersistentPlanAllocator::~PersistentPlanAllocator() {
-#ifdef PLATFORM_GOOGLE
+#if WITH_PERSISTENT_PLAN_ALLOCATOR_SUPPORT
   delete Cast(handle_);
-#endif  // PLATFORM_GOOGLE
+#endif  // WITH_PERSISTENT_PLAN_ALLOCATOR_SUPPORT
 }
 
 absl::StatusOr<se::DeviceMemoryBase>
@@ -265,22 +259,22 @@ absl::Status PersistentPlanAllocator::Deallocate(se::DeviceMemoryBase mem) {
 ScopedPersistentPlanAllocator::ScopedPersistentPlanAllocator(
     NcclCommHandle comm, tsl::RCReference<PersistentPlanAllocator> allocator)
     : comm_(comm), allocator_(std::move(allocator)) {
-#ifdef PLATFORM_GOOGLE
+#if WITH_PERSISTENT_PLAN_ALLOCATOR_SUPPORT
   XLA_NCCL_CHECK(
       ncclCommGetPersistentPlanAllocator(Cast(comm_), Cast(&recover_)))
       << "Failed to get NCCL persistent plan allocator";
   XLA_NCCL_CHECK(ncclCommSetPersistentPlanAllocator(Cast(comm_),
                                                     Cast(allocator_->handle())))
       << "Failed to set NCCL persistent plan allocator";
-#endif  // PLATFORM_GOOGLE
+#endif  // WITH_PERSISTENT_PLAN_ALLOCATOR_SUPPORT
 }
 
 ScopedPersistentPlanAllocator::~ScopedPersistentPlanAllocator() {
-#ifdef PLATFORM_GOOGLE
+#if WITH_PERSISTENT_PLAN_ALLOCATOR_SUPPORT
   XLA_NCCL_CHECK(
       ncclCommSetPersistentPlanAllocator(Cast(comm_), Cast(recover_)))
       << "Failed to set NCCL persistent plan allocator";
-#endif  // PLATFORM_GOOGLE
+#endif  // WITH_PERSISTENT_PLAN_ALLOCATOR_SUPPORT
 }
 
 //==-----------------------------------------------------------------------===//
@@ -374,7 +368,7 @@ DefaultNcclApi::CommInitRanks(int32_t nranks, const NcclCliqueId& clique_id,
                               absl::Span<const DeviceRank> ranks,
                               const Config& config) {
   VLOG(1) << "Initialize NCCL communicator for " << ranks.size()
-          << " devices; hash(id)=" << absl::HashOf(clique_id);
+          << " devices; fingerprint(id)=" << clique_id.fingerprint();
 
   ncclConfig_t comm_config = NCCL_CONFIG_INITIALIZER;
 #if !defined(TENSORFLOW_USE_ROCM) || TF_ROCM_VERSION > 50700
@@ -382,8 +376,8 @@ DefaultNcclApi::CommInitRanks(int32_t nranks, const NcclCliqueId& clique_id,
 #endif
   if (config.max_nchannels > 0) {
     comm_config.maxCTAs = config.max_nchannels;
-    VLOG(1) << "Maximum number of channels for hash(id)="
-            << absl::HashOf(clique_id) << " is set to: " << comm_config.maxCTAs;
+    VLOG(1) << "Maximum number of channels for fingerprint(id)="
+            << clique_id.fingerprint() << " is set to: " << comm_config.maxCTAs;
   }
 
   std::vector<ncclComm_t> comm_handles;
@@ -395,7 +389,8 @@ DefaultNcclApi::CommInitRanks(int32_t nranks, const NcclCliqueId& clique_id,
   TF_RETURN_IF_ERROR(GroupStart());
   for (size_t i = 0; i < ranks.size(); ++i) {
     VLOG(1) << "Initialize NCCL communicator for rank #" << ranks[i].rank
-            << " of " << nranks << "; hash(id)=" << absl::HashOf(clique_id);
+            << " of " << nranks
+            << "; fingerprint(id)=" << clique_id.fingerprint();
 
     se::gpu::ScopedActivateExecutorContext activate_context(ranks[i].device);
 
@@ -456,6 +451,7 @@ absl::StatusOr<std::vector<NcclApi::OwnedNcclComm>> DefaultNcclApi::CommSplit(
   TF_RETURN_IF_ERROR(GroupEnd());
 
   std::vector<OwnedNcclComm> split_comms;
+  split_comms.reserve(split_comms_handles.size());
   for (size_t i = 0; i < split_comms_handles.size(); ++i) {
     split_comms.emplace_back(Cast(split_comms_handles[i]),
                              NcclCommDeleter{this});
@@ -524,7 +520,7 @@ absl::Status DefaultNcclApi::AllReduce(se::DeviceMemoryBase send_buffer,
       "stream=%p",
       stream->parent()->device_ordinal(), send_buffer.opaque(),
       recv_buffer.opaque(), primitive_util::LowercasePrimitiveTypeName(dtype),
-      count, ToString(reduction_kind), comm, stream);
+      count, ReductionKindToString(reduction_kind), comm, stream);
 
   TF_ASSIGN_OR_RETURN(ncclDataType_t nccl_dtype, ToNcclDataType(dtype, false));
 
@@ -566,7 +562,7 @@ absl::Status DefaultNcclApi::ReduceScatter(se::DeviceMemoryBase send_buffer,
       "stream=%p",
       stream->parent()->device_ordinal(), send_buffer.opaque(),
       recv_buffer.opaque(), primitive_util::LowercasePrimitiveTypeName(dtype),
-      count, ToString(reduction_kind), comm, stream);
+      count, ReductionKindToString(reduction_kind), comm, stream);
 
   TF_ASSIGN_OR_RETURN(ncclDataType_t nccl_dtype, ToNcclDataType(dtype, false));
 
@@ -654,6 +650,9 @@ DefaultNcclApi::DeregisterBuffer(NcclCommHandle comm,
 #if (NCCL_VERSION_CODE >= 21901)
   return XLA_NCCL_STATUS(
       ncclCommDeregister(Cast(comm), reinterpret_cast<void*>(handle)));
+#else
+  return absl::UnimplementedError(
+      "ncclCommDeregister is unavailable in this build.");
 #endif  // NCCL_VERSION_CODE >= 21901
 }
 }  // namespace xla::gpu
