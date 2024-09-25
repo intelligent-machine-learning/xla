@@ -1,8 +1,7 @@
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@rules_proto//proto:defs.bzl", "proto_library")
-load("//xla:xla.bzl",  "xla_cc_test","xla_cc_binary","xla_symbol_repository_deps")
-load("@tsl//tsl:tsl.default.bzl", "get_compatible_with_libtpu_portable")
-load("@tsl//tsl:tsl.bzl", "internal_visibility")
+load("//xla:xla.bzl",  "xla_cc_test","xla_cc_binary")
+load("@xla//xla/tsl:tsl.bzl", "get_compatible_with_libtpu_portable","internal_visibility")
 load("@tsl//tsl/platform:build_config_root.bzl", "if_static")
 load("//xla/stream_executor:build_defs.bzl", "stream_executor_friends", "stream_executor_internal")
 
@@ -167,7 +166,7 @@ xla_cc_test(
         "//xla/service/gpu:gpu_device_info_for_tests",
         "@com_google_absl//absl/log",
         "@com_google_googletest//:gtest",
-        "@tsl//tsl/lib/core:status_test_util",
+        "//xla/tsl/lib/core:status_test_util",
         "@tsl//tsl/platform:statusor",
         ":common",
     ],
@@ -226,5 +225,5 @@ xla_cc_binary(
         "//xla/stream_executor/gpu:gpu_init",
     ] + if_cuda([
         "//xla/stream_executor/cuda:cublas_plugin",
-    ]) + xla_symbol_repository_deps(),
+    ])
 )

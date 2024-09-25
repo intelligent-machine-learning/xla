@@ -8,7 +8,7 @@ load(
 )
 load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
 load(
-    "@tsl//tsl:tsl.bzl",
+    "@xla//xla/tsl:tsl.bzl",
     "clean_dep",
 )
 package(
