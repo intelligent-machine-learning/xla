@@ -398,7 +398,7 @@ absl::Status GpuHloCostAnalysis::HandleCommOp(const HloInstruction* hlo){
   
   if(std::is_same<T, HloAllReduceInstruction>()){
     current_properties_[kFlopsKey] = GetFlopsForElementwiseOp(
-      device_info_, hlo->to_apply()->root_instruction()->opcode(),
+      hlo->to_apply()->root_instruction()->opcode(),
       hlo->shape());
   }
 
