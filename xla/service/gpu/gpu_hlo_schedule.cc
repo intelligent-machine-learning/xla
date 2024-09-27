@@ -377,7 +377,7 @@ int64_t GetSizeOfShape(const Shape& shape, int pointer_size) {
   return size + metadata_size;
 }
 
-static int64_t GetSchedulerMemoryLimit(
+int64_t GetSchedulerMemoryLimit(
     const HloModule* module, const se::DeviceDescription& gpu_device_info,
     int pointer_size);
 
@@ -457,12 +457,6 @@ absl::StatusOr<ScheduleMetadata> ScheduleGpuModule(
     }
 
     LOG(INFO) << "Found profile, using profile guided latency estimator";
-    absl::Status s = IsProfileApplicable(module, profile.value());
-    if (!s.ok()) {
-      LOG(INFO) << "PGLE profile may not applicable to the module, but will "
-                   "still be used : "
-                << s.message();
-    }
   } else if (!offline_sqlite_pgle_path.empty()) {
     if (enable_analytical_latency_estimator) {
       auto backup_latency_estimator =

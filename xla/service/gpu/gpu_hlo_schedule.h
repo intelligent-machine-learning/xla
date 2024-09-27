@@ -44,6 +44,7 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/ir/hlo_schedule.h"
 #include "xla/hlo/experimental/auto_reorder/auto_reorder.h"
+#include  "xla/hlo/experimental/auto_reorder/offline_sqlite_pgle.h"
 #include "xla/hlo/utils/hlo_query.h"
 #include "xla/service/buffer_value.h"
 #include "xla/service/collective_ops_utils.h"
