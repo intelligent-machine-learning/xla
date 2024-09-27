@@ -35,7 +35,7 @@ tsl::Status AutoReorderPass::RebuildHloOrdering(
   if (!status.ok()) {
     return status;
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 tsl::StatusOr<std::vector<HloInstruction*>>
 AutoReorderPass::ScheduleComputation(HloComputation* computation) {
@@ -582,7 +582,7 @@ tsl::Status AutoReorderPass::MoveInstruction(HloComputation* src_computation,
   } else {
     VLOG(3) << "RemoveInstruction success"
             << src_computation->instruction_count() << std::endl;
-    return OkStatus();
+    return absl::OkStatus();
   }
 }
 StatusOr<bool> AutoReorderPass::Run(

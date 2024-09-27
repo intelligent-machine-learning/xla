@@ -113,6 +113,7 @@ void ForAllThunks(absl::FunctionRef<void(const Thunk*)> fn,
     case Thunk::kSendDone:
     case Thunk::kTriangularSolve:
     case Thunk::kWaitForStreams:
+    case Thunk::kFlashAttn:
       // No default. All `Thunk::Kinds` must be handled.
       break;
   }

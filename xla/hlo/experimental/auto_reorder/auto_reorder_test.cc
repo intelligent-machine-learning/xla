@@ -522,8 +522,8 @@ ENTRY %elementwise {
 
   StatusOr<HloComputation*> MakeRandomComputation(
       HloModule* module, SavedInstLatencyEstimator* estimator,
-      uint32_t inst_nums = 100, uint8_t max_deps = 5,
-      double communication_rate = 0.1f,
+      const uint32_t inst_nums = 100, uint8_t max_deps = 5,
+      const double communication_rate = 0.1f,
       std::mt19937 gen = std::mt19937{kRandomSeed},
       CostGenerator cost_gen = CostGenerator(50, 5, kRandomSeed)) {
     /* create instruction list with inst_nums instructions
@@ -1079,7 +1079,7 @@ ENTRY SyncTensorsGraph.23_spmd {
 } // SyncTensorsGraph.23_spmd
 )";
   TF_ASSERT_OK_AND_ASSIGN(auto hlo_module, ParseHloText(hlo_string));
-  auto gpu_latency_estimator = std::make_unique<GpuLatencyEstimator>();
+  auto gpu_latency_estimator = std::make_unique<xla::GpuLatencyEstimator>();
   std::unique_ptr<LatencyEstimator> latency_estimator;
   int pointer_size_ = 4;
   Backend& test_backend = backend();
@@ -1263,7 +1263,7 @@ TEST_F(AutoReorderingTest, ReorderScheduleComputation) {
   auto hlo_module = CreateNewUnverifiedModule();
   auto st = MakeTestComputation(hlo_module.get());
   EXPECT_TRUE(st.ok());
-  auto gpu_latency_estimator = std::make_unique<GpuLatencyEstimator>();
+  auto gpu_latency_estimator = std::make_unique<xla::GpuLatencyEstimator>();
   std::unique_ptr<LatencyEstimator> latency_estimator;
   int pointer_size_ = 4;
   Backend& test_backend = backend();
@@ -1326,7 +1326,7 @@ TEST_F(AutoReorderingTest, ReorderPassAntOPT) {
   const int64_t scheduler_mem_limit = xla::gpu::GetSchedulerMemoryLimit(
       hlo_module.get(), gpu_device_info, pointer_size_);
   SchedulerConfig config = GetSchedulerConfig(scheduler_mem_limit);
-  auto gpu_latency_estimator = std::make_unique<GpuLatencyEstimator>();
+  auto gpu_latency_estimator = std::make_unique<xla::GpuLatencyEstimator>();
   std::unique_ptr<LatencyEstimator> latency_estimator =
       std::make_unique<AnalyticalLatencyEstimator>(
           config, std::move(gpu_latency_estimator), gpu_device_info,
@@ -1336,7 +1336,7 @@ TEST_F(AutoReorderingTest, ReorderPassAntOPT) {
           hlo_module->entry_computation());
   // we should create other estimator,otherwise it's nullptr(move to other
   // place)
-  auto gpu_latency_estimator2 = std::make_unique<GpuLatencyEstimator>();
+  auto gpu_latency_estimator2 = std::make_unique<xla::GpuLatencyEstimator>();
 
   auto latency_estimator2 = std::make_unique<AnalyticalLatencyEstimator>(
       config, std::move(gpu_latency_estimator2), gpu_device_info,
@@ -1365,7 +1365,7 @@ TEST_F(AutoReorderingTest, ReorderPass) {
   const int64_t scheduler_mem_limit = xla::gpu::GetSchedulerMemoryLimit(
       hlo_module.get(), gpu_device_info, pointer_size_);
   SchedulerConfig config = GetSchedulerConfig(scheduler_mem_limit);
-  auto gpu_latency_estimator = std::make_unique<GpuLatencyEstimator>();
+  auto gpu_latency_estimator = std::make_unique<xla::GpuLatencyEstimator>();
   std::unique_ptr<LatencyEstimator> latency_estimator =
       std::make_unique<AnalyticalLatencyEstimator>(
           config, std::move(gpu_latency_estimator), gpu_device_info,
@@ -1375,7 +1375,7 @@ TEST_F(AutoReorderingTest, ReorderPass) {
           hlo_module->entry_computation());
   // we should create other estimator,otherwise it's nullptr(move to other
   // place)
-  auto gpu_latency_estimator2 = std::make_unique<GpuLatencyEstimator>();
+  auto gpu_latency_estimator2 = std::make_unique<xla::GpuLatencyEstimator>();
 
   auto latency_estimator2 = std::make_unique<AnalyticalLatencyEstimator>(
       config, std::move(gpu_latency_estimator2), gpu_device_info,
@@ -1404,7 +1404,7 @@ TEST_F(AutoReorderingTest, ReorderPassWithDefaultEstimator) {
   const int64_t scheduler_mem_limit = xla::gpu::GetSchedulerMemoryLimit(
       hlo_module.get(), gpu_device_info, pointer_size_);
   SchedulerConfig config = GetSchedulerConfig(scheduler_mem_limit);
-  auto gpu_latency_estimator = std::make_unique<GpuLatencyEstimator>();
+  auto gpu_latency_estimator = std::make_unique<xla::GpuLatencyEstimator>();
   std::unique_ptr<LatencyEstimator> latency_estimator;
   latency_estimator = std::make_unique<AnalyticalLatencyEstimator>(
       config, std::move(gpu_latency_estimator), gpu_device_info,
@@ -1893,5 +1893,6 @@ TEST_F(AutoReorderingTest, ReorderPassAntOPTDataAnalyse) {
 TEST_F(AutoReorderingTest, DAGSolver) {
   auto solver_ = absl::make_unique<LinearProgramScheduler<
       LPContainerDAG<const HloInstruction*>, const HloInstruction*>>();
+  
 }
 }  // namespace xla

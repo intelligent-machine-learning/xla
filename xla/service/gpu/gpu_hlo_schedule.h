@@ -43,6 +43,7 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/ir/hlo_schedule.h"
+#include "xla/hlo/experimental/auto_reorder/auto_reorder.h"
 #include "xla/hlo/utils/hlo_query.h"
 #include "xla/service/buffer_value.h"
 #include "xla/service/collective_ops_utils.h"
@@ -73,7 +74,8 @@ limitations under the License.
 #include "tsl/platform/path.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/protobuf.h"
-#include "tsl/platform/statusor.h"#include "tsl/profiler/protobuf/profiled_instructions.pb.h"
+#include "tsl/platform/statusor.h"
+#include "tsl/profiler/protobuf/profiled_instructions.pb.h"
 
 namespace xla {
 namespace gpu {

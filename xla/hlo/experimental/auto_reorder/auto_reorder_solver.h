@@ -29,6 +29,7 @@ namespace xla {
 using IntVar = operations_research::sat::IntVar;
 using CpModelBuilder = operations_research::sat::CpModelBuilder;
 using IntervalVar = operations_research::sat::IntervalVar;
+using Status=absl::Status;
 // using SearchMonitor=operations_research::SearchMonitor;
 enum class SolveMethod {
   kORTools = 0,

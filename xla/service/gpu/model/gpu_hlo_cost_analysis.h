@@ -19,6 +19,10 @@ limitations under the License.
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <algorithm>
+#include <cmath>
+#include <utility>
+#include <vector>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"

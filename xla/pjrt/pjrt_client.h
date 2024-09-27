@@ -1503,7 +1503,7 @@ class PjRtLoadedExecutable : public PjRtExecutable {
   virtual StatusOr<std::vector<std::unique_ptr<PjRtBuffer>>> ExecuteLocal(
       absl::Span<const std::vector<PjRtBuffer*>> argument_handles,
       const ExecuteOptions& options,
-      std::optional<PjRtFuture<Status>>& returned_future) {
+      std::optional<PjRtFuture<absl::Status>>& returned_future) {
   }
 
   // Execute the assigned replica/partition on a given `device`. Requires
