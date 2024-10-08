@@ -3255,11 +3255,11 @@ PjRtStreamExecutorLoadedExecutable::Execute(
   return wrapped_results;
 }
 
-StatusOr<std::vector<std::unique_ptr<PjRtBuffer>>>
+absl::StatusOr<std::vector<std::unique_ptr<PjRtBuffer>>> 
 PjRtStreamExecutorLoadedExecutable::ExecuteLocal(
     absl::Span<const std::vector<PjRtBuffer*>> argument_handles,
     const ExecuteOptions& options,
-    std::optional<PjRtFuture<Status>>& returned_future) {
+    std::optional<PjRtFuture<>>& returned_future) {
   if (device_assignment_ == nullptr) {
     return InvalidArgument("Execute expects a non-null device_assignment");
   }
@@ -3293,43 +3293,6 @@ PjRtStreamExecutorLoadedExecutable::ExecuteLocal(
   return std::move(result.buffers);
 }
 
-absl::StatusOr<std::vector<std::unique_ptr<PjRtBuffer>>>
-PjRtStreamExecutorLoadedExecutable::ExecuteLocal(
-    absl::Span<const std::vector<PjRtBuffer*>> argument_handles,
-    const ExecuteOptions& options,
-    std::optional<PjRtFuture<Status>>& returned_future) {
-  if (device_assignment_ == nullptr) {
-    return InvalidArgument("Execute expects a non-null device_assignment");
-  }
-
-  RunId run_id;
-  tsl::profiler::TraceMeProducer activity(
-      "PjRtStreamExecutorLoadedExecutable::Execute",
-      tsl::profiler::ContextType::kPjRt, run_id.ToInt());
-
-  const int num_addressable_devices = addressable_devices_.size();
-
-  if (argument_handles.size() != num_addressable_devices) {
-    return InvalidArgument(
-        "Attempted to execute with %d argument lists when local device "
-        "count is %d (total replica count: %d, partition count: %d)",
-        argument_handles.size(), num_addressable_devices, num_replicas(),
-        num_partitions());
-  }
-
-  VLOG(1) << "Executing computation " << name()
-          << "; num_replicas=" << num_replicas()
-          << " num_partitions=" << num_partitions()
-          << " num_addressable_devices=" << num_addressable_devices;
-  TF_ASSIGN_OR_RETURN(
-  auto result,
-  ExecuteHelper(argument_handles[0],
-                addressable_device_logical_ids_[0].replica,
-                addressable_device_logical_ids_[0].partition, run_id,
-                options, true));
-  returned_future = std::move(result.future);
-  return std::move(result.buffers);
-}
 
 absl::StatusOr<std::vector<std::unique_ptr<PjRtBuffer>>>
 PjRtStreamExecutorLoadedExecutable::ExecuteSharded(

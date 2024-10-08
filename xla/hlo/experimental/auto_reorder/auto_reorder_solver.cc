@@ -568,11 +568,11 @@ LPSchedulerFunc(void)::SaveGraphviz(std::string filename) const {
   out << "}\n";
 
   out.close();
-  // convert dot file to png
-  std::string png_file = absl::StrCat("/tmp/", filename, ".png");
-  std::string cmd = absl::StrCat("dot -Tpng ", dot_file, " -o ", png_file);
-  auto status = system(cmd.c_str());
-  VLOG(4) << cmd << " execute status:" << status << std::endl;
+  // convert dot file to png,do not use this,will cause long time
+  // std::string png_file = absl::StrCat("/tmp/", filename, ".png");
+  // std::string cmd = absl::StrCat("dot -Tpng ", dot_file, " -o ", png_file);
+  // auto status = system(cmd.c_str());
+  // VLOG(4) << cmd << " execute status:" << status << std::endl;
 }
 LPSchedulerFunc(void)::SaveGantt(std::string filename) const {
   // https://g2.antv.antgroup.com/en/examples/storytelling/storytelling/#gantt
