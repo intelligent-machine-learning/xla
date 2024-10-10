@@ -115,14 +115,11 @@ GpuCudaMallocAsyncAllocator::GpuCudaMallocAsyncAllocator(
     tsl::PlatformDeviceId platform_device_id, bool create_new_pool,
     size_t new_pool_size, bool reserve_memory, size_t reserve_memory_size,
     bool sync_mode, bool compute_stats)
-    : name_(absl::StrCat("gpu_async_", platform_device_id.value())),
+    : cuda_state_{std::make_unique<CudaState>()},
+      name_(absl::StrCat("gpu_async_", platform_device_id.value())),
       reserve_memory_(reserve_memory),
       create_new_pool_(create_new_pool),
       sync_mode_(sync_mode) {
-  if (std::getenv("CUDAASYNC_SYNCMODE") != nullptr) {
-    VLOG(0) << "sync mode";
-    sync_mode_=true;
-  }
   ++number_instantiated_;
 
   stream_exec_ = GPUMachineManager()
@@ -149,7 +146,7 @@ GpuCudaMallocAsyncAllocator::GpuCudaMallocAsyncAllocator(
           << "Failed to retain context: " << cuda::ToStatus(result);
   }
 
-  cuda::ScopedActivateExecutorContext scoped_activation{stream_exec_};
+  gpu::ScopedActivateContext scoped_activation{stream_exec_};
 
   // Check the CUDA runtime is recent enough.
   if (auto status2 = cuDriverGetVersion(&driverVersion)) {
@@ -284,8 +281,8 @@ GpuCudaMallocAsyncAllocator::GpuCudaMallocAsyncAllocator(
       }
     }
 
-      // Set the previous pools access to the current GPU.
-      map.location.id = platform_device_id.value();
+    // Set the previous pools access to the current GPU.
+    map.location.id = platform_device_id.value();
 
     int previous_pool_id = (*all_ids_)[i].value();
     VLOG(2) << "Set access to the pool id: " << previous_pool_id
