@@ -146,7 +146,7 @@ GpuCudaMallocAsyncAllocator::GpuCudaMallocAsyncAllocator(
           << "Failed to retain context: " << cuda::ToStatus(result);
   }
 
-  gpu::ScopedActivateContext scoped_activation{stream_exec_};
+  cuda::ScopedActivateExecutorContext scoped_activation{stream_exec_};
 
   // Check the CUDA runtime is recent enough.
   if (auto status2 = cuDriverGetVersion(&driverVersion)) {
