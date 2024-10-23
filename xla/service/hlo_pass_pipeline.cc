@@ -40,7 +40,7 @@ namespace {
 void RecordPassStartMetadata(HloModule& module, const std::string& pass_name,
                              const std::string& pipeline_name) {
   module.metadata()->RecordPassStart();
-  // An HloPassMetadata was just created so Status should always be OK.
+  // An HloPassMetadata was just created so absl::Status should always be OK.
   TF_CHECK_OK(module.metadata()->set_current_pass_name(pass_name));
   TF_CHECK_OK(module.metadata()->set_current_pass_pipeline_name(pipeline_name));
 }
@@ -53,9 +53,9 @@ void RecordPassStartMetadata(HloModuleGroup& module_group,
   }
 }
 
-Status AttemptRecordPassEndMetadata(HloModule& module,
-                                    const std::string& pass_name,
-                                    bool module_changed) {
+absl::Status AttemptRecordPassEndMetadata(HloModule& module,
+                                          const std::string& pass_name,
+                                          bool module_changed) {
   // Module id is set here instead of RecordPassStartMetadata because it may
   // change in the middle of the pass, and we want the final id.
   TF_RETURN_IF_ERROR(
@@ -63,21 +63,21 @@ Status AttemptRecordPassEndMetadata(HloModule& module,
   TF_RETURN_IF_ERROR(
       module.metadata()->set_current_pass_module_changed(module_changed));
   TF_RETURN_IF_ERROR(module.metadata()->RecordPassEnd());
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 void RecordPassEndMetadata(HloModule& module, const std::string& pass_name,
                            bool module_changed) {
-  Status status =
+  absl::Status status =
       AttemptRecordPassEndMetadata(module, pass_name, module_changed);
   if (!status.ok()) {
     LOG(FATAL) << status;
   }
 }
 
-Status AttemptRecordPassEndMetadata(HloModuleGroup& module_group,
-                                    const std::string& pass_name,
-                                    bool module_changed) {
+absl::Status AttemptRecordPassEndMetadata(HloModuleGroup& module_group,
+                                          const std::string& pass_name,
+                                          bool module_changed) {
   for (HloModule* module : module_group.modules()) {
     for (HloModule* other_module : module_group.modules()) {
       TF_RETURN_IF_ERROR(
@@ -87,12 +87,12 @@ Status AttemptRecordPassEndMetadata(HloModuleGroup& module_group,
     TF_RETURN_IF_ERROR(
         AttemptRecordPassEndMetadata(*module, pass_name, module_changed));
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 void RecordPassEndMetadata(HloModuleGroup& module_group,
                            const std::string& pass_name, bool module_changed) {
-  Status status =
+  absl::Status status =
       AttemptRecordPassEndMetadata(module_group, pass_name, module_changed);
   if (!status.ok()) {
     LOG(FATAL) << status;
@@ -102,7 +102,7 @@ void RecordPassEndMetadata(HloModuleGroup& module_group,
 }  // namespace
 
 template <typename HloT>
-Status HloPassPipeline::RunInvariantCheckers(
+absl::Status HloPassPipeline::RunInvariantCheckers(
     HloT* hlo, absl::string_view after_pass_name,
     const absl::flat_hash_set<absl::string_view>& execution_threads) {
   for (auto& invariant_checker : invariant_checkers_) {
@@ -121,7 +121,7 @@ Status HloPassPipeline::RunInvariantCheckers(
     TF_RET_CHECK(!changed_status.value())
         << "invariant checkers must not change the graph";
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 namespace {
@@ -169,8 +169,10 @@ absl::StatusOr<bool> HloPassPipeline::RunPassesInternal(
     HloPassInterface* pass = passes[i];
     std::string pass_name = std::string(pass->name());
     XLA_SCOPED_LOGGING_TIMER(absl::StrCat("HLO pass: ", pass_name));
-    tsl::profiler::ScopedAnnotation annotation{
-        [&] { return "XlaPass:" + pass_name; }};
+    tsl::profiler::ScopedAnnotation annotation{[&] {
+      return absl::StrFormat("XlaPass:#name=%s,module=%s,program_id=%s#",
+                             pass_name, hlo->name(), UniqueId(*hlo));
+    }};
     VLOG(1) << "  HLO pass " << pass_name;
     VLOG(2) << "  Module hash " << absl::HashOf(*hlo);
     if (!pass->IsPassPipeline()) {
@@ -269,7 +271,8 @@ void HloPassPipeline::MaybeDumpHloAndSaveFilenames(
     absl::string_view before_pass_name) {
   for (const std::string& filename : DumpHloModuleBetweenPassesIfEnabled(
            name(), before_pass_name, after_pass_name, module)) {
-    Status status = module.metadata()->add_current_pass_dump_filename(filename);
+    absl::Status status =
+        module.metadata()->add_current_pass_dump_filename(filename);
     if (!status.ok()) {
       LOG(FATAL) << status;
     }

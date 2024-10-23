@@ -1,5 +1,5 @@
-load("//tsl:tsl.bzl", "internal_visibility")
-load("//tsl:tsl.default.bzl", "filegroup", "get_compatible_with_portable")
+load("@xla//xla/tsl:tsl.bzl", "internal_visibility")
+load("@xla//xla/tsl:tsl.default.bzl", "filegroup", "get_compatible_with_portable")
 load(
     "//tsl/platform:build_config.bzl",
     "tsl_cc_test",
@@ -35,7 +35,7 @@ cc_library(
         "random_distributions.h",
         "simple_philox.h",
     ],
-    visibility = internal_visibility(default_visibility),
+    visibility = ["//visibility:public"],
     deps = [
         ":exact_uniform_int",
         ":philox_random",
@@ -64,10 +64,7 @@ cc_library(
     name = "philox_random",
     hdrs = ["philox_random.h"],
     compatible_with = get_compatible_with_portable(),
-    visibility = internal_visibility([
-        "//tensorflow/core/lib/random:__pkg__",
-        "//tensorflow/lite:__subpackages__",
-    ]),
+    visibility = ["//visibility:public"],
 )
 
 cc_library(

@@ -1,8 +1,8 @@
-load("@tsl//tsl:tsl.bzl", "if_google", "internal_visibility")
-load("@tsl//tsl:tsl.default.bzl", "filegroup")
 load("@tsl//tsl/platform:rules_cc.bzl", "cc_library")
 load("//xla:xla.bzl", "xla_cc_test")
 load("//xla/stream_executor:build_defs.bzl", "stream_executor_friends")
+load("//xla/tsl:tsl.bzl", "if_google", "internal_visibility")
+load("//xla/tsl:tsl.default.bzl", "filegroup")
 
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
@@ -48,13 +48,16 @@ cc_library(
         "//xla/stream_executor:device_memory",
         "//xla/stream_executor:device_memory_allocator",
         "//xla/stream_executor:platform",
+        "//xla/tsl/framework:allocator",
+        "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
-        "@tsl//tsl/framework:allocator",
-        "@tsl//tsl/platform:errors",
+        "@com_google_absl//absl/synchronization",
+        "@tsl//tsl/platform:logging",
         "@tsl//tsl/platform:statusor",
     ],
 )
@@ -68,11 +71,11 @@ cc_library(
     deps = [
         "//xla/stream_executor",
         "//xla/stream_executor:memory_allocation",
+        "//xla/tsl/framework:allocator",
+        "//xla/tsl/framework:device_id",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/synchronization",
-        "@tsl//tsl/framework:allocator",
-        "@tsl//tsl/framework:device_id",
         "@tsl//tsl/platform:logging",
         "@tsl//tsl/profiler/lib:traceme",
     ],
@@ -89,10 +92,11 @@ xla_cc_test(
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/container:node_hash_set",
         "@com_google_absl//absl/log:check",
+        "@tsl//tsl/platform:status",
         "@tsl//tsl/platform:statusor",
         "@tsl//tsl/platform:test",
         "@tsl//tsl/platform:test_main",
     ] + if_google([
-        "@tsl//tsl/framework:allocator",
+        "//xla/tsl/framework:allocator",
     ]),
 )

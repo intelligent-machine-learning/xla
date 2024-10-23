@@ -34,24 +34,37 @@ def PropagateSliceIndicesPass :
   let constructor = "CreatePropagateSliceIndicesPass()";
 }
 
-def LowerFuncPass : Pass<"xla-gpu-lower-func", "mlir::ModuleOp"> {
-  let summary = "Lowers function calls to func.calls.";
-
+def ConvertPureCallOpsPass
+    : Pass<"xla-gpu-convert-pure-call-ops", "mlir::func::FuncOp"> {
+  let summary = "Converts xla_gpu.pure_call to func.call";
   let description = [{
       We use xla_gpu.pure_call ops for calls to enable CSE and other
       transformations (e.g. LICM). This pass rewrites our custom ops to standard
       ops.
   }];
-
   let dependentDialects = [
-    "mlir::func::FuncDialect", "xla::gpu::XlaGpuDialect"
+    "mlir::func::FuncDialect",
+    "xla::gpu::XlaGpuDialect"
   ];
-
-  let constructor = "CreateLowerFuncPass()";
+  let constructor = "CreateConvertPureCallOpsPass()";
 }
 
-def LowerTensorsPass :
-   Pass<"xla-gpu-lower-tensors", "mlir::ModuleOp"> {
+def FlattenTensorsPass : Pass<"xla-gpu-flatten-tensors", "mlir::ModuleOp"> {
+  let summary = "Flatten tensors.";
+
+  let description = [{
+    Linearizes all tensors loads and stores.
+  }];
+
+  let dependentDialects = [
+    "mlir::func::FuncDialect",
+    "mlir::tensor::TensorDialect",
+    "xla::gpu::XlaGpuDialect",
+  ];
+  let constructor = "CreateFlattenTensorsPass()";
+}
+
+def LowerTensorsPass : Pass<"xla-gpu-lower-tensors", "mlir::ModuleOp"> {
   let summary = "Lowers tensors to llvm pointers and loads/stores.";
 
   let description = [{
@@ -60,10 +73,19 @@ def LowerTensorsPass :
   }];
 
   let dependentDialects = [
-    "mlir::func::FuncDialect", "mlir::gpu::GPUDialect", "mlir::LLVM::LLVMDialect",
-    "mlir::tensor::TensorDialect", "mlir::scf::SCFDialect",
+    "mlir::LLVM::LLVMDialect",
+    "mlir::func::FuncDialect",
+    "mlir::gpu::GPUDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::tensor::TensorDialect",
+    "xla::gpu::XlaGpuDialect",
   ];
-
+  let options = [
+    Option<"is_amd_gpu_", "is_amd_gpu", "bool", /*default=*/"false",
+           "True if AMD GPU.">,
+    Option<"gpu_arch_", "gpu_arch", "std::string", /*default=*/"",
+           "CUDA or ROCm compute capability.">,
+  ];
   let constructor = "CreateLowerTensorsPass()";
 }
 
@@ -83,7 +105,7 @@ def MergePointersToSameSlicePass :
   let constructor = "CreateMergePointersToSameSlicePass()";
 }
 
-def SimplifyArithPass : Pass<"xla-gpu-simplify-arith", "mlir::ModuleOp"> {
+def SimplifyArithPass : Pass<"xla-gpu-simplify-arith", "mlir::func::FuncOp"> {
   let summary = "Simplifies arith using XLA's range-aware simplifier.";
 
   let description = [{
@@ -92,7 +114,8 @@ def SimplifyArithPass : Pass<"xla-gpu-simplify-arith", "mlir::ModuleOp"> {
   }];
 
   let dependentDialects = [
-    "mlir::arith::ArithDialect"
+    "mlir::arith::ArithDialect",
+    "mlir::func::FuncDialect",
   ];
 
   let constructor = "CreateSimplifyArithPass()";
@@ -128,7 +151,8 @@ def ExpandFloatOpsPass : Pass<"xla-gpu-expand-float-ops", "mlir::ModuleOp"> {
   }];
 
   let dependentDialects = [
-    "mlir::arith::ArithDialect", "mlir::mhlo::MhloDialect"
+    "mlir::arith::ArithDialect", "mlir::math::MathDialect",
+    "mlir::mhlo::MhloDialect"
   ];
 
   let options = [
@@ -149,6 +173,21 @@ def LowerXlaGpuToScfPass :
   let constructor = "CreateLowerXlaGpuToScfPass()";
 }
 
+def EraseDeadFunctionsPass : Pass<"xla-erase-dead-functions", "mlir::ModuleOp"> {
+  let summary = "Deletes unused functions";
+
+  let description = [{
+      Deletes functions that are not called.
+  }];
+
+  let dependentDialects = [
+    "mlir::func::FuncDialect",
+    "xla::gpu::XlaGpuDialect"
+  ];
+
+  let constructor = "CreateEraseDeadFunctionsPass()";
+}
+
 def LowerToLLVMPass :
    Pass<"xla-gpu-lower-to-llvm", "mlir::ModuleOp"> {
   let summary = "Lowers to LLVM.";
@@ -158,10 +197,94 @@ def LowerToLLVMPass :
   }];
 
   let dependentDialects = [
-    "mlir::func::FuncDialect", "mlir::LLVM::LLVMDialect"
+    "mlir::func::FuncDialect",
+    "mlir::LLVM::LLVMDialect",
+    "mlir::NVVM::NVVMDialect",
   ];
 
   let constructor = "CreateLowerToLLVMPass()";
+}
+
+def VectorizeLoadsAndStoresPass :
+   Pass<"xla-gpu-vectorize-loads-stores", "mlir::func::FuncOp"> {
+  let summary = "Vectorizes loads and stores.";
+
+  let description = [{
+    Rewrites tensor.extract and tensor.insert ops inside loops to their vector
+    equivalents (vector.transfer_read and vector.transfer_write + vector.extract
+    and vector.insert).
+  }];
+
+  let dependentDialects = [
+    "mlir::vector::VectorDialect",
+  ];
+
+  let constructor = "CreateVectorizeLoadsAndStoresPass()";
+}
+
+def OptimizeLoopsPass :
+   Pass<"xla-gpu-optimize-loops", "mlir::func::FuncOp"> {
+  let summary = "Unrolls and pipelines loops.";
+
+  let description = [{
+    Unrolls loops with a small trip count. Pipelines loops with a large trip
+    count.
+  }];
+
+  let dependentDialects = [
+    "mlir::vector::VectorDialect",
+    "xla::gpu::XlaGpuDialect",
+  ];
+
+  let constructor = "CreateOptimizeLoopsPass()";
+}
+
+def UnswitchLoopsPass :
+   Pass<"xla-gpu-unswitch-loops", "mlir::func::FuncOp"> {
+  let summary = "Swaps scf.if and scf.for.";
+
+  let description = [{
+      Extracts `scf.if` ops with conditions that are independent of the loop
+      variable from `scf.for` by doing the following rewrite:
+
+      Before:
+
+      %cond = some_cond() : i1
+      %results = scf.for {
+        %some_val = scf.if %cond  {
+        } else {
+        }
+        scf.yield %some_val
+      }
+
+      After:
+
+      %cond = some_cond() : i1
+      %results = scf.if %cond {
+         %results = scf.for {
+            %some_val = scf.if %true  {
+            } else {
+            }
+         }
+         yield %results
+      } else {
+         %results = scf.for {
+            %some_val = scf.if %false  {
+            } else {
+            }
+         }
+         yield %results
+      }
+
+      This only triggers if there is a single `scf.if` op in the loop body (and
+      nothing else).
+  }];
+
+  let dependentDialects = [
+    "mlir::func::FuncDialect", "mlir::scf::SCFDialect"
+  ];
+
+  let constructor = "CreateUnswitchLoopsPass()";
 }
 
 #endif  // XLA_SERVICE_GPU_FUSIONS_MLIR_PASSES_TD_

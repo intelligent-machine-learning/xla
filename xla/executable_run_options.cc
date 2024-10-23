@@ -41,6 +41,16 @@ ExecutableRunOptions& ExecutableRunOptions::set_device_ordinal(
 
 int ExecutableRunOptions::device_ordinal() const { return device_ordinal_; }
 
+ExecutableRunOptions& ExecutableRunOptions::set_physical_device_ordinal(
+    int physical_device_ordinal) {
+  physical_device_ordinal_ = physical_device_ordinal;
+  return *this;
+}
+
+int ExecutableRunOptions::physical_device_ordinal() const {
+  return physical_device_ordinal_;
+}
+
 ExecutableRunOptions& ExecutableRunOptions::set_allocator(
     stream_executor::DeviceMemoryAllocator* allocator) {
   allocator_ = allocator;
@@ -133,6 +143,17 @@ ExecutableRunOptions& ExecutableRunOptions::set_cpu_executable_run_options(
 const cpu::CpuExecutableRunOptions*
 ExecutableRunOptions::cpu_executable_run_options() const {
   return cpu_executable_run_options_;
+}
+
+ExecutableRunOptions& ExecutableRunOptions::set_ffi_execution_context(
+    const ffi::ExecutionContext* ffi_execution_context) {
+  ffi_execution_context_ = ffi_execution_context;
+  return *this;
+}
+
+const ffi::ExecutionContext* ExecutableRunOptions::ffi_execution_context()
+    const {
+  return ffi_execution_context_;
 }
 
 ExecutableRunOptions& ExecutableRunOptions::set_rng_seed(int rng_seed) {

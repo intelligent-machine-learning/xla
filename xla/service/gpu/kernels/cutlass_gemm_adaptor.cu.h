@@ -199,8 +199,9 @@ namespace adaptor_3x {
 template <typename Tag>
 static std::optional<Dim3> ClusterDim() {
   typename Traits<Tag>::Kernel::DispatchPolicy::ClusterShape cluster;
-  return Dim3{cute::get<0>(cluster), cute::get<1>(cluster),
-              cute::get<2>(cluster)};
+  return Dim3{static_cast<uint32_t>(cute::get<0>(cluster)),
+              static_cast<uint32_t>(cute::get<1>(cluster)),
+              static_cast<uint32_t>(cute::get<2>(cluster))};
 }
 
 template <typename Tag>
@@ -283,7 +284,9 @@ static void Initialize(void *params, const Arguments &args, int32_t device_sms,
   // defined by custom gemm kernel.
   static_assert(sizeof(typename Traits<Tag>::Params) <= 1024,
                 "Params struct size is too large");
-  static_assert(alignof(typename Traits<Tag>::Params) <= 64,
+  // The alignment check here needs to be consistent with the definition of
+  // Params in file cutlass_gemm_custom_kernel.cc
+  static_assert(alignof(typename Traits<Tag>::Params) <= 128,
                 "Params struct alignment is too large");
 
   // Convert CUTLASS operation arguments to a device kernel parameters.

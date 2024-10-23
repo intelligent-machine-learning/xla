@@ -16,23 +16,14 @@ limitations under the License.
 #define XLA_SERVICE_GPU_FUSIONS_MLIR_OPS
 
 include "mlir/IR/AttrTypeBase.td"
-include "mlir/IR/DialectBase.td"
 include "mlir/IR/OpBase.td"
 include "mlir/IR/SymbolInterfaces.td"
 include "mlir/IR/OpAsmInterface.td"
 include "mlir/Interfaces/CallInterfaces.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
-
-def XlaGpuDialect : Dialect {
-  let name = "xla_gpu";
-
-  let description = [{
-    This dialect contains ops required for lowering HLO to LLVM.
-  }];
-
-  let cppNamespace = "::xla::gpu";
-}
+include "xla/service/gpu/fusions/mlir/ir/xla_gpu_dialect.td"
+include "xla/service/gpu/fusions/mlir/ir/xla_gpu_attrs.td"
 
 class XLAGPU_Op<string mnemonic, list<Trait> traits = []> :
       Op<XlaGpuDialect, mnemonic, traits> {
@@ -107,6 +98,7 @@ def XLAGPU_AtomicRMWOp : XLAGPU_Op<"atomic_rmw",
       return getRegion().getArgument(0);
     }
   }];
+  let hasFolder = 1;
 
   let assemblyFormat = [{
     $input `[` $indices `]` `:` type($input) $computation attr-dict
@@ -231,6 +223,48 @@ def XLAGPU_PredicatedExtractOp : XLAGPU_Op<"predicated_extract",
   let assemblyFormat = [{
     $src `[` $indices `]` `if` $condition `else` $fallback attr-dict `:` type($src)
   }];
+}
+
+def ApplyIndexingOp : XLAGPU_Op<"apply_indexing", [Pure]> {
+  let summary = "Applies indexing map to a list of SSA values";
+  let description = [{
+    The `apply_indexing` operation applies an affine map to a list
+    of SSA values, yielding a single SSA value. The number of dimension and
+    symbol arguments must be equal to the respective number of dimensional and
+    symbolic inputs in the affine map. The affine mapping can be
+    multi-dimensional, and so the `apply_indexing` operation always returns one
+    value. The  operands and results must all have ‘index’ type.
+
+    Example:
+
+    ```mlir
+    #map = affine_map<(d0, d1)[s0] -> (d0 floordiv 8 + d1 floordiv 128, s0)>
+    %results:2 = xla_gpu_ops.apply_indexing #map (%0 in [0, 10], %1 in [0, 11])[%2 in [11, 32]]
+    ```
+  }];
+  let arguments = (ins Variadic<Index>:$operands,
+                   XLAGPU_IndexingMapAttr:$indexing_map_attr);
+  let results = (outs Variadic<Index>);
+
+  let builders = [
+    OpBuilder<(ins "mlir::ValueRange":$dims, "mlir::ValueRange":$symbols,
+                   "const IndexingMap&":$indexing_map)>,
+    OpBuilder<(ins "mlir::ValueRange":$operands,
+                   "IndexingMap":$indexing_map)>,
+    OpBuilder<(ins "mlir::ValueRange":$operands, "mlir::AffineMap":$affine_map,
+               "llvm::ArrayRef<DimVar>":$dim_vars,
+               "llvm::ArrayRef<RangeVar>":$range_vars)>,
+  ];
+  let extraClassDeclaration = [{
+    // Returns the indexing map constructed from affine_map and the bounds.
+    xla::gpu::IndexingMap getIndexingMap();
+    // Extracts the affine map from the attribute.
+    mlir::AffineMap getAffineMap() { return getIndexingMapAttr().getMap(); }
+  }];
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+  let hasCanonicalizer = 1;
+  let hasFolder = 1;
 }
 
 #endif // MLIR_HLO_DIALECT_MHLO_IR_HLO_OPS

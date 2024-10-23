@@ -20,6 +20,7 @@ limitations under the License.
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <memory>
 #include <optional>
@@ -39,15 +40,14 @@ limitations under the License.
 #include "absl/strings/str_format.h"
 #include "absl/synchronization/notification.h"
 #include "absl/types/span.h"
-#include "nanobind/nanobind.h"  // from @nanobind
-#include "nanobind/stl/optional.h"  // from @nanobind  // IWYU pragma: keep
-#include "nanobind/stl/shared_ptr.h"  // from @nanobind  // IWYU pragma: keep
-#include "nanobind/stl/string.h"  // from @nanobind  // IWYU pragma: keep
-#include "nanobind/stl/string_view.h"  // from @nanobind  // IWYU pragma: keep
-#include "nanobind/stl/vector.h"  // from @nanobind  // IWYU pragma: keep
+#include "nanobind/nanobind.h"
+#include "nanobind/stl/optional.h"  // IWYU pragma: keep
+#include "nanobind/stl/shared_ptr.h"  // IWYU pragma: keep
+#include "nanobind/stl/string.h"  // IWYU pragma: keep
+#include "nanobind/stl/string_view.h"  // IWYU pragma: keep
+#include "nanobind/stl/vector.h"  // IWYU pragma: keep
 #include "xla/pjrt/exceptions.h"
 #include "xla/pjrt/lru_cache.h"
-#include "xla/pjrt/pjrt_client.h"
 #include "xla/python/ifrt/array.h"
 #include "xla/python/ifrt/device.h"
 #include "xla/python/ifrt/memory.h"
@@ -63,8 +63,8 @@ limitations under the License.
 #include "xla/python/sharding.h"
 #include "xla/python/traceback.h"
 #include "xla/python/transfer_guard_lib.h"
+#include "xla/tsl/concurrency/ref_count.h"
 #include "xla/util.h"
-#include "tsl/concurrency/ref_count.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/logging.h"
 #include "tsl/platform/statusor.h"
@@ -333,7 +333,7 @@ PjitFunction::PjitFunction(
       shard_arg_fallback_(std::move(shard_arg_fallback)),
       cache_(std::move(cache)) {
   std::sort(static_argnums_.begin(), static_argnums_.end());
-  static_argnames.reserve(static_argnames.size());
+  static_argnames_.reserve(static_argnames.size());
   for (nb::str& name : static_argnames) {
     PyObject* s = name.inc_ref().ptr();
     PyUnicode_InternInPlace(&s);
@@ -377,10 +377,18 @@ PrepareIfrtInputs(const xla::PyLoadedExecutable& executable,
   std::vector<tsl::RCReference<xla::ifrt::Array>> num_args_arrays;
   num_args_arrays.reserve(num_args);
 
+  struct CopyGroup {
+    std::vector<int> indices;
+    std::vector<tsl::RCReference<xla::ifrt::Array>> arrays;
+  };
+  absl::flat_hash_map<std::pair<xla::ifrt::Device*, xla::ifrt::MemoryKind>,
+                      CopyGroup>
+      copy_groups;
+
   xla::DevicePutOptions options;
   options.squash_64bit_types = !enable_x64;
   options.allow_zero_copy = true;
-  xla::PjRtDevice* data_device = nullptr;
+  xla::ifrt::Device* data_device = nullptr;
   if (executable.ifrt_loaded_executable()->num_devices() == 1) {
     data_device = executable.ifrt_loaded_executable()->addressable_devices()[0];
   }
@@ -401,9 +409,15 @@ PrepareIfrtInputs(const xla::PyLoadedExecutable& executable,
         TF_RETURN_IF_ERROR(
             jax::ApplyTransferGuardToHostToDevice(transfer_guard_formatter));
         TF_ASSIGN_OR_RETURN(
-            xla::DevicePutResult on_device,
+            auto on_device_fn,
             DevicePut(arg, executable.ifrt_loaded_executable()->client(),
                       data_device, options, xla::ifrt::MemoryKind()));
+        TF_ASSIGN_OR_RETURN(xla::DevicePutResult on_device, [&]() {
+          // Must release the GIL before calling IFRT because backends may
+          // decide to block/sleep for device buffer allocation.
+          nb::gil_scoped_release gil_release;
+          return std::move(on_device_fn)();
+        }());
 
         num_args_arrays.push_back(std::move(on_device.ifrt_array));
         if (on_device.owning_pybuffer) {
@@ -448,23 +462,36 @@ PrepareIfrtInputs(const xla::PyLoadedExecutable& executable,
     // `PjitFunction::ComputeCallSignature()`.
     DCHECK(ifrt_array != nullptr) << "PyArray has been unexpectedly deleted.";
 
+    const auto& ifrt_sharding = ifrt_array->sharding();
     if (sharding_num_devices == 1 &&
-        ifrt_array->sharding().devices().front() != addressable_devices[0]) {
-      xla::ifrt::DeviceList::Devices ifrt_devices;
-      ifrt_devices.push_back(addressable_devices[0]);
-      auto sharding = xla::ifrt::OpaqueSharding::Create(
-          xla::ifrt::DeviceList(std::move(ifrt_devices)),
-          ifrt_array->sharding().memory_kind());
-      TF_ASSIGN_OR_RETURN(
-          auto copied_ifrt_array,
-          ifrt_array->Reshard(std::move(sharding),
-                              xla::ifrt::ArrayCopySemantics::kReuseInput));
-      num_args_arrays.push_back(std::move(copied_ifrt_array));
+        ifrt_sharding.devices().front() != addressable_devices[0]) {
+      auto& copy_group = copy_groups[std::make_pair(
+          ifrt_sharding.devices().front(), ifrt_sharding.memory_kind())];
+      copy_group.indices.push_back(num_args_arrays.size());
+      copy_group.arrays.push_back(tsl::FormRef(ifrt_array));
+      num_args_arrays.push_back({});
     } else {
       num_args_arrays.push_back(tsl::FormRef(ifrt_array));
     }
 
     keep_alive_objects.push_back(arg);
+  }
+
+  if (!copy_groups.empty()) {
+    xla::ifrt::Client* const ifrt_client =
+        executable.ifrt_loaded_executable()->client();
+    xla::ifrt::DeviceList ifrt_devices(
+        xla::ifrt::DeviceList::Devices({addressable_devices[0]}));
+    for (auto& [key, group] : copy_groups) {
+      TF_ASSIGN_OR_RETURN(
+          auto copied_ifrt_arrays,
+          ifrt_client->CopyArrays(absl::MakeSpan(group.arrays), ifrt_devices,
+                                  /*memory_kind=*/std::nullopt,
+                                  xla::ifrt::ArrayCopySemantics::kReuseInput));
+      for (int i = 0; i < copied_ifrt_arrays.size(); ++i) {
+        num_args_arrays[group.indices[i]] = std::move(copied_ifrt_arrays[i]);
+      }
+    }
   }
 
   return num_args_arrays;
@@ -578,6 +605,7 @@ absl::StatusOr<nb::object> PjitFunction::Call(nb::handle callable,
       nb::object out_and_fastpath_data;
       nb::tuple out_tuple;
       VLOG(2) << "Cache miss for " << call_signature.DebugString();
+      bool remove_cache = false;
       try {
         // Calls Python and may release the GIL. May also throw if
         // compilation/tracing fails.
@@ -588,6 +616,10 @@ absl::StatusOr<nb::object> PjitFunction::Call(nb::handle callable,
         out_tuple = nb::cast<nb::tuple>(out_and_fastpath_data);
 
         PopulateCacheEntry(*cache_entry, out_tuple);
+
+        if (out_tuple.size() > 2 && out_tuple[2].is_valid()) {
+          remove_cache = nb::cast<bool>(out_tuple[2]);
+        }
       } catch (const std::exception& e) {
         VLOG(2) << "cache miss fail: " << e.what();
         cache_entry->fall_back_to_python = true;
@@ -595,6 +627,10 @@ absl::StatusOr<nb::object> PjitFunction::Call(nb::handle callable,
         throw;
       }
       cache_entry->compilation_complete.Notify();
+
+      if (remove_cache) {
+        executables_->Remove(call_signature);
+      }
 
       // We have already computed the result in the miss path so we can return
       // it. We are even *required* to do so if there are donated arguments,
@@ -732,7 +768,7 @@ absl::Status PjitFunction::ComputeCallSignature(
 
 void PjitFunction::PopulateCacheEntry(PjitCacheEntry& cache_entry,
                                       const nb::tuple& out_and_fastpath_data) {
-  DCHECK_EQ(out_and_fastpath_data.size(), 2);
+  DCHECK_GE(out_and_fastpath_data.size(), 2);
 
   if (out_and_fastpath_data[1].is_none()) {
     VLOG(2) << "fastpath_data is none";
@@ -880,8 +916,10 @@ void PjitFunction_tp_dealloc(PyObject* self) {
   PyObject_ClearWeakRefs(self);
 #if PY_VERSION_HEX < 0x030C0000
   Py_CLEAR(o->dict);
-#else
+#elif PY_VERSION_HEX < 0x030D0000
   _PyObject_ClearManagedDict(self);
+#else
+  PyObject_ClearManagedDict(self);
 #endif  // PY_VERSION_HEX < 0x030C0000
   o->fun.~PjitFunction();
   tp->tp_free(self);
@@ -897,8 +935,10 @@ int PjitFunction_tp_traverse(PyObject* self, visitproc visit, void* arg) {
   Py_VISIT(Py_TYPE(self));
 #if PY_VERSION_HEX < 0x030C0000
   Py_VISIT(o->dict);
-#else
+#elif PY_VERSION_HEX < 0x030D0000
   _PyObject_VisitManagedDict(self, visit, arg);
+#else
+  PyObject_VisitManagedDict(self, visit, arg);
 #endif  // PY_VERSION_HEX < 0x030C0000
   Py_VISIT(o->fun.cache_miss().ptr());
   Py_VISIT(o->fun.shard_arg_fallback().ptr());
@@ -912,8 +952,10 @@ int PjitFunction_tp_clear(PyObject* self) {
   PjitFunctionObject* o = reinterpret_cast<PjitFunctionObject*>(self);
 #if PY_VERSION_HEX < 0x030C0000
   Py_CLEAR(o->dict);
-#else
+#elif PY_VERSION_HEX < 0x030D0000
   _PyObject_ClearManagedDict(self);
+#else
+  PyObject_ClearManagedDict(self);
 #endif  // PY_VERSION_HEX < 0x030C0000
   o->fun.ClearPythonReferences();
   return 0;
@@ -1056,7 +1098,14 @@ void BuildPjitSubmodule(nb::module_& m) {
   std::string name =
       absl::StrCat(nb::cast<std::string>(m.attr("__name__")), ".PjitFunction");
   PyType_Spec PjitFunction_spec = {
+#if PY_VERSION_HEX < 0x030B0000
+      // Work around for https://github.com/python/cpython/issues/89478
+      // CPython 3.10 and earlier assume that the .name value remains alive
+      // forever.
+      /*.name=*/strdup(name.c_str()),
+#else
       /*.name=*/name.c_str(),
+#endif  // PY_VERSION_HEX < 0x030B0000
       /*.basicsize=*/static_cast<int>(sizeof(PjitFunctionObject)),
       /*.itemsize=*/0,
 #if PY_VERSION_HEX < 0x030C0000

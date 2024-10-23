@@ -1,10 +1,9 @@
-load("@tsl//tsl:tsl.default.bzl", "tsl_pybind_extension")
-
 # NOTE: We can't use `pytype_pybind_extension` nor `pytype_strict_contrib_test`
 # because the OSS versions of these files do not include ports of those rules.
 # We must instead use `tsl_pybind_extension` and `py_strict_test`.
 load("//xla:pytype.default.bzl", "pytype_strict_library")
 load("//xla:strict.default.bzl", "py_strict_test")
+load("//xla/tsl:tsl.default.bzl", "tsl_pybind_extension")
 
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
@@ -43,13 +42,13 @@ pytype_strict_library(
     deps = [
         ":_types",  # buildcleaner: keep
         "//third_party/py/numpy",
-        "//xla:xla_data_proto_py_pb2",
+        "//xla:xla_data_proto_py",
         "@ml_dtypes",
     ],
 )
 
 # NOTE: Copybara detects the `tsl_pybind_extension` rule and automatically
-# injects the "@com_google_protobuf//:protobuf_python" python dependency
+# injects the @com_google_protobuf//:protobuf_python python dependency
 # required by "@pybind11_protobuf//pybind11_protobuf:native_proto_caster".
 tsl_pybind_extension(
     name = "_types",
@@ -87,7 +86,7 @@ py_strict_test(
         ":types",
         "//third_party/py/google/protobuf:use_fast_cpp_protos",  # Automatically added go/proto_python_upb_flip
         "//third_party/py/numpy",
-        "//xla:xla_data_proto_py_pb2",
+        "//xla:xla_data_proto_py",
         "@absl_py//absl/testing:absltest",
         "@absl_py//absl/testing:parameterized",
     ],

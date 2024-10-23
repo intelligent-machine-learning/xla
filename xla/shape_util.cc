@@ -34,6 +34,8 @@ limitations under the License.
 #include "absl/base/optimization.h"
 #include "absl/container/inlined_vector.h"
 #include "absl/functional/function_ref.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
@@ -48,9 +50,7 @@ limitations under the License.
 #include "xla/primitive_util.h"
 #include "xla/printer.h"
 #include "xla/shape.h"
-#include "xla/status.h"
 #include "xla/status_macros.h"
-#include "xla/statusor.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
 #include "tsl/platform/cpu_info.h"
@@ -214,10 +214,10 @@ Shape MakeTupleShapeImpl(absl::Span<ShapePtrOrRef> shapes) {
                                             const Shape& rhs) {
   bool equal = true;
   ForEachSubshape(lhs, [&](const Shape& /*subshape*/, const ShapeIndex& index) {
-    equal &= IndexIsValid(rhs, index);
+    equal = equal && IndexIsValid(rhs, index);
   });
   ForEachSubshape(rhs, [&](const Shape& /*subshape*/, const ShapeIndex& index) {
-    equal &= IndexIsValid(lhs, index);
+    equal = equal && IndexIsValid(lhs, index);
   });
 
   return equal;
@@ -437,7 +437,7 @@ ShapeUtil::MakeShapeWithDescendingLayoutAndSamePhysicalLayout(
   return new_shape;
 }
 
-/* static */ Status ShapeUtil::PopulateShape(
+/* static */ absl::Status ShapeUtil::PopulateShape(
     PrimitiveType element_type, absl::Span<const int64_t> dimensions,
     Shape* shape) {
   shape->Clear();
@@ -929,7 +929,7 @@ Shape ShapeUtil::PrependMajorDimension(int64_t bound, Shape shape) {
       shape,
       [&](const Shape& subshape, const ShapeIndex& index) -> absl::Status {
         if (subshape.IsTuple()) {
-          return OkStatus();
+          return absl::OkStatus();
         }
         if (!subshape.IsArray()) {
           return InvalidArgument("Shape cannot be serialiized: %s",
@@ -941,19 +941,22 @@ Shape ShapeUtil::PrependMajorDimension(int64_t bound, Shape shape) {
         if (subshape.element_type() == PRED) {
           // PRED is packed 8 elements per byte.
           size += CeilOfRatio<int64_t>(ElementsIn(subshape), 8);
-        } else if (primitive_util::Is4BitType(subshape.element_type())) {
+        } else if (primitive_util::IsSubByteNonPredType(
+                       subshape.element_type())) {
           // 4-bit types are packed 2 elements per byte.
-          size += CeilOfRatio<int64_t>(ElementsIn(subshape), 2);
+          size += CeilOfRatio<int64_t>(
+              ElementsIn(subshape),
+              8 / primitive_util::BitWidth(subshape.element_type()));
         } else {
           size += ByteSizeOfElements(subshape);
         }
-        return OkStatus();
+        return absl::OkStatus();
       }));
 
   return size;
 }
 
-/* static */ Status ShapeUtil::ValidateShapeWithOptionalLayoutInternal(
+/* static */ absl::Status ShapeUtil::ValidateShapeWithOptionalLayoutInternal(
     const Shape& shape) {
   if (shape.element_type() == PRIMITIVE_TYPE_INVALID ||
       !PrimitiveType_IsValid(shape.element_type())) {
@@ -968,7 +971,7 @@ Shape ShapeUtil::PrependMajorDimension(int64_t bound, Shape shape) {
       TF_RETURN_IF_ERROR(
           ValidateShapeWithOptionalLayoutInternal(element_shape));
     }
-    return OkStatus();
+    return absl::OkStatus();
   }
 
   // Non-tuple shape.
@@ -990,7 +993,7 @@ Shape ShapeUtil::PrependMajorDimension(int64_t bound, Shape shape) {
           primitive_util::LowercasePrimitiveTypeName(shape.element_type()),
           shape.ShortDebugString());
     }
-    return OkStatus();
+    return absl::OkStatus();
   }
 
   bool any_overflows = false;
@@ -1015,14 +1018,14 @@ Shape ShapeUtil::PrependMajorDimension(int64_t bound, Shape shape) {
   }
 
   TF_RETURN_IF_ERROR(ValidateShapeSize(shape));
-  return OkStatus();
+  return absl::OkStatus();
 }
 
-/* static */ Status ShapeUtil::ValidateShapeSize(const Shape& shape) {
+/* static */ absl::Status ShapeUtil::ValidateShapeSize(const Shape& shape) {
   VLOG(3) << "Validating shape size: " << ShapeUtil::HumanString(shape);
 
   if (!shape.IsArray()) {
-    return OkStatus();
+    return absl::OkStatus();
   }
 
   auto [extent_product, extent_overflow] =
@@ -1036,10 +1039,10 @@ Shape ShapeUtil::PrependMajorDimension(int64_t bound, Shape shape) {
   }
 
   VLOG(3) << "Shape size is valid: " << dense_shape_size;
-  return OkStatus();
+  return absl::OkStatus();
 }
 
-/* static */ Status ShapeUtil::ValidateShapeWithOptionalLayout(
+/* static */ absl::Status ShapeUtil::ValidateShapeWithOptionalLayout(
     const Shape& shape) {
   TF_RETURN_IF_ERROR(ValidateShapeWithOptionalLayoutInternal(shape));
 
@@ -1047,7 +1050,7 @@ Shape ShapeUtil::PrependMajorDimension(int64_t bound, Shape shape) {
                                            /*allow_missing_layouts=*/true);
 }
 
-/* static */ Status ShapeUtil::ValidateShape(const Shape& shape) {
+/* static */ absl::Status ShapeUtil::ValidateShape(const Shape& shape) {
   TF_RETURN_IF_ERROR(ValidateShapeWithOptionalLayoutInternal(shape));
 
   return LayoutUtil::ValidateLayoutInShape(shape);
@@ -1793,7 +1796,7 @@ ShapeUtil::DecomposeBitcastToTrt(const Shape& input_shape,
   return compatible;
 }
 
-/* static */ Status ShapeUtil::ForEachIndexWithStatus(
+/* static */ absl::Status ShapeUtil::ForEachIndexWithStatus(
     const Shape& shape, absl::Span<const int64_t> base,
     absl::Span<const int64_t> count, absl::Span<const int64_t> incr,
     const ForEachVisitorFunction& visitor_function) {
@@ -1824,7 +1827,7 @@ ShapeUtil::DecomposeBitcastToTrt(const Shape& input_shape,
                                              visitor_function));
 }
 
-/* static */ Status ShapeUtil::ForEachIndexParallelWithStatus(
+/* static */ absl::Status ShapeUtil::ForEachIndexParallelWithStatus(
     const Shape& shape, absl::Span<const int64_t> base,
     absl::Span<const int64_t> count, absl::Span<const int64_t> incr,
     const ForEachParallelVisitorFunction& visitor_function) {
@@ -1839,7 +1842,7 @@ ShapeUtil::DecomposeBitcastToTrt(const Shape& input_shape,
   TF_CHECK_OK(ForEachIndexParallelWithStatus(shape, visitor_function));
 }
 
-/* static */ Status ShapeUtil::ForEachIndexParallelWithStatus(
+/* static */ absl::Status ShapeUtil::ForEachIndexParallelWithStatus(
     const Shape& shape,
     const ForEachParallelVisitorFunction& visitor_function) {
   std::vector<int64_t> base(shape.dimensions_size());
@@ -1849,13 +1852,13 @@ ShapeUtil::DecomposeBitcastToTrt(const Shape& input_shape,
                                         visitor_function);
 }
 
-/* static */ Status ShapeUtil::ForEachIndexInternal(
+/* static */ absl::Status ShapeUtil::ForEachIndexInternal(
     const Shape& shape, absl::Span<const int64_t> base,
     absl::Span<const int64_t> count, absl::Span<const int64_t> incr,
     const ForEachVisitorFunction& visitor_function) {
   ForEachState s(shape, base, count, incr);
   if (s.IsZeroElementArray()) {
-    return OkStatus();
+    return absl::OkStatus();
   }
   // Allows handling R0 arrays, such that the visitor function will be called
   // once with the proper empty indexes.
@@ -1869,7 +1872,7 @@ ShapeUtil::DecomposeBitcastToTrt(const Shape& input_shape,
     // Increments dimensions in minor to major order.
     n = s.IncrementDim();
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 /* static */ void ShapeUtil::ForEachIndexInternalNoStatus(
@@ -1910,13 +1913,13 @@ struct ParallelState {
 
   absl::Mutex mu;
   tsl::thread::ThreadPool* pool;
-  Status status;  // Guarded by mu
+  absl::Status status;  // Guarded by mu
   absl::BlockingCounter counter;
 };
 
 }  // anonymous namespace
 
-/* static */ Status ShapeUtil::ForEachIndexInternalParallel(
+/* static */ absl::Status ShapeUtil::ForEachIndexInternalParallel(
     const Shape& shape, absl::Span<const int64_t> base,
     absl::Span<const int64_t> count, absl::Span<const int64_t> incr,
     const ForEachParallelVisitorFunction& visitor_function) {
@@ -1958,10 +1961,8 @@ struct ParallelState {
     absl::Span<int64_t const> dims_to_delete, Shape shape) {
   std::vector<int64_t> dims_to_delete_v(dims_to_delete.begin(),
                                         dims_to_delete.end());
-  absl::c_sort(dims_to_delete_v, std::greater<int64_t>());
-  for (int64_t dim : dims_to_delete_v) {
-    shape = DeleteDimension(dim, shape);
-  }
+  absl::c_sort(dims_to_delete_v);
+  shape.DeleteDimensions(dims_to_delete_v);
   return shape;
 }
 
@@ -1969,12 +1970,13 @@ struct ParallelState {
     absl::FunctionRef<bool(int64_t)> p, Shape shape) {
   CHECK(shape.IsArray());
   std::vector<int64_t> dims_to_delete;
-  for (int64_t i = shape.dimensions().size() - 1; i >= 0; --i) {
+  for (int64_t i = 0; i < shape.rank(); ++i) {
     if (!p(i)) {
       dims_to_delete.push_back(i);
     }
   }
-  return DeleteDimensions(dims_to_delete, shape);
+  shape.DeleteDimensions(dims_to_delete);
+  return shape;
 }
 
 // Returns the indices of the first elements of all consecutive subarrays of the
@@ -2132,7 +2134,8 @@ Shape ShapeUtil::DeviceShapeToHostShape(Shape s) {
 }
 
 /*static*/
-Status ShapeUtil::ByteStrides(const Shape& shape, absl::Span<int64_t> strides) {
+absl::Status ShapeUtil::ByteStrides(const Shape& shape,
+                                    absl::Span<int64_t> strides) {
   TF_RET_CHECK(shape.IsArray());
   TF_RET_CHECK(shape.has_layout());
   TF_RET_CHECK(shape.dimensions_size() == strides.size());
@@ -2142,7 +2145,7 @@ Status ShapeUtil::ByteStrides(const Shape& shape, absl::Span<int64_t> strides) {
     strides.at(i) = stride;
     stride *= shape.dimensions(i);
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 /*static*/

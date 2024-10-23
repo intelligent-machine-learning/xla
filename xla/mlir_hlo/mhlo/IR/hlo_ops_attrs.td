@@ -31,6 +31,8 @@ def MHLO_ScatterDimensionNumbers : AttrDef<MHLO_Dialect, "ScatterDimensionNumber
   let parameters = (ins
       MHLO_Dims:$updateWindowDims,
       MHLO_Dims:$insertedWindowDims,
+      MHLO_Dims:$inputBatchingDims,
+      MHLO_Dims:$scatterIndicesBatchingDims,
       MHLO_Dims:$scatterDimsToOperandDims,
       "int64_t":$indexVectorDim
   );
@@ -43,6 +45,8 @@ def MHLO_GatherDimensionNumbers : AttrDef<MHLO_Dialect, "GatherDimensionNumbers"
   let parameters = (ins
       MHLO_Dims:$offsetDims,
       MHLO_Dims:$collapsedSliceDims,
+      MHLO_Dims:$operandBatchingDims,
+      MHLO_Dims:$startIndicesBatchingDims,
       MHLO_Dims:$startIndexMap,
       "int64_t":$indexVectorDim
   );
@@ -237,7 +241,7 @@ def MHLO_TypeExtensions : AttrDef<MHLO_Dialect, "TypeExtensions", [
 // A layout attribute (1D tensor of index type)
 def MHLO_LayoutAttr : Attr<
   And<[IndexElementsAttr.predicate,
-       CPred<[{$_self.cast<::mlir::DenseIntElementsAttr>().getType().getRank()
+       CPred<[{mlir::cast<::mlir::DenseIntElementsAttr>($_self).getType().getRank()
                == 1}]>]>,
   "A 1D tensor of index type (layout)"> {
   let storageType = IndexElementsAttr.storageType;
@@ -282,32 +286,13 @@ def MHLO_SparsityDescriptor : AttrDef<MHLO_Dialect, "SparsityDescriptor"> {
 
 def MHLO_BoolElementsAttr :
     ElementsAttrBase<
-      And<[CPred<"$_self.isa<::mlir::DenseIntOrFPElementsAttr>()">,
-           CPred<"$_self.cast<::mlir::DenseIntOrFPElementsAttr>().getType().getElementType().isInteger(1)">]>,
+      And<[CPred<"mlir::isa<::mlir::DenseIntOrFPElementsAttr>($_self)">,
+           CPred<"mlir::cast<::mlir::DenseIntOrFPElementsAttr>($_self).getType().getElementType().isInteger(1)">]>,
       "constant boolean vector/tensor attribute"> {
   let storageType = [{ ::mlir::DenseElementsAttr }];
   let returnType = [{ ::mlir::DenseElementsAttr }];
 
   let convertFromStorage = "$_self";
-}
-
-def MHLO_ConvolutionAttributes {
-  dag attributes = (ins
-    // Default value: one for each of the spatial dimension.
-    OptionalAttr<I64ElementsAttr>:$window_strides,
-    // Default value: two zeros for each of the spatial dimension.
-    OptionalAttr<I64ElementsAttr>:$padding,
-    // Default value: one for each of the spatial dimension.
-    OptionalAttr<I64ElementsAttr>:$lhs_dilation,
-    // Default value: one for each of the spatial dimension.
-    OptionalAttr<I64ElementsAttr>:$rhs_dilation,
-    // Default value: false for each of the spatial dimension.
-    OptionalAttr<MHLO_BoolElementsAttr>:$window_reversal,
-    MHLO_ConvDimensionNumbers:$dimension_numbers,
-    I64Attr:$feature_group_count,
-    I64Attr:$batch_group_count,
-    MHLO_PrecisionConfigAttr:$precision_config
-  );
 }
 
 #endif // MLIR_HLO_DIALECT_MHLO_IR_HLO_OPS_ATTRS

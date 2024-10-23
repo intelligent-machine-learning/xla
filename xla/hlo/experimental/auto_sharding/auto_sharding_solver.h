@@ -20,10 +20,10 @@ limitations under the License.
 #include <vector>
 
 #include "absl/container/flat_hash_set.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "xla/hlo/experimental/auto_sharding/auto_sharding.pb.h"
 #include "xla/hlo/experimental/auto_sharding/auto_sharding_strategy.h"
-#include "xla/status.h"
 #include "ortools/linear_solver/linear_solver.h"
 
 namespace xla {
@@ -31,7 +31,6 @@ namespace spmd {
 
 struct AutoShardingSolverOutput {
   std::vector<NodeStrategyIdx> s_val;
-  std::vector<EdgeStrategyIdx> e_val;
   double cost = -1.0;
   absl::flat_hash_set<LivenessIdx> peak_times;
 
@@ -95,11 +94,6 @@ struct AutoShardingEvaluation {
 AutoShardingEvaluation Evaluate(const AutoShardingSolverRequest& request,
                                 const AutoShardingSolverResult& result);
 
-// Produces a list of rationales for why an alternate result may be suboptimal.
-std::vector<std::string> Rationalize(const AutoShardingSolverRequest& request,
-                                     const AutoShardingSolverResult& result,
-                                     const AutoShardingSolverResult& subopt);
-
 // Creates and returns a variable for makespan.
 operations_research::MPVariable* CreateMakespanVar(
     const AutoShardingSolverRequest& request,
@@ -142,7 +136,7 @@ class StrategyShaver {
 
 // Check fail if `request` is invalid (e.g., because of negative node costs).
 // Note: This does not include checks for valid variable aliasing yet.
-Status ValidateRequest(const AutoShardingSolverRequest& request);
+absl::Status ValidateRequest(const AutoShardingSolverRequest& request);
 
 }  // namespace spmd
 }  // namespace xla

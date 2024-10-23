@@ -987,6 +987,16 @@ TEST_F(ShapeInferenceTest, InferFftShapeTestFftRanks) {
   fft::Fail(shape, type, {64, 32, 16, 8}, fft::unsupported_rank);
 }
 
+TEST_F(ShapeInferenceTest, InferFftShapeTestFftRanksBounded) {
+  FftType type = FftType::FFT;
+  const Shape shape = ShapeUtil::MakeShape(C64, {16, 8}, {false, true});
+  fft::Fail(shape, type, {}, fft::unsupported_rank);
+  fft::Pass(shape, type, {8}, shape);
+  fft::Pass(shape, type, {16, 8}, shape);
+  fft::Fail(shape, type, {32, 16, 8}, fft::invalid_rank);
+  fft::Fail(shape, type, {64, 32, 16, 8}, fft::unsupported_rank);
+}
+
 TEST_F(ShapeInferenceTest, InferFftShapeTestFftTypes) {
   FftType type = FftType::FFT;
   const Shape shape_f32 = ShapeUtil::MakeShape(F32, {16, 8});
@@ -998,6 +1008,16 @@ TEST_F(ShapeInferenceTest, InferFftShapeTestFftTypes) {
 TEST_F(ShapeInferenceTest, InferFftShapeTestIfftRanks) {
   FftType type = FftType::IFFT;
   const Shape shape = ShapeUtil::MakeShape(C64, {16, 8});
+  fft::Fail(shape, type, {}, fft::unsupported_rank);
+  fft::Pass(shape, type, {8}, shape);
+  fft::Pass(shape, type, {16, 8}, shape);
+  fft::Fail(shape, type, {32, 16, 8}, fft::invalid_rank);
+  fft::Fail(shape, type, {64, 32, 16, 8}, fft::unsupported_rank);
+}
+
+TEST_F(ShapeInferenceTest, InferFftShapeTestIfftRanksBounded) {
+  FftType type = FftType::IFFT;
+  const Shape shape = ShapeUtil::MakeShape(C64, {16, 8}, {false, true});
   fft::Fail(shape, type, {}, fft::unsupported_rank);
   fft::Pass(shape, type, {8}, shape);
   fft::Pass(shape, type, {16, 8}, shape);
@@ -1042,6 +1062,12 @@ TEST_F(ShapeInferenceTest, InferFftShapeTestRfftDimensions) {
   const Shape shape_out = ShapeUtil::MakeShape(C64, {16, 5});
   fft::Pass(even_shape_in, type, {16, 8}, shape_out);
   fft::Pass(odd_shape_in, type, {16, 9}, shape_out);
+
+  const Shape bounded_shape_in =
+      ShapeUtil::MakeShape(F32, {16, 8}, {false, true});
+  const Shape bounded_shape_out =
+      ShapeUtil::MakeShape(C64, {16, 5}, {false, true});
+  fft::Pass(bounded_shape_in, type, {16, 8}, bounded_shape_out);
 }
 
 TEST_F(ShapeInferenceTest, InferFftShapeTestRfftTypes) {
@@ -1080,6 +1106,12 @@ TEST_F(ShapeInferenceTest, InferFftShapeTestIrfftDimensions) {
   const Shape odd_shape_out = ShapeUtil::MakeShape(F32, {16, 9});
   fft::Pass(shape, type, {16, 8}, even_shape_out);
   fft::Pass(shape, type, {16, 9}, odd_shape_out);
+
+  const Shape bounded_shape_in =
+      ShapeUtil::MakeShape(C64, {16, 5}, {false, true});
+  const Shape bounded_shape_out =
+      ShapeUtil::MakeShape(F32, {16, 9}, {false, true});
+  fft::Pass(bounded_shape_in, type, {16, 9}, bounded_shape_out);
 }
 
 TEST_F(ShapeInferenceTest, InferFftShapeTestIrfftTypes) {
@@ -4034,6 +4066,54 @@ TEST_P(UnboundedBinaryOpShapeInferenceTest, UnboundedAdd) {
   }
 }
 
+TEST_F(ShapeInferenceTest, UnboundedAllGather) {
+  TF_ASSERT_OK_AND_ASSIGN(const Shape operand, ParseShape("f32[?, 10]"));
+  TF_ASSERT_OK_AND_ASSIGN(const Shape expected, ParseShape("f32[?, 10]"));
+  TF_ASSERT_OK_AND_ASSIGN(
+      const Shape inferred_shape,
+      ShapeInference::InferAllGatherShape(
+          {&operand}, /*all_gather_dimension=*/0, /*shard_count=*/2));
+  EXPECT_TRUE(ShapeUtil::Equal(inferred_shape, expected))
+      << "inferred: " << ShapeUtil::HumanString(inferred_shape)
+      << " expected: " << ShapeUtil::HumanString(expected);
+}
+
+TEST_F(ShapeInferenceTest, UnboundedAllReduce) {
+  TF_ASSERT_OK_AND_ASSIGN(const Shape operand, ParseShape("f32[?, 10]"));
+  TF_ASSERT_OK_AND_ASSIGN(const Shape expected, ParseShape("f32[?, 10]"));
+  TF_ASSERT_OK_AND_ASSIGN(const Shape inferred_shape,
+                          ShapeInference::InferAllReduceShape({&operand}));
+  EXPECT_TRUE(ShapeUtil::Equal(inferred_shape, expected))
+      << "inferred: " << ShapeUtil::HumanString(inferred_shape)
+      << " expected: " << ShapeUtil::HumanString(expected);
+}
+
+TEST_F(ShapeInferenceTest, UnboundedAllToAll) {
+  TF_ASSERT_OK_AND_ASSIGN(const Shape operand, ParseShape("f32[?, 10]"));
+  TF_ASSERT_OK_AND_ASSIGN(const Shape expected, ParseShape("f32[?, 10]"));
+  TF_ASSERT_OK_AND_ASSIGN(
+      const Shape inferred_shape,
+      ShapeInference::InferAllToAllShape(/*shape=*/operand,
+                                         /*split_dimension=*/0,
+                                         /*concat_dimension=*/0,
+                                         /*split_count=*/3));
+  EXPECT_TRUE(ShapeUtil::Equal(inferred_shape, expected))
+      << "inferred: " << ShapeUtil::HumanString(inferred_shape)
+      << " expected: " << ShapeUtil::HumanString(expected);
+}
+
+TEST_F(ShapeInferenceTest, UnboundedAllToAllTupleUnsupported) {
+  TF_ASSERT_OK_AND_ASSIGN(const Shape operand, ParseShape("f32[?, 10]"));
+  TF_ASSERT_OK_AND_ASSIGN(const Shape expected,
+                          ParseShape("(f32[?, 10], f32[?, 10])"));
+  const absl::StatusOr<Shape> inferred_shape =
+      ShapeInference::InferAllToAllTupleShape(
+          /*operand_shapes=*/{&operand, &operand});
+  EXPECT_THAT(
+      inferred_shape.status().message(),
+      HasSubstr("AllToAllTuple does not support unbounded dynamic shapes"));
+}
+
 TEST_P(UnboundedLogicalOpShapeInferenceTest, UnboundedAnd) {
   TF_ASSERT_OK_AND_ASSIGN(const Shape lhs, ParseShape(GetParam().lhs));
   TF_ASSERT_OK_AND_ASSIGN(const Shape rhs, ParseShape(GetParam().rhs));
@@ -4194,6 +4274,20 @@ TEST_F(ShapeInferenceTest, UnboundedBroadcastInDimUnsupported) {
               HasSubstr("Non-broadcast dimensions must not be dynamic."));
 }
 
+TEST_F(ShapeInferenceTest, UnboundedCall) {
+  TF_ASSERT_OK_AND_ASSIGN(const Shape operand0, ParseShape("f32[?, 10]"));
+  TF_ASSERT_OK_AND_ASSIGN(const Shape operand1, ParseShape("f32[10, ?]"));
+  TF_ASSERT_OK_AND_ASSIGN(const Shape expected, ParseShape("f32[?, 10]"));
+  TF_ASSERT_OK_AND_ASSIGN(const Shape inferred_shape,
+                          ShapeInference::InferCallShape(
+                              /*arg_shapes=*/{&operand0, &operand1},
+                              /*to_apply=*/ShapeUtil::MakeProgramShape(
+                                  {operand1, operand0}, operand0)));
+  EXPECT_TRUE(ShapeUtil::Equal(inferred_shape, expected))
+      << "inferred: " << ShapeUtil::HumanString(inferred_shape)
+      << " expected: " << ShapeUtil::HumanString(expected);
+}
+
 TEST_F(ShapeInferenceTest, UnboundedCholesky) {
   TF_ASSERT_OK_AND_ASSIGN(const Shape a, ParseShape("f32[?, 10]"));
   TF_ASSERT_OK_AND_ASSIGN(const Shape expected, ParseShape("f32[?, 10]"));
@@ -4231,6 +4325,28 @@ TEST_F(ShapeInferenceTest, UnboundedClampWithTuple) {
       inferred_shape.status().message(),
       HasSubstr(
           "Expected array argument for clamp min, but got (f32[2], f32[?])."));
+}
+
+TEST_F(ShapeInferenceTest, UnboundedCollectiveBroadcast) {
+  TF_ASSERT_OK_AND_ASSIGN(const Shape operand, ParseShape("f32[?, 10]"));
+  TF_ASSERT_OK_AND_ASSIGN(const Shape expected, ParseShape("f32[?, 10]"));
+  TF_ASSERT_OK_AND_ASSIGN(const Shape inferred_shape,
+                          ShapeInference::InferCollectiveBroadcastShape(
+                              /*operand_shapes=*/{&operand}));
+  EXPECT_TRUE(ShapeUtil::Equal(inferred_shape, expected))
+      << "inferred: " << ShapeUtil::HumanString(inferred_shape)
+      << " expected: " << ShapeUtil::HumanString(expected);
+}
+
+TEST_F(ShapeInferenceTest, UnboundedCollectivePermute) {
+  TF_ASSERT_OK_AND_ASSIGN(const Shape operand, ParseShape("f32[?, 10]"));
+  TF_ASSERT_OK_AND_ASSIGN(const Shape expected, ParseShape("f32[?, 10]"));
+  TF_ASSERT_OK_AND_ASSIGN(const Shape inferred_shape,
+                          ShapeInference::InferCollectivePermuteShape(
+                              /*operand_shapes=*/{&operand}));
+  EXPECT_TRUE(ShapeUtil::Equal(inferred_shape, expected))
+      << "inferred: " << ShapeUtil::HumanString(inferred_shape)
+      << " expected: " << ShapeUtil::HumanString(expected);
 }
 
 TEST_P(UnboundedCompareOpShapeInferenceTest, UnboundedCompare) {
@@ -4424,6 +4540,70 @@ TEST_F(ShapeInferenceTest, UnboundedDynamicSlice) {
       ShapeInference::InferDynamicSliceShape(
           operand, /*start_index_shapes=*/{start_index, start_index},
           /*slice_sizes=*/{2, 2}, /*allow_scalar_indices=*/true));
+  EXPECT_TRUE(ShapeUtil::Equal(inferred_shape, expected))
+      << "inferred: " << ShapeUtil::HumanString(inferred_shape)
+      << " expected: " << ShapeUtil::HumanString(expected);
+}
+
+TEST_F(ShapeInferenceTest, UnboundedDynamicUpdateSlice) {
+  TF_ASSERT_OK_AND_ASSIGN(const Shape operand, ParseShape("f32[?, 10]"));
+  TF_ASSERT_OK_AND_ASSIGN(const Shape update, ParseShape("f32[?, 5]"));
+  TF_ASSERT_OK_AND_ASSIGN(const Shape start_index, ParseShape("s32[]"));
+  TF_ASSERT_OK_AND_ASSIGN(const Shape expected, ParseShape("f32[?, 10]"));
+  TF_ASSERT_OK_AND_ASSIGN(
+      const Shape inferred_shape,
+      ShapeInference::InferDynamicUpdateSliceShape(
+          operand, update, /*start_index_shapes=*/{start_index, start_index},
+          /*allow_scalar_indices=*/true));
+  EXPECT_TRUE(ShapeUtil::Equal(inferred_shape, expected))
+      << "inferred: " << ShapeUtil::HumanString(inferred_shape)
+      << " expected: " << ShapeUtil::HumanString(expected);
+}
+
+TEST_F(ShapeInferenceTest, UnboundedFftWithFFT) {
+  TF_ASSERT_OK_AND_ASSIGN(const Shape operand, ParseShape("c64[2, <=5, ?]"));
+  const std::vector<int64_t> fft_length = {5, 10};
+  TF_ASSERT_OK_AND_ASSIGN(const Shape expected, ParseShape("c64[2, <=5, ?]"));
+  TF_ASSERT_OK_AND_ASSIGN(const Shape inferred_shape,
+                          ShapeInference::InferFftShape(
+                              operand, /*fft_type=*/FftType::FFT, fft_length));
+  EXPECT_TRUE(ShapeUtil::Equal(inferred_shape, expected))
+      << "inferred: " << ShapeUtil::HumanString(inferred_shape)
+      << " expected: " << ShapeUtil::HumanString(expected);
+}
+
+TEST_F(ShapeInferenceTest, UnboundedFftWithIFFT) {
+  TF_ASSERT_OK_AND_ASSIGN(const Shape operand, ParseShape("c64[2, <=5, ?]"));
+  const std::vector<int64_t> fft_length = {5, 10};
+  TF_ASSERT_OK_AND_ASSIGN(const Shape expected, ParseShape("c64[2, <=5, ?]"));
+  TF_ASSERT_OK_AND_ASSIGN(const Shape inferred_shape,
+                          ShapeInference::InferFftShape(
+                              operand, /*fft_type=*/FftType::IFFT, fft_length));
+  EXPECT_TRUE(ShapeUtil::Equal(inferred_shape, expected))
+      << "inferred: " << ShapeUtil::HumanString(inferred_shape)
+      << " expected: " << ShapeUtil::HumanString(expected);
+}
+
+TEST_F(ShapeInferenceTest, UnboundedFftWithRFFT) {
+  TF_ASSERT_OK_AND_ASSIGN(const Shape operand, ParseShape("f64[2, <=5, ?]"));
+  const std::vector<int64_t> fft_length = {5, 10};
+  TF_ASSERT_OK_AND_ASSIGN(const Shape expected, ParseShape("c128[2, <=5, 6]"));
+  TF_ASSERT_OK_AND_ASSIGN(const Shape inferred_shape,
+                          ShapeInference::InferFftShape(
+                              operand, /*fft_type=*/FftType::RFFT, fft_length));
+  EXPECT_TRUE(ShapeUtil::Equal(inferred_shape, expected))
+      << "inferred: " << ShapeUtil::HumanString(inferred_shape)
+      << " expected: " << ShapeUtil::HumanString(expected);
+}
+
+TEST_F(ShapeInferenceTest, UnboundedFftWithIRFFT) {
+  TF_ASSERT_OK_AND_ASSIGN(const Shape operand, ParseShape("c128[2, <=5, ?]"));
+  const std::vector<int64_t> fft_length = {5, 10};
+  TF_ASSERT_OK_AND_ASSIGN(const Shape expected, ParseShape("f64[2, <=5, 10]"));
+  TF_ASSERT_OK_AND_ASSIGN(
+      const Shape inferred_shape,
+      ShapeInference::InferFftShape(operand, /*fft_type=*/FftType::IRFFT,
+                                    fft_length));
   EXPECT_TRUE(ShapeUtil::Equal(inferred_shape, expected))
       << "inferred: " << ShapeUtil::HumanString(inferred_shape)
       << " expected: " << ShapeUtil::HumanString(expected);
@@ -4638,6 +4818,18 @@ TEST_F(ShapeInferenceTest, UnboundedReducePrecision) {
                                                 /*mantissa_bits=*/2));
   ASSERT_TRUE(ShapeUtil::Equal(inferred, expected))
       << "inferred: " << ShapeUtil::HumanString(inferred)
+      << " expected: " << ShapeUtil::HumanString(expected);
+}
+
+TEST_F(ShapeInferenceTest, UnboundedReduceScatter) {
+  TF_ASSERT_OK_AND_ASSIGN(const Shape operand, ParseShape("f32[?, 10]"));
+  TF_ASSERT_OK_AND_ASSIGN(const Shape expected, ParseShape("f32[?, 10]"));
+  TF_ASSERT_OK_AND_ASSIGN(const Shape inferred_shape,
+                          ShapeInference::InferReduceScatterShape(
+                              /*operand_shapes=*/{&operand},
+                              /*scatter_dimension=*/0, /*shard_count=*/2));
+  EXPECT_TRUE(ShapeUtil::Equal(inferred_shape, expected))
+      << "inferred: " << ShapeUtil::HumanString(inferred_shape)
       << " expected: " << ShapeUtil::HumanString(expected);
 }
 

@@ -25,7 +25,6 @@ limitations under the License.
 #include <cstdint>
 #include <functional>
 #include <iosfwd>
-#include <list>
 #include <map>
 #include <memory>
 #include <optional>
@@ -37,23 +36,25 @@ limitations under the License.
 #include <vector>
 
 #include "absl/base/attributes.h"
-#include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/container/inlined_vector.h"
 #include "absl/functional/function_ref.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
-#include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "xla/comparison_util.h"
+#include "xla/hlo/ir/backend_config.h"
+#include "xla/hlo/ir/collective_device_list.h"
 #include "xla/hlo/ir/dfs_hlo_visitor.h"
 #include "xla/hlo/ir/hlo_clone_context.h"
 #include "xla/hlo/ir/hlo_domain_metadata.h"
 #include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/hlo/ir/hlo_original_value.h"
 #include "xla/hlo/ir/hlo_sharding.h"
 #include "xla/hlo/ir/ptrvec.h"
-#include "xla/iterator_util.h"
 #include "xla/layout.h"
 #include "xla/literal.h"
 #include "xla/printer.h"
@@ -62,8 +63,6 @@ limitations under the License.
 #include "xla/service/name_uniquer.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
-#include "xla/status.h"
-#include "xla/statusor.h"
 #include "xla/xla_data.pb.h"
 #include "tsl/lib/gtl/iterator_range.h"
 #include "tsl/platform/errors.h"
@@ -675,6 +674,7 @@ class HloInstruction {
   };
 
   inline static constexpr char kMainExecutionThread[] = "main";
+  inline static constexpr char kHostThread[] = "host";
 
   virtual ~HloInstruction() { DetachFromOperandsAndUsers(); }
 
@@ -857,6 +857,13 @@ class HloInstruction {
   // order of inputs from different participants.
   static std::unique_ptr<HloInstruction> CreateAllGather(
       const Shape& shape, absl::Span<HloInstruction* const> operands,
+      int64_t all_gather_dimension, const CollectiveDeviceList& device_list,
+      bool constrain_layout, const std::optional<int64_t>& channel_id,
+      bool use_global_device_ids);
+
+  ABSL_DEPRECATED("Use CollectiveDeviceList instead of list of ReplicaGroup.")
+  static std::unique_ptr<HloInstruction> CreateAllGather(
+      const Shape& shape, absl::Span<HloInstruction* const> operands,
       int64_t all_gather_dimension,
       absl::Span<const ReplicaGroup> replica_groups, bool constrain_layout,
       const std::optional<int64_t>& channel_id, bool use_global_device_ids);
@@ -868,6 +875,13 @@ class HloInstruction {
   // except that the order of the group members determines the concatenation
   // order of inputs from different participants. Needs to be used in
   // conjunction of a AllGatherDone op that synchronizes and returns the result.
+  static std::unique_ptr<HloInstruction> CreateAllGatherStart(
+      const Shape& shape, absl::Span<HloInstruction* const> operands,
+      int64_t all_gather_dimension, const CollectiveDeviceList& device_list,
+      bool constrain_layout, const std::optional<int64_t>& channel_id,
+      bool use_global_device_ids);
+
+  ABSL_DEPRECATED("Use CollectiveDeviceList instead of list of ReplicaGroup.")
   static std::unique_ptr<HloInstruction> CreateAllGatherStart(
       const Shape& shape, absl::Span<HloInstruction* const> operands,
       int64_t all_gather_dimension,
@@ -890,12 +904,27 @@ class HloInstruction {
   static std::unique_ptr<HloInstruction> CreateAllReduce(
       const Shape& shape, absl::Span<HloInstruction* const> operands,
       HloComputation* reduce_computation,
+      const CollectiveDeviceList& device_list, bool constrain_layout,
+      const std::optional<int64_t>& channel_id, bool use_global_device_ids);
+
+  ABSL_DEPRECATED("Use CollectiveDeviceList instead of list of ReplicaGroup.")
+  static std::unique_ptr<HloInstruction> CreateAllReduce(
+      const Shape& shape, absl::Span<HloInstruction* const> operands,
+      HloComputation* reduce_computation,
       absl::Span<const ReplicaGroup> replica_groups, bool constrain_layout,
       const std::optional<int64_t>& channel_id, bool use_global_device_ids);
 
   // Creates a reduce-scatter operation which reduces its inputs across the
   // given replica groups and then scatters the reduced data across the N
   // participants.
+  static std::unique_ptr<HloInstruction> CreateReduceScatter(
+      const Shape& shape, absl::Span<HloInstruction* const> operands,
+      HloComputation* reduce_computation,
+      const CollectiveDeviceList& device_list, bool constrain_layout,
+      const std::optional<int64_t>& channel_id, bool use_global_device_ids,
+      int64_t scatter_dimension);
+
+  ABSL_DEPRECATED("Use CollectiveDeviceList instead of list of ReplicaGroup.")
   static std::unique_ptr<HloInstruction> CreateReduceScatter(
       const Shape& shape, absl::Span<HloInstruction* const> operands,
       HloComputation* reduce_computation,
@@ -916,6 +945,13 @@ class HloInstruction {
   // `channel_id`: for Allreduce nodes from different modules, if
   // they have the same channel_id, they will be 'Allreduce'd. If
   // empty, Allreduce will not be applied cross modules.
+  static std::unique_ptr<HloInstruction> CreateAllReduceStart(
+      const Shape& shape, absl::Span<HloInstruction* const> operands,
+      HloComputation* reduce_computation,
+      const CollectiveDeviceList& device_list, bool constrain_layout,
+      const std::optional<int64_t>& channel_id, bool use_global_device_ids);
+
+  ABSL_DEPRECATED("Use CollectiveDeviceList instead of list of ReplicaGroup.")
   static std::unique_ptr<HloInstruction> CreateAllReduceStart(
       const Shape& shape, absl::Span<HloInstruction* const> operands,
       HloComputation* reduce_computation,
@@ -950,6 +986,13 @@ class HloInstruction {
   // performs AllToAll and then concatenates the results into a single array.
   static std::unique_ptr<HloInstruction> CreateAllToAll(
       const Shape& shape, absl::Span<HloInstruction* const> operands,
+      const CollectiveDeviceList& device_list, bool constrain_layout,
+      const std::optional<int64_t>& channel_id,
+      const std::optional<int64_t>& split_dimension = std::nullopt);
+
+  ABSL_DEPRECATED("Use CollectiveDeviceList instead of list of ReplicaGroup.")
+  static std::unique_ptr<HloInstruction> CreateAllToAll(
+      const Shape& shape, absl::Span<HloInstruction* const> operands,
       absl::Span<const ReplicaGroup> replica_groups, bool constrain_layout,
       const std::optional<int64_t>& channel_id,
       const std::optional<int64_t>& split_dimension = std::nullopt);
@@ -960,12 +1003,12 @@ class HloInstruction {
   // on that replica is a tensor consists of 0(s) in `shape`.
   static std::unique_ptr<HloInstruction> CreateCollectiveBroadcast(
       const Shape& shape, absl::Span<HloInstruction* const> operand,
-      absl::Span<const ReplicaGroup> replica_groups, bool constrain_layout,
+      const CollectiveDeviceList& device_list, bool constrain_layout,
       const std::optional<int64_t>& channel_id);
 
+  ABSL_DEPRECATED("Use CollectiveDeviceList instead of list of ReplicaGroup.")
   static std::unique_ptr<HloInstruction> CreateCollectiveBroadcast(
-      const Shape& shape, HloInstruction* input, HloInstruction* output,
-      HloInstruction* input_start_indices, HloInstruction* output_start_indices,
+      const Shape& shape, absl::Span<HloInstruction* const> operand,
       absl::Span<const ReplicaGroup> replica_groups, bool constrain_layout,
       const std::optional<int64_t>& channel_id);
 
@@ -1355,7 +1398,7 @@ class HloInstruction {
 
   // Creates a Afterall instruction used for joining or creating new values of
   // token type which thread through side-effecting operations. Operands must
-  // all be tokens, and there must be at least one operand.
+  // all be tokens, calls without operands generates a token.
   static std::unique_ptr<HloInstruction> CreateAfterAll(
       absl::Span<HloInstruction* const> operands);
 
@@ -1456,19 +1499,19 @@ class HloInstruction {
   // This is used to enforce an additional ordering requirement that is not
   // captured by normal data dependencies, such as ordering among Send or Recv
   // operations to avoid deadlock.
-  Status AddControlDependencyTo(HloInstruction* instruction);
+  absl::Status AddControlDependencyTo(HloInstruction* instruction);
 
   // Removes a previously added control dependency from this instruction to
   // 'instruction'.
-  Status RemoveControlDependencyTo(HloInstruction* instruction);
+  absl::Status RemoveControlDependencyTo(HloInstruction* instruction);
 
   // Drops all control predecessors and successors from this HLO instruction.
-  Status DropAllControlDeps();
+  absl::Status DropAllControlDeps();
 
   // Drops all control predecessors and successors from this HLO instruction,
   // and the maintain the transitivie control dependencies between
   // control predecessors and control successors.
-  Status SafelyDropAllControlDependencies();
+  absl::Status SafelyDropAllControlDependencies();
 
   // Returns if instruction has any control dependencies.
   bool HasControlDependencies() const;
@@ -1480,7 +1523,7 @@ class HloInstruction {
   // Depending on the use cases we see in practice, in the future we may
   // consider folding the logic here into Clone, CloneWithNewOperands and
   // ReplaceAllUsesWith by treating control dependencies like data dependencies.
-  Status CopyAllControlDepsFrom(const HloInstruction* inst) {
+  absl::Status CopyAllControlDepsFrom(const HloInstruction* inst) {
     return inst->CopyAllControlDepsTo(this, this);
   }
 
@@ -1488,7 +1531,8 @@ class HloInstruction {
   // all control predecessors of this instruction to control predecessors of
   // `start` and copies all control successors of this instruction to control
   // successors of `end`.
-  Status CopyAllControlDepsTo(HloInstruction* start, HloInstruction* end) const;
+  absl::Status CopyAllControlDepsTo(HloInstruction* start,
+                                    HloInstruction* end) const;
 
   // Returns the set of control predecessors (successors) of this
   // instruction. Control predecessors (successors) must execute before (after)
@@ -1584,32 +1628,35 @@ class HloInstruction {
   //
   // If user is a fusion instruction, this function will remove any duplicated
   // operands of it which could be created due to this replacement.
-  Status ReplaceUseWith(HloInstruction* user, HloInstruction* new_producer);
+  absl::Status ReplaceUseWith(HloInstruction* user,
+                              HloInstruction* new_producer);
 
   // Same as ReplaceUseWith(), but new_producer can have a different shape.
-  Status ReplaceUseWithDifferentShape(HloInstruction* user,
-                                      HloInstruction* new_producer);
+  absl::Status ReplaceUseWithDifferentShape(HloInstruction* user,
+                                            HloInstruction* new_producer);
 
   // Same as ReplaceUseWith but only replaces the use at the given operand
   // number.
-  Status ReplaceUseWith(HloInstruction* user, int operand_number,
-                        HloInstruction* new_producer);
-  Status ReplaceUseWithDifferentShape(HloInstruction* user, int operand_number,
-                                      HloInstruction* new_producer);
+  absl::Status ReplaceUseWith(HloInstruction* user, int operand_number,
+                              HloInstruction* new_producer);
+  absl::Status ReplaceUseWithDifferentShape(HloInstruction* user,
+                                            int operand_number,
+                                            HloInstruction* new_producer);
 
   // Replaces the specified operand with new_operand. The old and new operands
   // must have compatible shapes ignoring floating-point precision.
   //
   // This function does NOT remove duplicated operands even if this instruction
   // is a fusion, so that the existing operand numbers do not change.
-  Status ReplaceOperandWith(int64_t operand_num, HloInstruction* new_operand);
+  absl::Status ReplaceOperandWith(int64_t operand_num,
+                                  HloInstruction* new_operand);
 
   // Same as ReplaceOperandWith(), but new_operand can have a different shape.
-  Status ReplaceOperandWithDifferentShape(int64_t operand_num,
-                                          HloInstruction* new_operand);
+  absl::Status ReplaceOperandWithDifferentShape(int64_t operand_num,
+                                                HloInstruction* new_operand);
 
   // Decomposes fusion back to individual parts.
-  Status Defuse();
+  absl::Status Defuse();
 
   // Replaces all uses of this instruction with the new producer. If
   // new_producer is a user of this instruction then new_producer remains a use
@@ -1626,16 +1673,16 @@ class HloInstruction {
   //
   // trigger is a string used in the error message if the new and the
   // current instruction don't have a compatible shape.
-  Status ReplaceAllUsesWith(HloInstruction* new_producer,
-                            absl::string_view trigger = "");
+  absl::Status ReplaceAllUsesWith(HloInstruction* new_producer,
+                                  absl::string_view trigger = "");
 
   // Same as ReplaceAllUsesWith, but new_producer can have a different shape.
-  Status ReplaceAllUsesWithDifferentShape(HloInstruction* new_producer);
+  absl::Status ReplaceAllUsesWithDifferentShape(HloInstruction* new_producer);
 
   // Same as ReplaceAllUsesWith, but only replace given set of users.
-  Status ReplaceUsesWith(absl::Span<HloInstruction* const> users,
-                         HloInstruction* new_producer);
-  Status ReplaceAllUsesWithDifferentShape(
+  absl::Status ReplaceUsesWith(absl::Span<HloInstruction* const> users,
+                               HloInstruction* new_producer);
+  absl::Status ReplaceAllUsesWithDifferentShape(
       absl::Span<HloInstruction* const> users, HloInstruction* new_producer);
 
   // Performs a postorder DFS visit using this node as the root. If
@@ -1647,13 +1694,14 @@ class HloInstruction {
   // true, DFS will go across the computation boundary (i.e., from an
   // instruction to the root instruction of a computation it calls).
   template <typename HloInstructionPtr>
-  Status Accept(DfsHloVisitorBase<HloInstructionPtr>* visitor,
-                bool call_finish_visit = true,
-                bool ignore_control_predecessors = false,
-                bool cross_computation = false);
-  Status Accept(ConstDfsHloVisitor* visitor, bool call_finish_visit = true,
-                bool ignore_control_predecessors = false,
-                bool cross_computation = false) const {
+  absl::Status Accept(DfsHloVisitorBase<HloInstructionPtr>* visitor,
+                      bool call_finish_visit = true,
+                      bool ignore_control_predecessors = false,
+                      bool cross_computation = false);
+  absl::Status Accept(ConstDfsHloVisitor* visitor,
+                      bool call_finish_visit = true,
+                      bool ignore_control_predecessors = false,
+                      bool cross_computation = false) const {
     return const_cast<HloInstruction*>(this)->Accept(
         visitor, call_finish_visit, ignore_control_predecessors,
         cross_computation);
@@ -1664,14 +1712,14 @@ class HloInstruction {
   // true, A is visited before B.
   using CompareFunction =
       absl::FunctionRef<bool(const HloInstruction*, const HloInstruction*)>;
-  Status AcceptWithOperandOrder(DfsHloVisitor* visitor,
-                                CompareFunction operand_order,
-                                bool call_finish_visit = true);
+  absl::Status AcceptWithOperandOrder(DfsHloVisitor* visitor,
+                                      CompareFunction operand_order,
+                                      bool call_finish_visit = true);
 
   // Visit this instruction and only this instruction with the given visitor.
   template <typename HloInstructionPtr>
-  Status Visit(DfsHloVisitorBase<HloInstructionPtr>* visitor);
-  Status Visit(ConstDfsHloVisitor* visitor) const {
+  absl::Status Visit(DfsHloVisitorBase<HloInstructionPtr>* visitor);
+  absl::Status Visit(ConstDfsHloVisitor* visitor) const {
     return const_cast<HloInstruction*>(this)->Visit(visitor);
   }
 
@@ -2005,6 +2053,14 @@ class HloInstruction {
   // SetAndSanitizeName().
   void UniquifyName(NameUniquer* name_uniquer);
 
+  // Use the `module`'s name uniquer to select a unique name for this
+  // instruction based on the instruction's existing name.
+  void UniquifyName(HloModule* module);
+
+  // Use the `module`s `NewUniqueInstructionId` to set the id of this
+  // instruction.
+  void UniquifyId(HloModule* module);
+
   // Clear the unique ID of the instruction so that it can be re-assigned, such
   // as for the purpose of compacting the instruction unique IDs.
   void ClearUniqueIdInternal() { unique_id_ = -1; }
@@ -2020,38 +2076,14 @@ class HloInstruction {
   // if no id has been assigned yet).
   int unique_id() const { return unique_id_; }
 
-  template <typename T>
-  using EnableIfProto = typename std::enable_if_t<
-      std::is_base_of<tsl::protobuf::Message, T>::value>;
-
-  // Returns the backend-specific configuration for how a backend should compile
-  // this HLO. The meaning of the field is backend specific. Not for use before
-  // or during general HLO optimization, since HLO optimizations do not preserve
-  // this field and they cannot interpret it due to its meaning being backend
-  // specific. Except for CustomCall, where this field is preserved and no
-  // general HLO optimization needs to interpret it.
-  //
-  // ConfigProto should be a protobuf Message type.
-  template <typename ConfigProto, EnableIfProto<ConfigProto>* = nullptr>
-  StatusOr<ConfigProto> backend_config() const {
-    ConfigProto proto;
-    TF_RETURN_IF_ERROR(GetBackendConfigInternal(&proto));
-    return std::move(proto);
-  }
-
-  Status set_backend_config(const tsl::protobuf::Message& proto) {
-    backend_config_ = proto;
-    return OkStatus();
-  }
-
   bool preserve_layout() const { return metadata_->preserve_layout(); }
 
   bool has_backend_config() const { return !backend_config_.empty(); }
 
-  void clear_backend_config() { backend_config_.clear(); }
+  void clear_backend_config() { backend_config_ = BackendConfigWrapper(); }
 
   void CopyBackendConfigFrom(const HloInstruction* other) {
-    backend_config_ = other->backend_config_.Clone();
+    backend_config_ = BackendConfigWrapper(other->backend_config_);
   }
 
   void set_frontend_attributes(FrontendAttributes frontend_attributes) {
@@ -2099,29 +2131,41 @@ class HloInstruction {
 
   const StatisticsViz& statistics_viz() const { return rare()->statistics_viz; }
 
+  template <typename T>
+  using EnableIfProto = typename std::enable_if_t<
+      std::is_base_of<tsl::protobuf::Message, T>::value>;
+
+  // Returns the backend-specific configuration for how a backend should compile
+  // this HLO. The meaning of the field is backend specific. Not for use before
+  // or during general HLO optimization, since HLO optimizations do not preserve
+  // this field and they cannot interpret it due to its meaning being backend
+  // specific. Except for CustomCall, where this field is preserved and no
+  // general HLO optimization needs to interpret it.
+  //
+  // ConfigProto should be a protobuf Message type.
+  template <typename ConfigProto, EnableIfProto<ConfigProto>* = nullptr>
+  absl::StatusOr<ConfigProto> backend_config() const {
+    ConfigProto proto;
+    TF_RETURN_IF_ERROR(backend_config_.GetProto(&proto));
+    return std::move(proto);
+  }
+
+  absl::Status set_backend_config(const tsl::protobuf::Message& proto) {
+    backend_config_ = BackendConfigWrapper(proto);
+    return absl::OkStatus();
+  }
+
   // Getter/setter for raw JSON-encoded backend config.  Prefer the
   // functions above that deal in proto Messages where possible.
   const std::string& raw_backend_config_string() const {
     return backend_config_.GetRawString();
   }
   void set_raw_backend_config_string(std::string config_str) {
-    backend_config_ = std::move(config_str);
+    backend_config_ = BackendConfigWrapper(std::move(config_str));
   }
 
   bool is_default_config() const { return is_default_config_; }
   void set_default_config() { is_default_config_ = true; }
-
-  // Returns a string representation of a proto in the format used by
-  // raw_backend_config_string.
-  //
-  // This is morally equivalent to:
-  //
-  //   HloInstruction instr;
-  //   TF_RETURN_IF_ERROR(instr.set_backend_config(proto));
-  //   return instr.raw_backend_config_string();
-  //
-  static absl::StatusOr<std::string> BackendConfigToRawString(
-      const tsl::protobuf::Message& proto);
 
   // Returns the information used to tell the implementation information about
   // what sort of precision is requested. The meaning of the field is backend
@@ -2154,6 +2198,9 @@ class HloInstruction {
   }
   void set_metadata_preserve_layout(bool preserve_layout) {
     metadata_->set_preserve_layout(preserve_layout);
+  }
+  void set_metadata_scheduling_name(const std::string& name) {
+    metadata_->set_scheduling_name(name);
   }
   const OpMetadata& metadata() const { return *metadata_; }
 
@@ -2345,7 +2392,12 @@ class HloInstruction {
   Shape* mutable_outfeed_shape();
 
   // Delegates to HloCollectiveInstruction::replica_groups.
+  // TODO(b/316622399): Remove usages of this method and replace with
+  // device_list()->replica_groups().
   const std::vector<ReplicaGroup>& replica_groups() const;
+
+  // Delegates to HloCollectiveInstruction::device_list.
+  const CollectiveDeviceList& device_list() const;
 
   // Delegates to HloCollectivePermuteInstruction::source_target_pairs.
   const std::vector<std::pair<int64_t, int64_t>>& source_target_pairs() const;
@@ -2484,6 +2536,11 @@ class HloInstruction {
   const std::vector<std::pair<ShapeIndex, std::pair<int64_t, ShapeIndex>>>&
   output_operand_aliasing() const;
 
+  // Delegates to HloCallableInstruction::set_output_to_operand_aliasing().
+  void set_output_to_operand_aliasing(
+      std::vector<std::pair<ShapeIndex, std::pair<int64_t, ShapeIndex>>>
+          aliasing);
+
   // Appends operand to the list of operands and adds this instruction as a user
   // of the operand.
   void AppendOperand(HloInstruction* operand);
@@ -2492,6 +2549,9 @@ class HloInstruction {
 
   HloInstruction(const HloInstruction&) = delete;
   HloInstruction& operator=(const HloInstruction&) = delete;
+
+  std::shared_ptr<OriginalValue> original_value() const;
+  void set_original_value(std::shared_ptr<OriginalValue> original_value);
 
  protected:
   // Internal constructor for a given opcode/shape, other fields must be filled
@@ -2536,56 +2596,6 @@ class HloInstruction {
 
  private:
   friend class HloComputation;
-  // Wrapper class of string format and protobuf format of BackendConfig.
-  class BackendConfigRep {
-   public:
-    const tsl::protobuf::Message* GetProtoPtr() const { return proto_.get(); }
-
-    const std::string& GetRawString() const;
-
-    BackendConfigRep Clone() const;
-
-    bool operator==(const BackendConfigRep& other) const;
-    bool operator!=(const BackendConfigRep& other) const {
-      return !(*this == other);
-    }
-
-    bool empty() const {
-      absl::MutexLock lock{&mutex_};
-      return proto_ == nullptr && raw_string_.empty();
-    }
-
-    void clear() {
-      proto_.reset();
-      absl::MutexLock lock{&mutex_};
-      raw_string_.clear();
-    }
-
-    BackendConfigRep() = default;
-    BackendConfigRep(BackendConfigRep&& other)
-        : proto_(std::move(other.proto_)), raw_string_([&] {
-            absl::MutexLock lock{&other.mutex_};
-            return std::move(other.raw_string_);
-          }()) {}
-
-    BackendConfigRep& operator=(std::string raw_string);
-    BackendConfigRep& operator=(const tsl::protobuf::Message& proto);
-    BackendConfigRep& operator=(BackendConfigRep&& other) {
-      proto_ = std::move(other.proto_);
-      absl::MutexLock destination_lock{&mutex_};
-      absl::MutexLock source_lock{&other.mutex_};
-      raw_string_ = std::move(other.raw_string_);
-      return *this;
-    }
-
-    void SetProto(const tsl::protobuf::Message& proto);
-
-   private:
-    std::unique_ptr<tsl::protobuf::Message> proto_;
-    // If proto_ is not null, raw_string_ is a lazy cache of its string format.
-    mutable absl::Mutex mutex_;
-    mutable std::string raw_string_ ABSL_GUARDED_BY(mutex_);
-  };
 
   bool IdenticalInternal(
       const HloInstruction& other,
@@ -2641,7 +2651,7 @@ class HloInstruction {
 
   // Helper for implementing backend_config().  Parses backend_config_ into the
   // given proto.
-  Status GetBackendConfigInternal(tsl::protobuf::Message* proto) const;
+  absl::Status GetBackendConfigInternal(tsl::protobuf::Message* proto) const;
 
   // Mark this instruction as dead. Accessed by friend class HloInstruction.
   void MarkAsDead() { marked_as_dead_ = true; }
@@ -2788,10 +2798,14 @@ class HloInstruction {
 
   // The backend-specific configuration for how a backend should compile this
   // HLO. See the documentation on backend_config().
-  mutable BackendConfigRep backend_config_;
+  BackendConfigWrapper backend_config_;
 
   // String identifier for instruction.
   std::string name_;
+
+  // Original value this instruction corresponds to in the unoptimized HLO
+  // graph.
+  std::shared_ptr<OriginalValue> original_value_ = nullptr;
 
   // Metadata for debugging.  Allocate it on heap, so that it does not increase
   // the memory footprint of HloInstruction.
@@ -2799,11 +2813,12 @@ class HloInstruction {
 };
 
 // Explicit instantiations in hlo_instruction.cc.
-extern template Status HloInstruction::Accept(DfsHloVisitor*, bool, bool, bool);
-extern template Status HloInstruction::Accept(ConstDfsHloVisitor*, bool, bool,
-                                              bool);
-extern template Status HloInstruction::Visit(DfsHloVisitor* visitor);
-extern template Status HloInstruction::Visit(ConstDfsHloVisitor* visitor);
+extern template absl::Status HloInstruction::Accept(DfsHloVisitor*, bool, bool,
+                                                    bool);
+extern template absl::Status HloInstruction::Accept(ConstDfsHloVisitor*, bool,
+                                                    bool, bool);
+extern template absl::Status HloInstruction::Visit(DfsHloVisitor* visitor);
+extern template absl::Status HloInstruction::Visit(ConstDfsHloVisitor* visitor);
 
 absl::string_view ToString(HloInstruction::FusionKind kind);
 absl::StatusOr<HloInstruction::FusionKind> StringToFusionKind(
@@ -2820,8 +2835,6 @@ std::string AlgorithmToString(const PrecisionConfig::Algorithm& algorithm);
 std::string DotDimensionNumbersToString(const DotDimensionNumbers& dnums);
 std::string ConvolutionDimensionNumbersToString(
     const ConvolutionDimensionNumbers& dnums);
-std::string ReplicaGroupsToString(
-    absl::Span<const ReplicaGroup> replica_groups);
 
 absl::StatusOr<RandomAlgorithm> StringToRandomAlgorithm(
     const std::string& name);
@@ -2863,6 +2876,12 @@ template <HloOpcode op, HloOpcode... rest>
 bool HloPredicateIsOp(const HloInstruction* instruction) {
   return (instruction->opcode() == op) ||
          ((instruction->opcode() == rest) || ...);
+}
+
+template <HloOpcode op, HloOpcode... rest>
+bool HloPredicateIsNotOp(const HloInstruction* instruction) {
+  return (instruction->opcode() != op) &&
+         ((instruction->opcode() != rest) && ...);
 }
 
 /* static */ inline bool HloInstruction::MightHaveCalledComputations(

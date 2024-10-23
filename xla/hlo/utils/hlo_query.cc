@@ -16,13 +16,16 @@ limitations under the License.
 #include "xla/hlo/utils/hlo_query.h"
 
 #include <algorithm>
+#include <cstdint>
 
 #include "absl/algorithm/container.h"
+#include "absl/strings/string_view.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/literal.h"
+#include "xla/service/pattern_matcher.h"
 #include "xla/shape_util.h"
 
 namespace xla {
@@ -247,5 +250,41 @@ bool HasX64TransformedHostTransfer(const HloModule& module) {
   return false;
 }
 
+HloInstruction* GetUniqueGteInstruction(const HloInstruction* operand,
+                                        int64_t index) {
+  HloInstruction* gte = nullptr;
+  for (HloInstruction* instr : operand->parent()->MakeInstructionPostOrder()) {
+    if (!Match(instr, match::GetTupleElement().WithTupleIndex(index))) {
+      continue;
+    }
+    if (instr->operand(0) != operand) {
+      continue;
+    }
+    // If gte is not unique, return nullptr.
+    if (gte != nullptr) {
+      return nullptr;
+    }
+    gte = instr;
+  }
+  return gte;
+}
+
+bool IsBeforeInComputation(const HloComputation* computation,
+                           absl::string_view inst1, absl::string_view inst2) {
+  int index1 = -1;
+  int index2 = -1;
+  int current_index = 0;
+  for (auto instruction : computation->instructions()) {
+    if (instruction->name() == inst1) {
+      index1 = current_index;
+    }
+    if (instruction->name() == inst2) {
+      index2 = current_index;
+    }
+    current_index++;
+  }
+  current_index++;
+  return index1 < index2;
+}
 }  // namespace hlo_query
 }  // namespace xla

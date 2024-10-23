@@ -37,7 +37,6 @@ limitations under the License.
 #include "xla/shape_layout.h"
 #include "xla/shape_tree.h"
 #include "xla/shape_util.h"
-#include "xla/statusor.h"
 #include "xla/stream_executor/device_memory.h"
 #include "xla/stream_executor/device_memory_allocator.h"
 #include "xla/stream_executor/tpu/c_api_decl.h"
@@ -233,6 +232,12 @@ SE_DeviceMemoryAllocator ToC(
     }
   };
   return se_allocator;
+}
+
+stream_executor::DeviceMemoryAllocator* FromC(
+    const SE_DeviceMemoryAllocator& c_allocator) {
+  return reinterpret_cast<stream_executor::DeviceMemoryAllocator*>(
+      c_allocator.ctx);
 }
 
 SE_MaybeOwningDeviceMemory ToC(stream_executor::OwningDeviceMemory* mem) {
@@ -549,7 +554,7 @@ XLA_HloModuleConfig ToC(const xla::HloModuleConfig& config) {
 
   if (config.has_static_device_assignment()) {
     xla::DeviceAssignmentProto dev_proto;
-    config.static_device_assignment().Serialize(&dev_proto).IgnoreError();
+    config.static_device_assignment().Serialize(&dev_proto);
     hlo_config.static_device_assignment =
         stream_executor::tpu::SerializeProto(dev_proto);
   }

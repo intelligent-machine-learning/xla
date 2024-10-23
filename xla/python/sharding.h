@@ -22,7 +22,7 @@ limitations under the License.
 
 // placeholder for index annotation headers
 #include "absl/hash/hash.h"
-#include "nanobind/nanobind.h"  // from @nanobind
+#include "nanobind/nanobind.h"
 #include "xla/hlo/ir/hlo_sharding.h"
 #include "xla/pjrt/status_casters.h"
 #include "xla/python/ifrt/device.h"
@@ -66,14 +66,7 @@ size_t ShardingHash(nanobind::handle sharding);
 
 bool ShardingEqual(nanobind::handle a, nanobind::handle b);
 
-class XLACompatibleSharding : public Sharding {
- public:
-  using Sharding::Sharding;
-
-  ~XLACompatibleSharding() override = default;
-};
-
-class NamedSharding : public XLACompatibleSharding {
+class NamedSharding : public Sharding {
  public:
   NamedSharding(nanobind::object mesh, nanobind::object spec,
                 nanobind::object memory_kind, nanobind::object parsed_pspec,
@@ -106,7 +99,7 @@ class NamedSharding : public XLACompatibleSharding {
   xla::nb_class_ptr<PyDeviceList> internal_device_list_;
 };
 
-class SingleDeviceSharding : public XLACompatibleSharding {
+class SingleDeviceSharding : public Sharding {
  public:
   explicit SingleDeviceSharding(
       nanobind::object device, nanobind::object memory_kind = nanobind::none());
@@ -136,7 +129,7 @@ class SingleDeviceSharding : public XLACompatibleSharding {
 
 // The C++ implementation of jax.PmapSharding in python. It contains a few key
 // data members and methods that are performance-critical.
-class PmapSharding : public XLACompatibleSharding {
+class PmapSharding : public Sharding {
  public:
   PmapSharding(xla::nb_numpy_ndarray devices, ShardingSpec sharding_spec);
 
@@ -161,7 +154,7 @@ class PmapSharding : public XLACompatibleSharding {
   xla::nb_class_ptr<PyDeviceList> internal_device_list_;
 };
 
-class GSPMDSharding : public XLACompatibleSharding {
+class GSPMDSharding : public Sharding {
  public:
   GSPMDSharding(nanobind::sequence devices, xla::OpSharding op_sharding,
                 nanobind::object memory_kind, nanobind::object device_list)

@@ -27,10 +27,10 @@ limitations under the License.
 #include "absl/hash/hash.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
-#include "nanobind/make_iterator.h"  // from @nanobind
-#include "nanobind/nanobind.h"  // from @nanobind
-#include "nanobind/stl/string.h"  // from @nanobind  // IWYU pragma: keep
-#include "xla/pjrt/pjrt_client.h"
+#include "nanobind/make_iterator.h"
+#include "nanobind/nanobind.h"
+#include "nanobind/stl/string.h"  // IWYU pragma: keep
+#include "nanobind/stl/string_view.h"  // IWYU pragma: keep
 #include "xla/python/ifrt/device.h"
 #include "xla/python/nb_class_ptr.h"
 #include "xla/python/nb_helpers.h"
@@ -53,7 +53,7 @@ PyDeviceList::PyDeviceList(nb::tuple py_device_assignment)
     : device_list_(py_device_assignment) {
   // Attempt to convert to Python devices into `ifrt::DeviceList`.
   if (py_device_assignment.size() == 0) {
-    device_list_ = xla::ifrt::DeviceList({});
+    device_list_ = xla::ifrt::DeviceList();
     return;
   }
   xla::ifrt::DeviceList::Devices devices;
@@ -247,7 +247,7 @@ bool PyDeviceList::IsFullyAddressable() {
         const int process_index = py_client_ ? py_client_->process_index() : 0;
         for (const xla::ifrt::Device* device :
              std::get<0>(device_list_).devices()) {
-          if (device->process_index() != process_index) {
+          if (device->ProcessIndex() != process_index) {
             is_fully_addressable_ = false;
             break;
           }
@@ -286,7 +286,7 @@ bool PyDeviceList::IsFullyAddressable() {
             self->py_client_ ? self->py_client_->process_index() : 0;
         for (xla::ifrt::Device* device :
              std::get<0>(self->device_list_).devices()) {
-          if (device->process_index() == process_index) {
+          if (device->ProcessIndex() == process_index) {
             addressable_devices.push_back(device);
           }
         }
@@ -326,15 +326,10 @@ void PyDeviceList::PopulateMemoryKindInfo() {
     throw nb::value_error("Unrecognized DeviceList type");
   }
   MemoryKindInfo info;
-  if (!GetEnableMemories()) {
-    info.default_memory_kind = nb::none();
-    memory_kind_info_ = std::move(info);
-    return;
-  }
   xla::ifrt::Device* addressable_device = nullptr;
   const int process_index = py_client_ ? py_client_->process_index() : 0;
   for (xla::ifrt::Device* device : std::get<0>(device_list_).devices()) {
-    if (device->process_index() == process_index) {
+    if (device->ProcessIndex() == process_index) {
       addressable_device = device;
       break;
     }
@@ -345,20 +340,19 @@ void PyDeviceList::PopulateMemoryKindInfo() {
     return;
   }
 
-  auto default_memory = addressable_device->default_memory_space();
+  auto default_memory = addressable_device->DefaultMemory();
   if (!default_memory.ok()) {
     // Cache the error.
     memory_kind_info_ = default_memory.status();
     return;
   }
-  info.default_memory_kind =
-      nb::cast(std::string((*default_memory)->memory_space_kind()));
-  nb::tuple memory_kinds = nb::steal<nb::tuple>(
-      PyTuple_New(addressable_device->memory_spaces().size()));
-  for (size_t i = 0; i < addressable_device->memory_spaces().size(); ++i) {
-    auto* memory = addressable_device->memory_spaces()[i];
-    nb::str s = nb::str(memory->memory_space_kind().data(),
-                        memory->memory_space_kind().size());
+  info.default_memory_kind = nb::cast(*(*default_memory)->Kind().memory_kind());
+  nb::tuple memory_kinds =
+      nb::steal<nb::tuple>(PyTuple_New(addressable_device->Memories().size()));
+  for (size_t i = 0; i < addressable_device->Memories().size(); ++i) {
+    auto* memory = addressable_device->Memories()[i];
+    nb::str s = nb::str(memory->Kind().memory_kind()->data(),
+                        memory->Kind().memory_kind()->size());
     PyTuple_SET_ITEM(memory_kinds.ptr(), i, s.release().ptr());
   }
   info.memory_kinds = std::move(memory_kinds);
@@ -367,12 +361,6 @@ void PyDeviceList::PopulateMemoryKindInfo() {
 
 void PyDeviceList::PopulateMemoryKindInfoForDuckTypedDevices() {
   MemoryKindInfo info;
-  if (!GetEnableMemories()) {
-    info.default_memory_kind = nb::none();
-    // info.memory_kinds is default-initialized to an empty tuple.
-    memory_kind_info_ = std::move(info);
-    return;
-  }
   try {
     nb::handle addressable_device;
     for (nb::handle device : std::get<1>(device_list_)) {
@@ -400,6 +388,9 @@ void PyDeviceList::PopulateMemoryKindInfoForDuckTypedDevices() {
 }
 
 absl::StatusOr<nb::tuple> PyDeviceList::MemoryKinds() {
+  if (!GetEnableMemories()) {
+    return nb::tuple();
+  }
   if (!memory_kind_info_.has_value()) {
     PopulateMemoryKindInfo();
   }
@@ -410,6 +401,9 @@ absl::StatusOr<nb::tuple> PyDeviceList::MemoryKinds() {
 }
 
 absl::StatusOr<nb::object> PyDeviceList::DefaultMemoryKind() {
+  if (!GetEnableMemories()) {
+    return nb::none();
+  }
   if (!memory_kind_info_.has_value()) {
     PopulateMemoryKindInfo();
   }

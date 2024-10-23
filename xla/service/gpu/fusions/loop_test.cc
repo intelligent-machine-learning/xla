@@ -12,21 +12,21 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-#include "xla/service/gpu/fusions/loop.h"
 
 #include <memory>
 #include <optional>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include "mlir/IR/MLIRContext.h"  // from @llvm-project
+#include "absl/status/statusor.h"
+#include "mlir/IR/MLIRContext.h"
+#include "xla/service/gpu/fusions/fusion_emitter.h"
 #include "xla/service/gpu/fusions/fusions.h"
 #include "xla/service/gpu/gpu_device_info_for_tests.h"
 #include "xla/service/gpu/hlo_fusion_analysis.h"
 #include "xla/service/gpu/model/affine_map_printer.h"
 #include "xla/service/gpu/model/indexing_test_utils.h"
 #include "xla/status_macros.h"
-#include "xla/statusor.h"
 #include "xla/stream_executor/device_description.h"
 #include "xla/tests/hlo_test_base.h"
 #include "tsl/platform/statusor.h"
@@ -54,8 +54,7 @@ class LoopTest : public HloTestBase {
 
 absl::StatusOr<std::unique_ptr<KernelFusionInterface>> GetFusion(
     const HloFusionAnalysis& analysis) {
-  TF_ASSIGN_OR_RETURN(
-      auto emitter, GetFusionEmitter(PreBufferAssignmentFusionInfo{analysis}));
+  auto emitter = GetFusionEmitter(PreBufferAssignmentFusionInfo{analysis});
   auto fusion = dynamic_cast<KernelFusionInterface*>(emitter.get());
   TF_RET_CHECK(fusion != nullptr);
 
@@ -89,9 +88,9 @@ TEST_F(LoopTest, ThreadIndexingUnrolled) {
   EXPECT_THAT(thread_id_to_output_indexing->ToString(printer_),
               MatchIndexingString(R"(
   (th_x, th_y, th_z, bl_x, bl_y, bl_z)[chunk_id, unroll_id] -> (
-   (((bl_x * 16 + th_x floordiv 8) floordiv 3 + chunk_id * 5376) floordiv 625) mod 100,
-   (((th_x + bl_x * 128) floordiv 3 + chunk_id * 43008) floordiv 25) mod 200,
-   (th_x * 4 + bl_x * 512 + chunk_id * 516096) mod 300 + unroll_id
+    (bl_x * 128 + chunk_id * 129024 + th_x) floordiv 15000,
+    ((bl_x * 128 + chunk_id * 129024 + th_x) floordiv 75) mod 200,
+    ((bl_x * 128 + chunk_id * 129024 + th_x) mod 75) * 4 + unroll_id
   )
   domain:
   th_x in [0, 127]
@@ -102,7 +101,7 @@ TEST_F(LoopTest, ThreadIndexingUnrolled) {
   bl_z in [0, 0]
   chunk_id in [0, 11]
   unroll_id in [0, 3]
-  (th_x + bl_x * 128) * 4 + chunk_id * 516096 in [0, 5999996]
+  bl_x * 128 + chunk_id * 129024 + th_x in [0, 1499999]
 )"));
 }
 
@@ -184,9 +183,9 @@ TEST_F(LoopTest, Broadcast) {
   EXPECT_THAT(thread_id_to_output_indexing->ToString(printer_),
               MatchIndexingString(R"(
               (th_x, th_y, th_z, bl_x, bl_y, bl_z)[chunk_id, unroll_id] -> (
-                ((bl_x * 16 + th_x floordiv 8) floordiv 75) mod 10,
-                ((bl_x * 64 + th_x floordiv 2) floordiv 15) mod 20,
-                (th_x + bl_x * 128) mod 30)
+                (bl_x * 128 + th_x) floordiv 600,
+                ((bl_x * 128 + th_x) floordiv 30) mod 20,
+                (bl_x * 128 + th_x) mod 30)
                 domain:
                 th_x in [0, 127]
                 th_y in [0, 0]
@@ -196,15 +195,15 @@ TEST_F(LoopTest, Broadcast) {
                 bl_z in [0, 0]
                 chunk_id in [0, 0]
                 unroll_id in [0, 0]
-                th_x + bl_x * 128 in [0, 5999]
+                bl_x * 128 + th_x in [0, 5999]
             )"));
   auto thread_id_to_input_indexing =
       loop_fusion->ComputeThreadIdToInputIndexing(
           /*root_index=*/0, /*hero_operand_index=*/0, &mlir_context_);
   EXPECT_THAT(thread_id_to_input_indexing->ToString(printer_),
               MatchIndexingString(R"(
-              (th_x, th_y, th_z, bl_x, bl_y, bl_z)[chunk_id, unroll_id] -> (
-                ((bl_x * 64 + th_x floordiv 2) floordiv 15) mod 20)
+              (th_x, th_y, th_z, bl_x, bl_y, bl_z)[chunk_id, unroll_id] ->
+                  (((bl_x * 128 + th_x) floordiv 30) mod 20)
                 domain:
                 th_x in [0, 127]
                 th_y in [0, 0]
@@ -214,7 +213,7 @@ TEST_F(LoopTest, Broadcast) {
                 bl_z in [0, 0]
                 chunk_id in [0, 0]
                 unroll_id in [0, 0]
-                th_x + bl_x * 128 in [0, 5999]
+                bl_x * 128 + th_x in [0, 5999]
             )"));
 }
 

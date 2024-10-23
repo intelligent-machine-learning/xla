@@ -26,13 +26,15 @@ limitations under the License.
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "xla/hlo/ir/hlo_module.h"
+#include "xla/service/gpu/gpu_symbol_repository.h"
 #include "xla/service/platform_util.h"
+#include "xla/service/symbol_repository.h"
 #include "xla/service/xla_compile_result.pb.h"
 #include "xla/stream_executor/device_description.pb.h"
 #include "xla/tests/hlo_test_base.h"
 #include "xla/tests/test_macros.h"
+#include "xla/tsl/lib/core/status_test_util.h"
 #include "xla/util.h"
-#include "tsl/lib/core/status_test_util.h"
 #include "tsl/platform/env.h"
 #include "tsl/platform/env_time.h"
 #include "tsl/platform/path.h"
@@ -40,6 +42,11 @@ limitations under the License.
 #include "tsl/platform/statusor.h"
 #include "tsl/platform/test.h"
 #include "tsl/protobuf/error_codes.pb.h"
+#include "tsl/protobuf/status.pb.h"
+
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+#include "xla/service/gpu/autotuner_util.h"
+#endif
 
 namespace xla {
 namespace {
@@ -80,16 +87,16 @@ class XlaCompileLibTest : public HloTestBase {
 
 TEST_F(XlaCompileLibTest, DISABLED_ON_GPU(CompilesForCpu)) {
   CompilationResult result;
-  EXPECT_THAT(
-      CompileExecutable(std::move(module_), "cpu", std::nullopt, result),
-      IsOkAndHolds(Not(IsEmpty())));
+  EXPECT_THAT(CompileExecutable(std::move(module_), BackendType::kCpu,
+                                std::nullopt, result),
+              IsOkAndHolds(Not(IsEmpty())));
 }
 
 TEST_F(XlaCompileLibTest, DISABLED_ON_CPU(CompilesForGpuWithDevice)) {
   CompilationResult result;
-  EXPECT_THAT(
-      CompileExecutable(std::move(module_), "gpu", std::nullopt, result),
-      IsOkAndHolds(Not(IsEmpty())));
+  EXPECT_THAT(CompileExecutable(std::move(module_), BackendType::kGpu,
+                                std::nullopt, result),
+              IsOkAndHolds(Not(IsEmpty())));
   EXPECT_TRUE(result.has_hlo_module()) << result.DebugString();
 }
 
@@ -101,16 +108,16 @@ TEST_F(XlaCompileLibTest, DISABLED_ON_CPU(CompilesForGpuWithoutDevice)) {
   TF_ASSERT_OK(tsl::ReadTextProto(tsl::Env::Default(), target_config_path,
                                   &target_config));
   CompilationResult result;
-  EXPECT_THAT(
-      CompileExecutable(std::move(module_), "gpu", std::nullopt, result),
-      IsOkAndHolds(Not(IsEmpty())));
+  EXPECT_THAT(CompileExecutable(std::move(module_), BackendType::kGpu,
+                                std::nullopt, result),
+              IsOkAndHolds(Not(IsEmpty())));
   EXPECT_TRUE(result.has_hlo_module()) << result.DebugString();
 }
 
 TEST_F(XlaCompileLibTest, DISABLED_ON_GPU(ErrorsOnUnexpectedPlatform)) {
-  CompilationResult result;
-  EXPECT_THAT(CompileExecutable(nullptr, "tpu", std::nullopt, result),
-              StatusIs(tsl::error::UNIMPLEMENTED));
+  XlaCompileOptions options;
+  options.platform = "tpu";
+  EXPECT_THAT(XlaCompileMain(options), StatusIs(tsl::error::UNIMPLEMENTED));
 }
 
 TEST_F(XlaCompileLibTest, DISABLED_ON_GPU(WriteResultFilePropagatesErrors)) {
@@ -172,17 +179,21 @@ TEST_F(XlaCompileLibTest, DISABLED_ON_GPU(MainForCpu)) {
                                       module_->ToString()));
 
   const std::string output_path =
-      tsl::io::JoinPath(tsl::testing::TmpDir(), "output");
+      tsl::io::JoinPath(tsl::testing::TmpDir(), "cpu_output");
   const std::string result_file =
-      tsl::io::JoinPath(tsl::testing::TmpDir(), "result.pb");
+      tsl::io::JoinPath(tsl::testing::TmpDir(), "cpu_result.pb");
 
-  TF_EXPECT_OK(XlaCompileMain(module_file, output_path, "cpu",
-                              /* gpu_target_config_path= */ "",
-                              /* autotune_results_path= */ "",
-                              /* symbol_repo= */ "", /* symbol_id= */ "",
-                              /* use_attached_device=*/false,
-                              /* wait_for_uploads */ false,
-                              /* result_output_file=*/result_file));
+  XlaCompileOptions options;
+  options.module_path = module_file;
+  options.output_path = output_path;
+  options.platform = "cpu";
+  options.result_output_file = result_file;
+  TF_EXPECT_OK(XlaCompileMain(options));
+
+  CompilationResult result;
+  TF_ASSERT_OK(tsl::ReadBinaryProto(tsl::Env::Default(), result_file, &result));
+  EXPECT_TRUE(result.has_status());
+  EXPECT_EQ(result.status().code(), tensorflow::error::OK);
 }
 
 TEST_F(XlaCompileLibTest, DISABLED_ON_CPU(MainForGpu)) {
@@ -192,17 +203,123 @@ TEST_F(XlaCompileLibTest, DISABLED_ON_CPU(MainForGpu)) {
                                       module_->ToString()));
 
   const std::string output_path =
-      tsl::io::JoinPath(tsl::testing::TmpDir(), "output");
+      tsl::io::JoinPath(tsl::testing::TmpDir(), "gpu_output");
   const std::string result_file =
-      tsl::io::JoinPath(tsl::testing::TmpDir(), "result.pb");
+      tsl::io::JoinPath(tsl::testing::TmpDir(), "gpu_result.pb");
 
-  TF_EXPECT_OK(XlaCompileMain(module_file, output_path, "gpu",
-                              /* gpu_target_config_path= */ "",
-                              /* autotune_results_path= */ "",
-                              /* symbol_repo= */ "", /* symbol_id= */ "",
-                              /* use_attached_device=*/true,
-                              /* wait_for_uploads */ false,
-                              /* result_output_file=*/result_file));
+  XlaCompileOptions options;
+  options.module_path = module_file;
+  options.output_path = output_path;
+  options.platform = "gpu";
+  options.result_output_file = result_file;
+  options.gpu_options.use_attached_device = true;
+  TF_EXPECT_OK(XlaCompileMain(options));
+
+  CompilationResult result;
+  TF_ASSERT_OK(tsl::ReadBinaryProto(tsl::Env::Default(), result_file, &result));
+  EXPECT_TRUE(result.has_status());
+  EXPECT_EQ(result.status().code(), tensorflow::error::OK);
+}
+
+TEST_F(XlaCompileLibTest, DISABLED_ON_GPU(LoadAutotuneDataCpu)) {
+  HloModuleAndMetadata mod;
+  mod.hlo_module = std::move(module_);
+
+  EXPECT_THAT(internal::LoadAutotuneDataFromModule(&mod, BackendType::kCpu),
+              IsOkAndHolds(false));
+}
+
+TEST_F(XlaCompileLibTest,
+       DISABLED_ON_CPU(LoadAutotuneDataGpuDataPresentAndAutotuningEnabled)) {
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+  gpu::AutotunerUtil::ClearAutotuneResults();
+
+  HloModuleAndMetadata mod;
+  mod.hlo_module = std::move(module_);
+  auto data = std::make_unique<gpu::GpuBackendSpecificData>();
+
+  AutotuneResults autotune_results;
+  TF_ASSERT_OK(tsl::ReadTextProto(
+      tsl::Env::Default(),
+      tsl::io::JoinPath(tsl::testing::XlaSrcRoot(), "service", "gpu",
+                        "gpu_compiler_test_autotune_db.textproto"),
+      &autotune_results));
+  data->autotune_results = autotune_results;
+  mod.backend_specific_data = std::move(data);
+
+  DebugOptions opts = mod.hlo_module->config().debug_options();
+  opts.set_xla_gpu_autotune_level(3);
+  mod.hlo_module->mutable_config().set_debug_options(opts);
+
+  EXPECT_THAT(internal::LoadAutotuneDataFromModule(&mod, BackendType::kGpu),
+              IsOkAndHolds(true));
+  EXPECT_FALSE(gpu::AutotunerUtil::ResultCacheIsEmpty());
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+}
+
+TEST_F(XlaCompileLibTest,
+       DISABLED_ON_CPU(LoadAutotuneDataGpuDataPresentAndAutotuningDisabled)) {
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+  gpu::AutotunerUtil::ClearAutotuneResults();
+
+  HloModuleAndMetadata mod;
+  mod.hlo_module = std::move(module_);
+  auto data = std::make_unique<gpu::GpuBackendSpecificData>();
+
+  AutotuneResults autotune_results;
+  TF_ASSERT_OK(tsl::ReadTextProto(
+      tsl::Env::Default(),
+      tsl::io::JoinPath(tsl::testing::XlaSrcRoot(), "service", "gpu",
+                        "gpu_compiler_test_autotune_db.textproto"),
+      &autotune_results));
+  data->autotune_results = autotune_results;
+  mod.backend_specific_data = std::move(data);
+
+  DebugOptions opts = mod.hlo_module->config().debug_options();
+  opts.set_xla_gpu_autotune_level(0);
+  mod.hlo_module->mutable_config().set_debug_options(opts);
+
+  EXPECT_THAT(internal::LoadAutotuneDataFromModule(&mod, BackendType::kGpu),
+              IsOkAndHolds(false));
+  EXPECT_TRUE(gpu::AutotunerUtil::ResultCacheIsEmpty());
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+}
+
+TEST_F(XlaCompileLibTest,
+       DISABLED_ON_CPU(LoadAutotuneDataGpuDataNotPresentAndAutotuningEnabled)) {
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+  gpu::AutotunerUtil::ClearAutotuneResults();
+
+  HloModuleAndMetadata mod;
+  mod.hlo_module = std::move(module_);
+
+  DebugOptions opts = mod.hlo_module->config().debug_options();
+  opts.set_xla_gpu_autotune_level(3);
+  mod.hlo_module->mutable_config().set_debug_options(opts);
+
+  EXPECT_THAT(internal::LoadAutotuneDataFromModule(&mod, BackendType::kGpu),
+              IsOkAndHolds(false));
+  EXPECT_TRUE(gpu::AutotunerUtil::ResultCacheIsEmpty());
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+}
+
+TEST_F(
+    XlaCompileLibTest,
+    DISABLED_ON_CPU(LoadAutotuneDataGpuDataNotPresentAndAutotuningDisabled)) {
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+  gpu::AutotunerUtil::ClearAutotuneResults();
+
+  HloModuleAndMetadata mod;
+  mod.hlo_module = std::move(module_);
+
+  DebugOptions opts = mod.hlo_module->config().debug_options();
+  opts.set_xla_gpu_autotune_level(0);
+  mod.hlo_module->mutable_config().set_debug_options(opts);
+
+  EXPECT_THAT(internal::LoadAutotuneDataFromModule(&mod, BackendType::kGpu),
+              IsOkAndHolds(false));
+  EXPECT_TRUE(gpu::AutotunerUtil::ResultCacheIsEmpty());
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 }
 
 }  // namespace

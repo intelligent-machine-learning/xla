@@ -18,6 +18,8 @@ namespace xla {
 using IntVar = operations_research::sat::IntVar;
 using CpModelBuilder = operations_research::sat::CpModelBuilder;
 using IntervalVar = operations_research::sat::IntervalVar;
+using Status=absl::Status;
+
 // namespace ORTools = operations_research::sat;
 using Task =
     std::tuple<int8_t, CostType>;  // (channel, processing_time), we have two
@@ -149,10 +151,10 @@ LPSchedulerFunc(StatusOr<TaskType>)::FindTask(ContainerType* node) {
 };
 LPSchedulerFunc(Status)::AddConstraint(ContainerType* node) {
   if (NodeHasAddTasks(node)) {
-    return OkStatus();
+    return absl::OkStatus();
   }
   // XD can't frozen node here, we will add other constraint after that
-  return OkStatus();
+  return absl::OkStatus();
 };
 LPSchedulerFunc(StatusOr<TaskType>)::AddNodeToTask(ContainerType* node) {
   IntVar start = cp_model_.NewIntVar({0, horizon_});
@@ -268,7 +270,7 @@ LPSchedulerFunc(tsl::Status)::SolveUsingAntOPT(SolveMethod solve_method) {
         absl::StrCat("Not all nodes are solved, solved:", solved_node_count,
                      " total:", GetNodesCount(), " edges:", solved_edge_count));
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 LPSchedulerFunc(void)::IninContainerUsers() {
   // who is user of this node
@@ -285,7 +287,7 @@ LPSchedulerFunc(tsl::Status)::MergeIfPossible() {
   //   std::vector<ContainerType*> merged_nodes =
   //   node->MergeUntilImpossible(ReplaceNodeUser);
   // }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 LPSchedulerFunc(tsl::Status)::Solve(SolveMethod solve_method) {
@@ -421,7 +423,7 @@ LPSchedulerFunc(tsl::Status)::SolveUsingORTools() {
       node_starttime_.emplace(node->UUID(), start);
     }
 
-    return OkStatus();
+    return absl::OkStatus();
   } else {
     VLOG(2) << "Solve failed:" << response.status();
     return tsl::errors::NotFound("Linear Programming solve failed");
@@ -566,11 +568,11 @@ LPSchedulerFunc(void)::SaveGraphviz(std::string filename) const {
   out << "}\n";
 
   out.close();
-  // convert dot file to png
-  std::string png_file = absl::StrCat("/tmp/", filename, ".png");
-  std::string cmd = absl::StrCat("dot -Tpng ", dot_file, " -o ", png_file);
-  auto status = system(cmd.c_str());
-  VLOG(4) << cmd << " execute status:" << status << std::endl;
+  // convert dot file to png,do not use this,will cause long time
+  // std::string png_file = absl::StrCat("/tmp/", filename, ".png");
+  // std::string cmd = absl::StrCat("dot -Tpng ", dot_file, " -o ", png_file);
+  // auto status = system(cmd.c_str());
+  // VLOG(4) << cmd << " execute status:" << status << std::endl;
 }
 LPSchedulerFunc(void)::SaveGantt(std::string filename) const {
   // https://g2.antv.antgroup.com/en/examples/storytelling/storytelling/#gantt
@@ -700,7 +702,7 @@ LPContainerDAGFunc(Status)::MergeFrom(LPContainerDAG<ElementType>* other) {
   // edge after merge {dep: [<element1, cost>,<element2, cost>]}
 
   other->GetDeps();
-  return OkStatus();
+  return absl::OkStatus();
 }
 template class LPContainer<const HloInstruction*>;
 template class LinearProgramScheduler<LPContainer<const HloInstruction*>,

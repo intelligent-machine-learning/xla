@@ -1,13 +1,14 @@
 # Tensorflow default + linux implementations of tensorflow/core/platform libraries.
 load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
 load(
-    "//tsl:tsl.bzl",
+    "@xla//xla/tsl:tsl.bzl",
     "if_not_fuchsia",
     "if_not_windows",
+    "if_oss",
     "internal_visibility",
     "tsl_copts",
 )
-load("//tsl:tsl.default.bzl", "filegroup", "tsl_grpc_cc_dependencies")
+load("@xla//xla/tsl:tsl.default.bzl", "filegroup", "tsl_grpc_cc_dependencies")
 load("//tsl/platform:rules_cc.bzl", "cc_library")
 
 package(
@@ -76,7 +77,7 @@ cc_library(
     name = "dso_loader",
     srcs = ["dso_loader.cc"] + select({
         # include dynamic loading checker only for open source build
-        "//tsl:oss": ["dlopen_checker.cc"],
+        "@xla//xla/tsl:oss": ["dlopen_checker.cc"],
         "//conditions:default": ["dlopen_checker_stub.cc"],
     }),
     hdrs = ["dso_loader.h"],
@@ -95,10 +96,9 @@ cc_library(
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/synchronization",
         "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_nccl//:nccl_config",
         "@local_config_rocm//rocm:rocm_headers",
         "@local_config_tensorrt//:tensorrt_headers",
-    ],
+    ] + if_oss(["@local_config_nccl//:nccl_config"]),
 )
 
 cc_library(
@@ -235,8 +235,11 @@ cc_library(
     deps = [
         "//tsl/platform:errors",
         "//tsl/platform:protobuf",
-        "//tsl/platform:status",
         "//tsl/platform:strcat",
+        "//tsl/platform:stringpiece",
+        "//tsl/platform:types",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
     ],
 )
 
@@ -271,6 +274,7 @@ cc_library(
         "//tsl/platform:mutex",
         "//tsl/platform:types",
         "@com_google_absl//absl/base",
+        "@com_google_absl//absl/base:log_severity",
         "@com_google_absl//absl/strings",
     ],
 )
@@ -299,7 +303,6 @@ cc_library(
         "//tsl/platform",
         "//tsl/platform:macros",
         "//tsl/platform:thread_annotations",
-        "//tsl/platform:types",
         "@nsync//:nsync_cpp",
     ],
 )
@@ -341,7 +344,7 @@ cc_library(
     copts = tsl_copts(),
     defines = ["TF_USE_SNAPPY"] + select({
         # TF Additional NUMA defines
-        "//tsl:with_numa_support": ["TENSORFLOW_USE_NUMA"],
+        "@xla//xla/tsl:with_numa_support": ["TENSORFLOW_USE_NUMA"],
         "//conditions:default": [],
     }),
     tags = [
@@ -361,7 +364,7 @@ cc_library(
         "@snappy",
     ] + select({
         # TF Additional NUMA dependencies
-        "//tsl:with_numa_support": [
+        "@xla//xla/tsl:with_numa_support": [
             # Don't merge in a single line
             "@hwloc",
         ],
@@ -465,6 +468,7 @@ cc_library(
         "//tsl/platform:strcat",
         "//tsl/platform:stringpiece",
         "//tsl/platform:types",
+        "//tsl/profiler/backends/cpu:threadpool_listener_state",
     ],
     alwayslink = True,
 )
@@ -546,12 +550,24 @@ cc_library(
 bzl_library(
     name = "cuda_build_defs_bzl",
     srcs = ["cuda_build_defs.bzl"],
+    # copybara:uncomment_begin
+    # test_tags = [
+    # "manual",
+    # "notap",
+    # ],
+    # copybara:uncomment_end
     visibility = internal_visibility(["//tensorflow:__subpackages__"]),
 )
 
 bzl_library(
     name = "rules_cc_bzl",
     srcs = ["rules_cc.bzl"],
+)
+
+bzl_library(
+    name = "build_config_root_bzl",
+    srcs = ["build_config_root.bzl"],
+    # copybara:uncomment parse_tests = False,
 )
 
 # Export source files needed for mobile builds, which do not use granular targets.

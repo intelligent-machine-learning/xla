@@ -52,6 +52,7 @@ limitations under the License.
 #include <memory>
 #include <string>
 #include <tuple>
+#include <vector>
 
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
@@ -93,7 +94,7 @@ class KernelLoaderSpec {
   void operator=(const KernelLoaderSpec &) = delete;
 };
 
-// Loads kernel from in process symbol pointer (e.g. pointer to CUDA C++ device
+// Loads kernel from in process symbol pointer (e.g. pointer to C++ device
 // function).
 class InProcessSymbol : public KernelLoaderSpec {
  public:

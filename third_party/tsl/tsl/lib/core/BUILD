@@ -4,8 +4,8 @@
 #   The libraries in this package are not allowed to have ANY dependencies
 #   to other TF components outside of TSL.
 
-load("//tsl:tsl.bzl", "internal_visibility")
-load("//tsl:tsl.default.bzl", "get_compatible_with_portable")
+load("@xla//xla/tsl:tsl.bzl", "internal_visibility")
+load("@xla//xla/tsl:tsl.default.bzl", "get_compatible_with_portable")
 load("//tsl/platform:build_config.bzl", "tsl_cc_test")
 load(
     "//tsl/platform:rules_cc.bzl",
@@ -37,6 +37,7 @@ filegroup(
         "bitmap.h",
         "bits.h",
         "status_test_util.h",
+        "@xla//xla/tsl/lib/core:legacy_lib_core_status_test_util_header",
     ],
     compatible_with = get_compatible_with_portable(),
     visibility = internal_visibility([
@@ -68,6 +69,7 @@ filegroup(
     name = "legacy_lib_core_status_test_util_header",
     srcs = [
         "status_test_util.h",
+        "@xla//xla/tsl/lib/core:legacy_lib_core_status_test_util_header",
     ],
     compatible_with = get_compatible_with_portable(),
     visibility = internal_visibility([
@@ -83,6 +85,7 @@ cc_library(
     compatible_with = get_compatible_with_portable(),
     deps = [
         "//tsl/platform:logging",
+        "@com_google_absl//absl/numeric:bits",
     ],
     alwayslink = 1,
 )
@@ -92,8 +95,9 @@ cc_library(
     testonly = 1,
     hdrs = ["status_test_util.h"],
     deps = [
-        "//tsl/platform:status",
+        "//tsl/platform:status_matchers",
         "//tsl/platform:test",
+        "@xla//xla/tsl/lib/core:status_test_util",
     ],
 )
 
@@ -102,7 +106,6 @@ cc_library(
     hdrs = ["bits.h"],
     deps = [
         "//tsl/platform:logging",
-        "//tsl/platform:types",
         "@com_google_absl//absl/numeric:bits",
     ],
 )

@@ -26,6 +26,7 @@ limitations under the License.
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
+#include "xla/hlo/ir/collective_device_list.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_frontend_attributes.h"
 #include "xla/hlo/ir/hlo_instruction.h"
@@ -36,9 +37,9 @@ limitations under the License.
 #include "xla/shape.h"
 #include "xla/shape_util.h"
 #include "xla/tests/verified_hlo_module.h"
+#include "xla/tsl/lib/core/status_test_util.h"
 #include "xla/window_util.h"
 #include "xla/xla_data.pb.h"
-#include "tsl/lib/core/status_test_util.h"
 #include "tsl/platform/status_matchers.h"
 #include "tsl/platform/statusor.h"
 #include "tsl/platform/test.h"
@@ -1374,7 +1375,7 @@ R"(HloModule test, entry_computation_layout={(f32[100]{0})->u32[100]{0}}
 
 ENTRY %test (p: f32[100]) -> u32[100] {
   %p = f32[100]{0} parameter(0)
-  ROOT %root = u32[100]{0} bitcast-convert(f32[100]{0} %p), metadata={op_type="a" op_name="b" source_file="c" source_line=1 profile_type={1} deduplicated_name="d"}
+  ROOT %root = u32[100]{0} bitcast-convert(f32[100]{0} %p), metadata={op_type="a" op_name="b" source_file="c" source_line=1 profile_type={1} deduplicated_name="d" scheduling_name="foo"}
 }
 
 )"
@@ -1387,6 +1388,21 @@ R"(HloModule test, entry_computation_layout={(f32[100]{0})->u32[100]{0}}
 ENTRY %test (p: f32[100]) -> u32[100] {
   %p = f32[100]{0} parameter(0)
   ROOT %root = u32[100]{0} bitcast-convert(f32[100]{0} %p), metadata={op_type="a" op_name="b" source_file="c" source_line=1 profile_type={1} deduplicated_name="d" preserve_layout=true}
+}
+
+)"
+},
+
+{
+"OriginalValue",
+R"(HloModule test, entry_computation_layout={(f32[], f32[3]{0}, f32[2,3]{1,0})->((f32[], f32[3]{0}), f32[2,3]{1,0})}
+
+ENTRY %test (v1: f32[], v2: f32[3], v3: f32[2,3]) -> ((f32[], f32[3]), f32[2,3]) {
+  %v1 = f32[] parameter(0), original_value={{"v1"}}
+  %v2 = f32[3]{0} parameter(1), original_value={{"v2"}}
+  %tuple = (f32[], f32[3]{0}) tuple(f32[] %v1, f32[3]{0} %v2), original_value={({"v1"}, {"v2"})}
+  %v3 = f32[2,3]{1,0} parameter(2), original_value={{"v3"}}
+  ROOT %nested_tuple = ((f32[], f32[3]{0}), f32[2,3]{1,0}) tuple((f32[], f32[3]{0}) %tuple, f32[2,3]{1,0} %v3), original_value={(({"v1"}, {"v2"}), {"v3"})}
 }
 
 )"
@@ -1853,6 +1869,25 @@ ENTRY AllReduceWithSubgroups {
 )",
 /*replica_count=*/4,
 },
+// all-reduce with subgroups in iota group list format
+{
+"AllReduceWithSubgroupsIotaList",
+R"(HloModule CRS_Subgroups, entry_computation_layout={(f32[128,32]{0,1})->f32[128,32]{0,1}}, replica_count=20
+
+add {
+  lhs = f32[] parameter(0)
+  rhs = f32[] parameter(1)
+  ROOT add = f32[] add(lhs, rhs)
+}
+
+ENTRY AllReduceWithSubgroupsIotaList {
+  input = f32[128,32]{0,1} parameter(0)
+  ROOT all-reduce = f32[128,32]{0,1} all-reduce(input), replica_groups=[2,10]<=[20], to_apply=add
+}
+
+)",
+/*replica_count=*/20,
+},
 // all-reduce with constrained layout
 {
 "AllReduceWithLayout",
@@ -1964,6 +1999,19 @@ ENTRY AllGatherWithSubgroups {
 )",
 /*replica_count=*/4,
 },
+// all-gather with subgroups in iota list format.
+{
+"AllGatherWithSubgroupsIotaList",
+R"(HloModule AllGatherWithSubgroupsIotaList, entry_computation_layout={(f32[128,32]{0,1})->f32[128,320]{0,1}}, replica_count=30
+
+ENTRY AllGatherWithSubgroupsIotaList {
+  input = f32[128,32]{0,1} parameter(0)
+  ROOT ag = f32[128,320]{0,1} all-gather(input), replica_groups=[3,10]<=[6,5]T(1,0), dimensions={1}
+}
+
+)",
+/*replica_count=*/30,
+},
 // all-to-all
 {
 "AllToAll",
@@ -1989,6 +2037,19 @@ ENTRY AllToAllWithSubgroups {
 
 )",
 /*replica_count=*/4,
+},
+// all-to-all with subgroups in iota list format.
+{
+"AllToAllWithSubgroupsIotaList",
+R"(HloModule AllToAllWithSubgroupsIotaList, entry_computation_layout={(f32[128,32]{0,1})->f32[128,32]{0,1}}, replica_count=32
+
+ENTRY AllToAllWithSubgroupsIotaList {
+  p0 = f32[128,32]{0,1} parameter(0)
+  ROOT a2a = f32[128,32]{0,1} all-to-all(p0), replica_groups=[4,8]<=[4,8]T(1,0), dimensions={0}
+}
+
+)",
+/*replica_count=*/40
 },
 // collective-broadcast
 {
@@ -2541,6 +2602,14 @@ class HloParameterizedParserTest
           original,
           module->ToString(HloPrintOptions().set_print_large_constants(true)));
     }
+    for (HloComputation* computation : module->computations()) {
+      for (HloInstruction* instr : computation->instructions()) {
+        if (instr->opcode() == HloOpcode::kWhile) {
+          EXPECT_EQ(instr->while_body()->WhileCallInstruction(), instr);
+          EXPECT_TRUE(instr->while_body()->IsWhileBodyComputation());
+        }
+      }
+    }
   }
 };
 
@@ -2613,14 +2682,14 @@ class HloParserTest : public ::testing::Test {
 TEST_F(HloParserTest, Empty) {
   const std::string original = "";
   auto result = ParseAndReturnUnverifiedModule(original);
-  EXPECT_NE(OkStatus(), result.status());
+  EXPECT_NE(absl::OkStatus(), result.status());
 }
 
 TEST_F(HloParserTest, Garbage) {
   const std::string original =
       "HloModule thi$ str1ng makes# N0 sen$e @all!*&^%$";
   auto result = ParseAndReturnUnverifiedModule(original);
-  EXPECT_NE(OkStatus(), result.status());
+  EXPECT_NE(absl::OkStatus(), result.status());
 }
 
 TEST_F(HloParserTest, WrongOpcode) {
@@ -2634,7 +2703,7 @@ ENTRY %blabla (x: f32[], y: f32[]) -> f32[] {
 
 )";
   auto result = ParseAndReturnUnverifiedModule(original);
-  EXPECT_NE(OkStatus(), result.status());
+  EXPECT_NE(absl::OkStatus(), result.status());
 }
 
 TEST_F(HloParserTest, MetadataWithCholesky) {
@@ -2645,7 +2714,7 @@ ENTRY %blabla (a: f32[1,291,291]) -> f32[1,291,291] {
 }
 )";
   auto result = ParseAndReturnVerifiedModule(original);
-  EXPECT_EQ(OkStatus(), result.status());
+  EXPECT_EQ(absl::OkStatus(), result.status());
   EXPECT_EQ("Cholesky", result.value()
                             ->entry_computation()
                             ->root_instruction()
@@ -2673,7 +2742,7 @@ ENTRY %blabla (x: g32[]) -> g32[] {
 
 )";
   auto result = ParseAndReturnUnverifiedModule(original);
-  EXPECT_NE(OkStatus(), result.status());
+  EXPECT_NE(absl::OkStatus(), result.status());
 }
 
 TEST_F(HloParserTest, WrongOperandsSize) {
@@ -2686,7 +2755,7 @@ ENTRY %blabla (x: f32[]) -> pred[] {
 
 )";
   auto result = ParseAndReturnUnverifiedModule(original);
-  EXPECT_NE(OkStatus(), result.status());
+  EXPECT_NE(absl::OkStatus(), result.status());
 }
 
 TEST_F(HloParserTest, OperandNotFound) {
@@ -2697,7 +2766,7 @@ ENTRY %blabla (x: f32[]) -> pred[] {
 }
 )";
   auto result = ParseAndReturnUnverifiedModule(original);
-  EXPECT_NE(OkStatus(), result.status());
+  EXPECT_NE(absl::OkStatus(), result.status());
 }
 
 TEST_F(HloParserTest, MoreConstants) {
@@ -2739,7 +2808,7 @@ ENTRY %some_2x3 () -> f32[2,3] {
 
 )";
   auto result = ParseAndReturnUnverifiedModule(original);
-  EXPECT_NE(OkStatus(), result.status());
+  EXPECT_NE(absl::OkStatus(), result.status());
   ExpectHasSubstr(result.status().message(), "unexpected '}' token");
 }
 
@@ -2752,7 +2821,7 @@ ENTRY %some_2 () -> f32[2] {
 
 )";
   auto result = ParseAndReturnUnverifiedModule(original);
-  EXPECT_NE(OkStatus(), result.status());
+  EXPECT_NE(absl::OkStatus(), result.status());
   ExpectHasSubstr(result.status().message(),
                   "expects nested array in rank 1, but sees larger");
 }
@@ -2766,7 +2835,7 @@ ENTRY %some_2x3 () -> f32[2,3] {
 
 )";
   auto result = ParseAndReturnUnverifiedModule(original);
-  EXPECT_NE(OkStatus(), result.status());
+  EXPECT_NE(absl::OkStatus(), result.status());
   ExpectHasSubstr(result.status().message(),
                   "expects nested array in rank 2, but sees 1");
 }
@@ -2780,7 +2849,7 @@ ENTRY %some_2x3x2 () -> f32[2,3,2] {
 
 )";
   auto result = ParseAndReturnUnverifiedModule(original);
-  EXPECT_NE(OkStatus(), result.status());
+  EXPECT_NE(absl::OkStatus(), result.status());
   ExpectHasSubstr(result.status().message(),
                   "expects 3 elements in the [0]th element");
 }
@@ -2795,7 +2864,7 @@ ENTRY %ConstantF16Overflow.v4 () -> f16[] {
 
 )";
   auto result = ParseAndReturnUnverifiedModule(original);
-  EXPECT_NE(OkStatus(), result.status());
+  EXPECT_NE(absl::OkStatus(), result.status());
   ExpectHasSubstr(result.status().message(),
                   "is out of range for literal's primitive type F16");
 }
@@ -2807,7 +2876,7 @@ TEST_F(HloParserTest, ConstantBf16NoOverflow) {
   ENTRY test {
     ROOT c = bf16[] constant(-65505)
   })";
-  EXPECT_EQ(OkStatus(), ParseAndReturnVerifiedModule(original).status());
+  EXPECT_EQ(absl::OkStatus(), ParseAndReturnVerifiedModule(original).status());
 }
 
 TEST_F(HloParserTest, ConstantBf16Overflow) {
@@ -2828,7 +2897,7 @@ TEST_F(HloParserTest, ConstantU4Underflow) {
         ROOT %constant = u4[] constant(-1)
       })";
   auto result = ParseAndReturnUnverifiedModule(original);
-  EXPECT_NE(OkStatus(), result.status());
+  EXPECT_NE(absl::OkStatus(), result.status());
   ExpectHasSubstr(result.status().message(),
                   "is out of range for literal's primitive type U4");
 }
@@ -2840,7 +2909,7 @@ TEST_F(HloParserTest, ConstantU4Overflow) {
         ROOT %constant = u4[] constant(16)
       })";
   auto result = ParseAndReturnUnverifiedModule(original);
-  EXPECT_NE(OkStatus(), result.status());
+  EXPECT_NE(absl::OkStatus(), result.status());
   ExpectHasSubstr(result.status().message(),
                   "is out of range for literal's primitive type U4");
 }
@@ -2852,7 +2921,7 @@ TEST_F(HloParserTest, ConstantS4Underflow) {
         ROOT %constant = s4[] constant(-9)
       })";
   auto result = ParseAndReturnUnverifiedModule(original);
-  EXPECT_NE(OkStatus(), result.status());
+  EXPECT_NE(absl::OkStatus(), result.status());
   ExpectHasSubstr(result.status().message(),
                   "is out of range for literal's primitive type S4");
 }
@@ -2864,7 +2933,7 @@ TEST_F(HloParserTest, ConstantS4Overflow) {
         ROOT %constant = s4[] constant(8)
       })";
   auto result = ParseAndReturnUnverifiedModule(original);
-  EXPECT_NE(OkStatus(), result.status());
+  EXPECT_NE(absl::OkStatus(), result.status());
   ExpectHasSubstr(result.status().message(),
                   "is out of range for literal's primitive type S4");
 }
@@ -2876,7 +2945,7 @@ TEST_F(HloParserTest, ConstantUnsignedUnderflow) {
         ROOT %constant = u64[] constant(-1)
       })";
   auto result = ParseAndReturnUnverifiedModule(original);
-  EXPECT_EQ(OkStatus(), result.status());
+  EXPECT_EQ(absl::OkStatus(), result.status());
 }
 
 TEST_F(HloParserTest, ConstantUnsignedOverflow) {
@@ -2886,7 +2955,7 @@ TEST_F(HloParserTest, ConstantUnsignedOverflow) {
         ROOT %constant = u32[] constant(4294967296)
       })";
   auto result = ParseAndReturnUnverifiedModule(original);
-  EXPECT_NE(OkStatus(), result.status());
+  EXPECT_NE(absl::OkStatus(), result.status());
   ExpectHasSubstr(result.status().message(),
                   "is out of range for literal's primitive type U32");
 }
@@ -2898,7 +2967,7 @@ TEST_F(HloParserTest, ConstantUnsignedInt64Overflow) {
         ROOT %constant = u64[] constant(9223372036854775808)
       })";
   auto result = ParseAndReturnUnverifiedModule(original);
-  EXPECT_EQ(OkStatus(), result.status());
+  EXPECT_EQ(absl::OkStatus(), result.status());
 }
 
 TEST_F(HloParserTest, ConstantC64Overflow) {
@@ -2908,7 +2977,7 @@ TEST_F(HloParserTest, ConstantC64Overflow) {
         ROOT c = c64[] constant((1e100, 0))
       })";
   auto result = ParseAndReturnUnverifiedModule(original);
-  EXPECT_NE(OkStatus(), result.status());
+  EXPECT_NE(absl::OkStatus(), result.status());
 }
 
 TEST_F(HloParserTest, ConstantC64Underflow) {
@@ -2918,7 +2987,7 @@ TEST_F(HloParserTest, ConstantC64Underflow) {
         ROOT c = c64[] constant((0, -1e100))
       })";
   auto result = ParseAndReturnUnverifiedModule(original);
-  EXPECT_NE(OkStatus(), result.status());
+  EXPECT_NE(absl::OkStatus(), result.status());
 }
 
 TEST_F(HloParserTest, ConstantF64Overflow) {
@@ -2928,7 +2997,7 @@ TEST_F(HloParserTest, ConstantF64Overflow) {
         ROOT c = f64[] constant(1.8e308)
       })";
   auto result = ParseAndReturnUnverifiedModule(original);
-  EXPECT_NE(OkStatus(), result.status());
+  EXPECT_NE(absl::OkStatus(), result.status());
 }
 
 TEST_F(HloParserTest, ConstantF64Underflow) {
@@ -2938,7 +3007,7 @@ TEST_F(HloParserTest, ConstantF64Underflow) {
         ROOT c = f64[] constant(-1.8e308)
       })";
   auto result = ParseAndReturnUnverifiedModule(original);
-  EXPECT_NE(OkStatus(), result.status());
+  EXPECT_NE(absl::OkStatus(), result.status());
 }
 
 TEST_F(HloParserTest, ConstantWithExp) {
@@ -2980,7 +3049,7 @@ ENTRY %NegativeNan () -> bf16[2] {
 
 )";
   auto result = ParseAndReturnUnverifiedModule(original);
-  EXPECT_EQ(OkStatus(), result.status());
+  EXPECT_EQ(absl::OkStatus(), result.status());
   EXPECT_EQ(result.value()->ToString(HloPrintOptions()), original);
 }
 
@@ -2994,7 +3063,7 @@ ENTRY %NanPayload () -> bf16[2] {
 
 )";
   auto result = ParseAndReturnUnverifiedModule(original);
-  EXPECT_EQ(OkStatus(), result.status());
+  EXPECT_EQ(absl::OkStatus(), result.status());
   EXPECT_EQ(result.value()->ToString(HloPrintOptions()), original);
 }
 
@@ -4379,7 +4448,7 @@ TEST_F(HloParserTest, CheckIndexedConditionalDimension) {
   }
   )";
   auto result = ParseAndReturnUnverifiedModule(hlo_string);
-  EXPECT_NE(OkStatus(), result.status());
+  EXPECT_NE(absl::OkStatus(), result.status());
   EXPECT_THAT(result.status().message(),
               HasSubstr("The first operand must be a scalar"));
 }
@@ -4406,7 +4475,7 @@ TEST_F(HloParserTest, CheckIndexedConditionalElementType) {
   }
   )";
   auto result = ParseAndReturnUnverifiedModule(hlo_string);
-  EXPECT_NE(OkStatus(), result.status());
+  EXPECT_NE(absl::OkStatus(), result.status());
   EXPECT_THAT(result.status().message(),
               HasSubstr("The first operand must be a scalar of PRED or S32"));
 }
@@ -4434,7 +4503,7 @@ TEST_F(HloParserTest,
   }
   )";
   auto result = ParseAndReturnUnverifiedModule(hlo_string);
-  EXPECT_NE(OkStatus(), result.status());
+  EXPECT_NE(absl::OkStatus(), result.status());
   EXPECT_THAT(result.status().message(),
               HasSubstr("unexpected attribute \"branch_computations\""));
 }
@@ -4719,7 +4788,7 @@ ENTRY test {
 }
 )";
   auto result = ParseAndReturnVerifiedModule(hlo_string);
-  EXPECT_NE(OkStatus(), result.status());
+  EXPECT_NE(absl::OkStatus(), result.status());
   EXPECT_THAT(result.status().message(), HasSubstr("dimensions"));
 }
 
@@ -5283,7 +5352,42 @@ TEST_F(HloParserTest, PipelinedSendRecv) {
     ROOT recv-data.0.q = u32[2] get-tuple-element(recv-done.0.q), index=0
       })";
   auto result = ParseAndReturnUnverifiedModule(hlo_string);
-  EXPECT_EQ(OkStatus(), result.status());
+  EXPECT_EQ(absl::OkStatus(), result.status());
+}
+
+TEST_F(HloParserTest, ReplicaIdWithLayout) {
+  const char* const hlo_string = R"(
+  HloModule ReplicaId
+
+  ENTRY ReplicaId {
+    ROOT replica-id.18600 = u32[]{:T(128)} replica-id()
+  }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnUnverifiedModule(hlo_string));
+  EXPECT_TRUE(
+      module->entry_computation()->root_instruction()->shape().has_layout());
+  EXPECT_FALSE(module->entry_computation()
+                   ->root_instruction()
+                   ->shape()
+                   .layout()
+                   .tiles()
+                   .empty());
+}
+
+TEST_F(HloParserTest, OriginalValueWithoutShape) {
+  const std::string hlo_string = R"(HloModule test
+
+ENTRY %test {
+  %a = f32[2,10]{1,0} parameter(0), original_value={{"a"}}
+  ROOT %v = abs(%a), original_value={{"v"}}
+}
+
+
+)";
+  EXPECT_THAT(ParseAndReturnUnverifiedModule(hlo_string).status(),
+              tsl::testing::StatusIs(tsl::error::INVALID_ARGUMENT,
+                                     HasSubstr("expects instruction shape")));
 }
 
 }  // namespace

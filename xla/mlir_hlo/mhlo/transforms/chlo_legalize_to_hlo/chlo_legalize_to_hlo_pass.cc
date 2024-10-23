@@ -17,7 +17,6 @@ limitations under the License.
 #include <utility>
 
 #include "mhlo/IR/hlo_ops.h"
-#include "mhlo/transforms/passes.h"
 #include "mhlo/transforms/rewriters.h"
 #include "mhlo/utils/type_conversion.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -87,7 +86,6 @@ struct ChloLegalizeToHloPass
     conversionTarget.addLegalDialect<
         MhloDialect, mlir::arith::ArithDialect, mlir::func::FuncDialect,
         mlir::tensor::TensorDialect, mlir::shape::ShapeDialect>();
-    conversionTarget.addLegalOp<chlo::MinimumBroadcastShapesOp>();
 
     if (failed(applyPartialConversion(getOperation(), conversionTarget,
                                       std::move(conversionPatterns)))) {

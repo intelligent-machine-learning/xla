@@ -19,12 +19,12 @@ limitations under the License.
 #include "absl/container/flat_hash_map.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/STLExtras.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
-#include "mlir/Dialect/LLVMIR/LLVMDialect.h"  // from @llvm-project
-#include "mlir/IR/BuiltinAttributes.h"  // from @llvm-project
-#include "mlir/IR/BuiltinOps.h"  // from @llvm-project
-#include "mlir/Pass/Pass.h"  // from @llvm-project
-#include "mlir/Support/LLVM.h"  // from @llvm-project
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/Pass/Pass.h"
+#include "mlir/Support/LLVM.h"
 
 namespace xla {
 namespace gpu {
@@ -62,7 +62,7 @@ struct PackedArgs {
       }
 
       auto& target_index = slice_to_operand[static_cast<int>(
-          slice_index.cast<mlir::IntegerAttr>().getInt())];
+          mlir::cast<mlir::IntegerAttr>(slice_index).getInt())];
       if (target_index) {
         replacement_args[idx] = *target_index;
         args_to_erase[idx] = true;

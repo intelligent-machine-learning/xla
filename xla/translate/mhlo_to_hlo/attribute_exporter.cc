@@ -17,6 +17,9 @@ limitations under the License.
 
 #include <utility>
 
+#include "mlir/Support/LLVM.h"
+#include "mlir/IR/Attributes.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "xla/mlir_hlo/mhlo/IR/hlo_ops.h"
 #include "xla/service/hlo_parser.h"
 #include "xla/shape_util.h"
@@ -61,7 +64,7 @@ ConvolutionDimensionNumbers ConvertConvDimensionNumbers(
 absl::StatusOr<std::vector<ReplicaGroup>> ConvertReplicaGroups(
     mlir::DenseIntElementsAttr input) {
   mlir::RankedTensorType type =
-      input.getType().dyn_cast<mlir::RankedTensorType>();
+      mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
   if (!type || type.getRank() != 2 ||
       !type.getElementType().isInteger(/*width=*/64)) {
     return Internal("Execpted replica group to be a rank 2 tensor of i64");
@@ -90,7 +93,7 @@ absl::StatusOr<std::vector<std::pair<int64_t, int64_t>>> ConvertNx2Attribute(
   if (!optional_attr.has_value())
     return std::vector<std::pair<int64_t, int64_t>>{};
   mlir::DenseIntElementsAttr attr = *optional_attr;
-  auto type = attr.getType().dyn_cast<mlir::RankedTensorType>();
+  auto type = mlir::dyn_cast<mlir::RankedTensorType>(attr.getType());
   if (!type || type.getRank() != 2 || type.getShape()[1] != 2)
     return Internal("expected Nx2 attribute to be a tensor of shape Nx2");
   auto it = attr.getValues<int64_t>().begin();
@@ -103,25 +106,6 @@ absl::StatusOr<std::vector<std::pair<int64_t, int64_t>>> ConvertNx2Attribute(
     item = {first, second};
   }
   return out;
-}
-
-absl::StatusOr<FftType> ConvertFftType(llvm::StringRef type_string) {
-  std::optional<mlir::mhlo::FftType> type =
-      mlir::mhlo::symbolizeEnum<mlir::mhlo::FftType>(type_string);
-  if (!type) return InvalidArgument("Unknown FFT type %s", type_string.str());
-
-  switch (*type) {
-    case mlir::mhlo::FftType::FFT:
-      return xla::FftType::FFT;
-    case mlir::mhlo::FftType::IFFT:
-      return xla::FftType::IFFT;
-    case mlir::mhlo::FftType::RFFT:
-      return xla::FftType::RFFT;
-    case mlir::mhlo::FftType::IRFFT:
-      return xla::FftType::IRFFT;
-    default:
-      return InvalidArgument("Unknown FFT type enum #%d", *type);
-  }
 }
 
 absl::StatusOr<TriangularSolveOptions::Transpose> ConvertTranspose(
@@ -184,7 +168,7 @@ absl::StatusOr<
 ConvertOutputOperandAliasing(mlir::ArrayAttr aliasArrayAttr) {
   std::vector<std::pair<ShapeIndex, std::pair<int64_t, ShapeIndex>>> aliasInfo;
   for (auto attr : aliasArrayAttr.getValue()) {
-    auto alias = attr.cast<mlir::mhlo::OutputOperandAliasAttr>();
+    auto alias = mlir::cast<mlir::mhlo::OutputOperandAliasAttr>(attr);
     ShapeIndex outputShapeIndex(alias.getOutputTupleIndices());
     ShapeIndex operandShapeIndex(alias.getOperandTupleIndices());
     aliasInfo.push_back(std::make_pair(
@@ -201,6 +185,41 @@ std::optional<xla::OpSharding> ConvertSharding(llvm::StringRef sharding) {
       xla::ParseSharding(sharding.str());
   if (sharding_cpp.ok()) return sharding_cpp->ToProto();
   return std::nullopt;
+}
+
+std::optional<xla::HloInputOutputAliasProto> ConvertInputOutputAlias(
+    llvm::ArrayRef<mlir::Attribute> aliasing) {
+  if (aliasing.empty()) return std::nullopt;
+
+  xla::HloInputOutputAliasProto input_output_alias_proto;
+  for (auto attr : aliasing) {
+    auto entry_attr = mlir::cast<mlir::DictionaryAttr>(attr);
+    auto alias_attr = mlir::cast<mlir::DictionaryAttr>(entry_attr.get("alias"));
+    mlir::ArrayRef<int64_t> output_index =
+        mlir::cast<mlir::DenseI64ArrayAttr>(entry_attr.get("output_index"))
+            .asArrayRef();
+    mlir::ArrayRef<int64_t> parameter_index =
+        mlir::cast<mlir::DenseI64ArrayAttr>(alias_attr.get("parameter_index"))
+            .asArrayRef();
+    HloInputOutputAliasProto::AliasEntryProto entry;
+    entry.mutable_output_shape_index()->Add(output_index.begin(),
+                                            output_index.end());
+    entry.set_parameter_number(
+        mlir::cast<mlir::IntegerAttr>(alias_attr.get("parameter_number"))
+            .getInt());
+    entry.mutable_parameter_shape_index()->Add(parameter_index.begin(),
+                                               parameter_index.end());
+    mlir::StringRef kind =
+        mlir::cast<mlir::StringAttr>(alias_attr.get("kind")).getValue();
+    if (kind == "may_alias")
+      entry.set_kind(xla::Kind::MAY_ALIAS);
+    else if (kind == "must_alias")
+      entry.set_kind(xla::Kind::MUST_ALIAS);
+    else
+      entry.set_kind(xla::Kind::UNDEFINED_ALIAS);
+    input_output_alias_proto.add_entries()->Swap(&entry);
+  }
+  return input_output_alias_proto;
 }
 
 DotDimensionNumbers ConvertDotDimensionNumbers(
@@ -255,7 +274,7 @@ absl::StatusOr<std::vector<int64_t>> ConvertMlirArrayAttrToInt64Array(
   int rank = array.size();
   std::vector<int64_t> converted_array(rank);
   for (int i = 0; i < rank; i++) {
-    mlir::IntegerAttr attr = array[i].dyn_cast<mlir::IntegerAttr>();
+    mlir::IntegerAttr attr = mlir::dyn_cast<mlir::IntegerAttr>(array[i]);
     if (!attr) {
       return Internal("Type Error: Expected layout integer attribute");
     }

@@ -15,9 +15,9 @@ limitations under the License.
 
 #include "xla/python/ifrt/ir/ifrt_interfaces.h"
 
-#include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
-#include "mlir/IR/Operation.h"  // from @llvm-project
-#include "mlir/Support/LogicalResult.h"  // from @llvm-project
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/Operation.h"
+#include "mlir/Support/LogicalResult.h"
 #include "xla/python/ifrt/ir/constants.h"
 
 // Generated definitions.
@@ -37,9 +37,12 @@ namespace impl {
 LogicalResult verifyNestedInIfrtFunc(Operation* op) {
   auto func_op = op->getParentOfType<func::FuncOp>();
   if (func_op != nullptr &&
-      !func_op->hasAttr(::xla::ifrt::kIfrtFunctionAttrName)) {
-    return op->emitOpError() << "must be in a FuncOp with attr `"
-                             << ::xla::ifrt::kIfrtFunctionAttrName << "`";
+      !func_op->hasAttr(::xla::ifrt::kIfrtFunctionAttrName) &&
+      !func_op->hasAttr(::xla::ifrt::kIfrtReshardFunctionAttrName)) {
+    return op->emitOpError()
+           << "must be in a FuncOp with attr `"
+           << ::xla::ifrt::kIfrtFunctionAttrName << "` or atttr `"
+           << ::xla::ifrt::kIfrtReshardFunctionAttrName << "`";
   }
   return success();
 }

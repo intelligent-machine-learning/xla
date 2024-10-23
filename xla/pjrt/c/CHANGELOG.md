@@ -1,6 +1,32 @@
 # PJRT C API changelog
 
-## 0.47
+## 0.54
+* Deprecated PJRT_Buffer_GetMemoryLayout.
+
+## 0.53
+* Added ``PJRT_FFI_Extension` extension to support passing user data to FFI
+  handlers on compatible PJRT backends.
+
+## 0.52
+* Added ``PJRT_ExecuteContext`` struct corresponding to ``xla::ExecuteContext``.
+
+## 0.51
+* Added ``PJRT_Extension_Type::PJRT_Extension_Type_Layouts``.
+
+## 0.50 (Apr 26, 2024)
+* Added a new type ``PJRT_Buffer_Type_TOKEN`` to ``PJRT_Buffer_Type``.
+
+## 0.49 (Apr 19, 2024)
+* Added ``PJRT_Extension_Type::PJRT_Extension_Type_Stream``.
+
+## 0.48 (Apr 10, 2024)
+* Added ``PjRtCApiMemorySpace::kind_id`` for uniquely identifying memory space kinds.
+* Renamed memory space kind to ``PjRtCApiMemorySpace::memory_space_kind`` to
+  ``PjRtCApiMemorySpace::kind``.
+* Added new host buffer semantics enum
+  ``PJRT_HostBufferSemantics_kMutableZeroCopy``
+
+## 0.47 (Mar 29, 2024)
 * Added ``PJRT_Extension_Type::PJRT_Extension_Type_Custom_Partitioner``.
 * Renamed host buffer semantics enum from ``PJRT_HostBufferSemantics_kZeroCopy``
   to ``PJRT_HostBufferSemantics_kImmutableZeroCopy``.

@@ -24,10 +24,13 @@ limitations under the License.
 #include <string_view>
 #include <vector>
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/algorithm/container.h"
 #include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/strings/string_view.h"
+#include "xla/hlo/ir/collective_device_list.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
@@ -44,11 +47,15 @@ limitations under the License.
 #include "xla/tests/hlo_test_base.h"
 #include "xla/tests/test_utils.h"
 #include "tsl/platform/status.h"
+#include "tsl/platform/status_matchers.h"
 #include "tsl/platform/statusor.h"
 #include "tsl/profiler/protobuf/profiled_instructions.pb.h"
 
 namespace xla {
 namespace gpu {
+
+using ::testing::HasSubstr;
+using ::tsl::testing::StatusIs;
 
 class GpuHloScheduleTest : public HloTestBase {
  protected:
@@ -338,6 +345,62 @@ TEST_F(GpuHloScheduleTest, LHSCostModel) {
   EXPECT_TRUE(HasValidFingerprint(module.get()));
 }
 
+TEST_F(GpuHloScheduleTest, LHSCostModelCostlyAR) {
+  const char* hlo_text = R"(
+  HloModule AsyncAR
+  apply_op {
+    x = bf16[] parameter(0)
+    y = bf16[] parameter(1)
+    ROOT apply_op = bf16[] add(x, y)
+  }
+
+  ENTRY ar {
+    p0 = bf16[32505856] parameter(0)
+    p1 = f32[32, 32] parameter(1)
+    p2 = f32[32, 32] parameter(2)
+
+    dot0 = f32[32,32]{1,0} custom-call(p1, p2), custom_call_target="__cublas$gemm"
+    dot1 = f32[32,32]{1,0} custom-call(dot0, p2), custom_call_target="__cublas$gemm"
+    dot2 = f32[32,32]{1,0} custom-call(dot1, p2), custom_call_target="__cublas$gemm"
+    dot3 = f32[32,32]{1,0} custom-call(dot2, p2), custom_call_target="__cublas$gemm"
+    dot4 = f32[32,32]{1,0} custom-call(dot3, p2), custom_call_target="__cublas$gemm"
+    dot5 = f32[32,32]{1,0} custom-call(dot4, p2), custom_call_target="__cublas$gemm"
+    dot6 = f32[32,32]{1,0} custom-call(dot5, p2), custom_call_target="__cublas$gemm"
+
+    ar-start = bf16[32505856] all-reduce-start(p0), to_apply=apply_op
+    ar-done = bf16[32505856] all-reduce-done(ar-start)
+
+    ROOT t = (bf16[32505856], f32[32,32]) tuple(ar-done, dot6)
+  })";
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto module,
+      ParseAndReturnVerifiedModule(
+          hlo_text, GetModuleConfig(/*enable_latency_hiding_scheduler=*/true)));
+  SequentialHloOrdering order = BuildHloOrdering(module.get());
+
+  HloComputation* entry = module->entry_computation();
+  std::vector<int64_t> count_between_pairs;
+  bool in_between = false;
+  for (const HloInstruction* inst :
+       order.SequentialOrder(*entry)->instructions()) {
+    if (inst->opcode() == HloOpcode::kAllReduceStart) {
+      in_between = true;
+      count_between_pairs.push_back(0);
+    } else if (inst->opcode() == HloOpcode::kAllReduceDone) {
+      in_between = false;
+    } else if (in_between && inst->opcode() == HloOpcode::kCustomCall) {
+      count_between_pairs.back()++;
+    }
+  }
+
+  EXPECT_EQ(count_between_pairs.size(), 1);
+  // We pack in 7 medium cost operations into the costly AR.
+  // By default we pack in at most 5.
+  EXPECT_EQ(count_between_pairs[0], 7);
+  EXPECT_TRUE(HasValidFingerprint(module.get()));
+}
+
 TEST_F(GpuHloScheduleTest, ProfileGuidedCostModel) {
   const char* hlo_text = R"(
   HloModule AsyncAR
@@ -618,7 +681,7 @@ TEST_F(GpuHloScheduleTest, LHSSendRecvPairs2) {
     sum = u32[] add(replica, c10)
     sum2 = u32[] add(sum, count)
     conv = f32[] convert(sum2)
-    s1 = f32[1, 1024, 1024] broadcast(conv), dimensions={}
+    bc1 = f32[1, 1024, 1024] broadcast(conv), dimensions={}
 
     after-all-1 = token[] after-all()
     recv-1 = (f32[1, 1024, 1024], u32[], token[]) recv(after-all-1), channel_id=2,
@@ -633,10 +696,10 @@ TEST_F(GpuHloScheduleTest, LHSSendRecvPairs2) {
     send-done-1 = token[] send-done(send-1), channel_id=2
     recv-data-1 = f32[1, 1024, 1024] get-tuple-element(recv-done-1), index=0
 
-    s2 = f32[1, 1024, 1024] add(recv-data-0, s1)
-    s = f32[1, 1024, 1024] add(recv-data-1, s2)
+    add2 = f32[1, 1024, 1024] add(recv-data-0, bc1)
+    add = f32[1, 1024, 1024] add(recv-data-1, add2)
 
-    ROOT result = (u32[], f32[1, 1024, 1024]) tuple(new_count, s)
+    ROOT result = (u32[], f32[1, 1024, 1024]) tuple(new_count, add)
   }
 
   ENTRY test_computation {
@@ -1257,7 +1320,7 @@ TEST_P(GpuHloScheduleParameterizedTest, AsyncAllReduce) {
   HloInstruction* all_reduce_start =
       builder.AddInstruction(HloInstruction::CreateAllReduceStart(
           all_reduce_start_shape, {add0}, reduction_computation,
-          /*replica_groups=*/{}, /*constrain_layout=*/false,
+          /*device_list=*/CollectiveDeviceList(), /*constrain_layout=*/false,
           /*channel_id=*/std::nullopt, /*use_global_device_ids=*/true));
   // In addition, add control_dependency: add1->nonblocking_call.
   TF_CHECK_OK(add1->AddControlDependencyTo(all_reduce_start));

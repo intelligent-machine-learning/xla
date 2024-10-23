@@ -17,17 +17,24 @@ limitations under the License.
 #define XLA_SERVICE_GPU_MODEL_SYMBOLIC_TILE_ANALYSIS_H_
 
 #include <cstdint>
+#include <functional>
 #include <memory>
-#include <optional>
+#include <string>
 #include <utility>
 #include <variant>
 #include <vector>
 
+#include "absl/container/inlined_vector.h"
 #include "absl/status/statusor.h"
-#include "mlir/IR/MLIRContext.h"  // from @llvm-project
+#include "absl/types/span.h"
+#include "mlir/IR/MLIRContext.h"
+#include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
-#include "xla/service/gpu/model/indexing_map.h"
+#include "xla/service/gpu/hlo_traversal.h"
+#include "xla/service/gpu/model/affine_map_printer.h"
+#include "xla/service/gpu/model/symbolic_tile.h"
 #include "xla/service/gpu/model/symbolic_tiled_hlo_instruction.h"
+#include "xla/service/gpu/model/tiled_hlo_computation.h"
 #include "xla/service/instruction_fusion.h"
 
 namespace xla {
@@ -45,75 +52,107 @@ using SymbolicTileAnalysisOrError =
 // instruction of the computation to the relevant instruction.
 class SymbolicTileAnalysis {
  public:
+  // A tile size for each dimension.
+  //
+  // This is an inlined vector to avoid too many heap allocations.
+  using Tiling = absl::InlinedVector<int64_t, 4>;
+
   // Tries to construct a symbolic tile analysis from a computation. Returns
   // a diagnostic if the construction fails for any reason.
   static SymbolicTileAnalysisOrError AnalyzeComputation(
       const HloComputation& computation, mlir::MLIRContext* ctx);
+  static SymbolicTileAnalysisOrError AnalyzeFusion(
+      const HloFusionAdaptor& fusion, mlir::MLIRContext* ctx);
 
-  // Evaluates the tile offsets of an instruction from the analyzed computation
-  // following the provided path from the root. Tile parameters must have been
-  // set before calling this method.
-  std::vector<int64_t> TileOffsets(
-      const SymbolicTiledHloInstruction& tiled_hlo) const;
-  // Evaluates the tile sizes of an instruction from the analyzed computation
-  // following the provided path from the root. Tile parameters must have been
-  // set before calling this method.
-  std::vector<int64_t> TileSizes(
-      const SymbolicTiledHloInstruction& tiled_hlo) const;
-  // Evaluates the tile strides of an instruction from the analyzed computation
-  // following the provided path from the root. Tile parameters must have been
-  // set before calling this method.
-  std::vector<int64_t> TileStrides(
-      const SymbolicTiledHloInstruction& tiled_hlo) const;
-
-  // Computes the indexing map from block id to tile offset of the tiled HLO
-  // instruction. The indexing map has the following form:
+  // Returns a graph of HLO instructions tiled with the given tile parameters.
+  // The provided tile parameters must satisfy the analysis's constraints.
+  // By default, `ComputetiledHloInstructions` performs a check that the
+  // constraints are satisfied by the chosen tiled parameters. Setting
+  // `constraints_are_known_satisfied` to true bypasses this check.
   //
-  // (block_id) -> (tile_offset0, tile_offset1, ...)
-  absl::StatusOr<IndexingMap> ComputeBlockIdToTileOffsetIndexing(
-      const SymbolicTiledHloInstruction& tiled_hlo) const;
-
-  // Populates input tile sizes. This is a prerequisite in order to extract
-  // concrete values using `TileOffsets`, `TileSizes`, and `TileStrides`.
-  void SetTileSizes(std::vector<int64_t> sizes);
+  // If `compute_all_tile_offset_indexing_maps == true`, all
+  // TiledHloInstructions will have tile offset indexing maps set. Otherwise,
+  // the indexing maps will be set only for instructions that have equal hash to
+  // deduplicate them.
+  absl::StatusOr<TiledHloComputation> ComputeTiledHloInstructions(
+      absl::Span<const int64_t> tile_parameters,
+      bool constraints_are_known_satisfied = false,
+      bool compute_all_tile_offset_indexing_maps = false) const;
 
   // Returns the tiled root instruction.
   const SymbolicTiledHloInstruction* GetRoot() const {
-    return tiled_hlo_instructions_.back().get();
+    return symbolic_tiled_hlo_instructions_.back().get();
   }
 
-  // Returns the tiled HLO instructions in def-before-use order.
-  const std::vector<std::unique_ptr<SymbolicTiledHloInstruction>>&
-  GetTiledHloInstructions() const {
-    return tiled_hlo_instructions_;
+  // Returns the number of tile parameters in this symbolic analysis.
+  int64_t num_tile_parameters() const {
+    return GetRoot()->hlo()->shape().dimensions_size();
   }
+
+  // Returns the symbolic tiled HLO instructions in def-before-use order.
+  const std::vector<std::unique_ptr<SymbolicTiledHloInstruction>>&
+  GetSymbolicTiledHloComputation() const {
+    return symbolic_tiled_hlo_instructions_;
+  }
+
+  // Returns the constraints for the parameters of the symbolic tiled HLO
+  // computation. This is the intersection of the constraints of all the
+  // symbolic tiles encountered throughout the computation.
+  const ConstraintExpression& GetConstraints() const { return constraints_; }
+
+  // Returns true if a list of tile parameters satisfies the symbolic tile
+  // analysis's constraints.
+  //
+  // Returns false if the constraints are not satisfied but can be evaluated
+  // correctly. Returns an error if the constraints cannot be evaluated
+  // correctly. This is typically the case if too few tile parameters are
+  // provided to fully reduce the constraint expressions to constants.
+  absl::StatusOr<bool> ParametersSatisfyConstraints(
+      absl::Span<const int64_t> tile_parameters) const;
 
   // Return the underlying MLIRContext.
   mlir::MLIRContext* GetMLIRContext() const { return context_; };
 
+  // Returns a string representation of the analysis. Used only for error
+  // messages and debugging.
+  std::string ToString(
+      const AffineMapPrinter& printer = AffineMapPrinter()) const;
+
+  // Returns a list of tilings for the symbolic tiled HLO computation of the
+  // analysis that are expected to perform well.
+  //
+  // Note: This is an initial implementation where the results may not perform
+  // that well, and now we're filtering the tilings with Triton in mind
+  // (allowing only powers of 2 or the full dimension size).
+  absl::StatusOr<std::vector<Tiling>> GetGoodTilings() const;
+
  private:
   SymbolicTileAnalysis(std::vector<std::unique_ptr<SymbolicTiledHloInstruction>>
-                           tiled_hlo_instructions,
+                           symbolic_tiled_hlo_instructions,
+                       ConstraintExpression constraints,
                        mlir::MLIRContext* context)
-      : tiled_hlo_instructions_(std::move(tiled_hlo_instructions)),
+      : symbolic_tiled_hlo_instructions_(
+            std::move(symbolic_tiled_hlo_instructions)),
+        constraints_(std::move(constraints)),
         context_(context) {}
 
   // The tiled HLO instructions in def-before-use order.
   std::vector<std::unique_ptr<SymbolicTiledHloInstruction>>
-      tiled_hlo_instructions_;
+      symbolic_tiled_hlo_instructions_;
+
+  // See the documentation of GetConstraints().
+  ConstraintExpression constraints_;
 
   mlir::MLIRContext* context_;
-  // Optionally set tile parameters. These parameters can be set by calling
-  // `SetTileParameters`, and correspond to the output tile for the analyzed
-  // computation. The order and type of parameters are as explained in the
-  // documentation of `SymbolicTile`.
-  std::optional<std::vector<int64_t>> tile_parameters_;
-
-  // Indexing map from block id to root tile offset. Computed from the tile
-  // parameters.
-  std::optional<IndexingMap> block_id_to_root_tile_offset_;
 };
 
+namespace detail {
+// Only exposed for testing, please use SymbolicTileAnalysis::GetGoodTilings()
+// instead.
+std::vector<SymbolicTileAnalysis::Tiling> GetGoodTilings(
+    absl::Span<const int64_t> dim_sizes,
+    std::function<bool(absl::Span<const int64_t>)> is_valid);
+}  // namespace detail
 }  // namespace gpu
 }  // namespace xla
 

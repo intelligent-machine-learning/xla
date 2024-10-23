@@ -23,18 +23,18 @@ limitations under the License.
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Casting.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
-#include "mlir/IR/BuiltinAttributes.h"  // from @llvm-project
-#include "mlir/IR/BuiltinOps.h"  // from @llvm-project
-#include "mlir/IR/MLIRContext.h"  // from @llvm-project
-#include "mlir/IR/OpDefinition.h"  // from @llvm-project
-#include "mlir/IR/SymbolTable.h"  // from @llvm-project
-#include "mlir/IR/TypeUtilities.h"  // from @llvm-project
-#include "mlir/IR/Value.h"  // from @llvm-project
-#include "mlir/IR/Visitors.h"  // from @llvm-project
-#include "mlir/Pass/Pass.h"  // from @llvm-project
-#include "mlir/Support/LLVM.h"  // from @llvm-project
-#include "mlir/Support/LogicalResult.h"  // from @llvm-project
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/MLIRContext.h"
+#include "mlir/IR/OpDefinition.h"
+#include "mlir/IR/SymbolTable.h"
+#include "mlir/IR/TypeUtilities.h"
+#include "mlir/IR/Value.h"
+#include "mlir/IR/Visitors.h"
+#include "mlir/Pass/Pass.h"
+#include "mlir/Support/LLVM.h"
+#include "mlir/Support/LogicalResult.h"
 #include "xla/python/ifrt/ir/ifrt_dialect.h"
 #include "xla/python/ifrt/ir/ifrt_interfaces.h"
 #include "xla/python/ifrt/ir/transforms/constants.h"
@@ -176,7 +176,7 @@ mlir::LogicalResult UpdateFunctionArgsUsingSharding(
     auto value = function.getFunctionType().getInput(i);
 
     mlir::RankedTensorType ranked_type =
-        value.dyn_cast<mlir::RankedTensorType>();
+        mlir::dyn_cast<mlir::RankedTensorType>(value);
     if (ranked_type == nullptr) {
       return function.emitOpError()
              << "requires `mlir::RankedTensorType` for arg " << i;
@@ -208,15 +208,7 @@ class SpmdExpansionPass
 
  private:
   mlir::LogicalResult spmdExpand(mlir::func::FuncOp func_op);
-
-  mlir::LogicalResult AnnotateCallees(
-      mlir::func::FuncOp func_op, mlir::SymbolTableCollection& symbol_table);
 };
-
-mlir::LogicalResult SpmdExpansionPass::AnnotateCallees(
-    mlir::func::FuncOp func_op, mlir::SymbolTableCollection& symbol_table) {
-  return mlir::success();
-}
 
 // Given SPMD expanded `function_operands` to `function`, update the function
 // signature to reflect the local shape of `function_operands`.
@@ -225,7 +217,8 @@ mlir::LogicalResult UpdateFunctionWithLocalInputShapes(
     mlir::func::FuncOp function) {
   for (auto& operand : function_operands) {
     const int index = operand.getOperandNumber();
-    auto arg_type = operand.get().getType().dyn_cast<mlir::RankedTensorType>();
+    auto arg_type =
+        mlir::dyn_cast<mlir::RankedTensorType>(operand.get().getType());
     if (!arg_type) continue;
 
     llvm::ArrayRef<int64_t> arg_local_shape = arg_type.getShape();

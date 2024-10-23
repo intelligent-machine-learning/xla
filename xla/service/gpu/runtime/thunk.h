@@ -32,15 +32,17 @@ limitations under the License.
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
-#include "mlir/IR/Operation.h"  // from @llvm-project
+#include "mlir/IR/Operation.h"
 #include "xla/executable_run_options.h"
+#include "xla/ffi/execution_context.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/service/buffer_assignment.h"
 #include "xla/service/global_device_id.h"
 #include "xla/service/gpu/buffer_allocations.h"
-#include "xla/service/gpu/nccl_clique_key.h"
+#include "xla/service/gpu/ir_emission_utils.h"
 #include "xla/service/gpu/runtime/nccl_api.h"
 #include "xla/service/gpu/runtime/nccl_clique.h"
+#include "xla/service/gpu/runtime/nccl_clique_key.h"
 #include "xla/service/service_executable_run_options.h"
 #include "xla/stream_executor/stream.h"
 #include "xla/stream_executor/stream_executor.h"
@@ -49,7 +51,32 @@ limitations under the License.
 namespace xla {
 namespace gpu {
 
-TSL_LIB_GTL_DEFINE_INT_TYPE(ExecutionStreamId, int64_t);
+// Execution stream id allows to specify what Gpu stream Thunk should be using
+// for launching device work (kernels, library calls, etc.). By default all
+// thunks use stream #0, which is the default compute stream of an XLA
+// executable.
+//
+// Stream synchronizations are explicit and represented as WaitForStreams thunk
+// in a ThunkSequence. When ThunkSequence converted to CommandBuffer, execution
+// streams mapped to concurrent execution scopes and barriers between them.
+//
+// IMPORTANT: Async execution semantics and execution stream id
+//
+// For async thunks (i.e. thunks corresponding to `all-reduce-start` and
+// `all-reduce-done`) execution stream id means NOT a stream where the async
+// operation must execute, but a stream that async operation must be
+// synchronized with:
+//
+//   - Start operation must wait for the completion of all launched work on the
+//     execution stream id (usually by adding a stream wait) and after that
+//     launch async work on implementation defined extra stream (can be borrowed
+//     from a pool)
+//
+//   - Corresponding Done operation must synchronize execution stream id with
+//     an implementation defined stream that is running async work, again
+//     usually by adding a stream wait.
+//
+TSL_LIB_GTL_DEFINE_INT_TYPE(ExecutionStreamId, uint64_t);
 
 // Thunk acts as the bridge between IrEmitter and GpuExecutable. It stores the
 // metadata IrEmitter generates for GpuExecutable to invoke an HloInstruction.
@@ -93,6 +120,7 @@ class Thunk {
     kConvolution,
     kConvolutionReorder,
     kCopy,
+    kCopyDone,
     kCommandBuffer,
     kCubSort,
     kCublasLtMatmul,
@@ -139,12 +167,10 @@ class Thunk {
     kWhile,
     kFlashAttn,
     kFusedMHA,
+    kFusedMHABackward,
     kWaitForStreams,
     kCuDnn
   };
-
-  // <HLO computation fingerprint, serialized compiled object>.
-  using BinaryMap = absl::flat_hash_map<std::string, std::string>;
 
   // TODO(ezhulenev): This should become a part of StreamExecutor library, but
   // for now we keep it here as a Thunk implementation detail. It's not yet
@@ -157,14 +183,10 @@ class Thunk {
   };
 
   struct ThunkInfo {
-    explicit ThunkInfo(mlir::Operation* op) : op(op) {}
-    static ThunkInfo WithProfileAnnotation(mlir::Operation* op);
+    ThunkInfo() = default;  // Disable implicit constructors.
     static ThunkInfo WithProfileAnnotation(const HloInstruction* instr);
 
     std::string profile_annotation;
-    // TODO(b/304613751): This is only needed by the LMHLO. Remove this when
-    // LMHLO is removed from the runtime pipeline.
-    mlir::Operation* op;
 
     ExecutionStreamId execution_stream_id = kDefaultExecutionStreamId;
   };
@@ -202,6 +224,9 @@ class Thunk {
     absl::StatusOr<size_t> num_communicators(
         const NcclCliqueKey& clique_key) const;
 
+    // Returns whether the clique is a local clique.
+    absl::StatusOr<bool> is_local_clique(const NcclCliqueKey& clique_key) const;
+
     bool empty() const { return cliques_map_.empty(); }
 
    private:
@@ -220,6 +245,7 @@ class Thunk {
     // missing a global device mapping for a local device ordinal).
     static absl::StatusOr<CollectiveExecuteParams> Create(
         const ServiceExecutableRunOptions& run_options,
+        absl::Span<se::Stream* const> async_streams,
         int64_t local_device_ordinal, int64_t collective_max_nchannels = 0,
         int64_t p2p_max_nchannels = 0);
 
@@ -231,6 +257,9 @@ class Thunk {
     // XLA execution run id allows us to distinguish collective operations
     // from different concurrent executions and avoid deadlocks.
     RunId run_id;
+
+    // Streams for asynchronous collective communications.
+    absl::InlinedVector<se::Stream*, 4> async_streams;
 
     int64_t local_device_ordinal;
     GlobalDeviceId global_device_id;
@@ -244,6 +273,7 @@ class Thunk {
 
    private:
     CollectiveExecuteParams(se::StreamExecutor* executor, RunId run_id,
+                            absl::Span<se::Stream* const> async_streams,
                             int64_t local_device_ordinal,
                             GlobalDeviceId global_device_id,
                             const DeviceAssignment* device_assn,
@@ -268,9 +298,6 @@ class Thunk {
   //===--------------------------------------------------------------------===//
   // InitializeParams
   //===--------------------------------------------------------------------===//
-
-  // TODO(ezhulenev): Merge InitializeParams and ExecuteParams as they have
-  // almost the same members and tightly coupled.
 
   // Parameters passed to Initialize. At thunk initialization time we do not
   // launch any "work" on device and only initialize thunks for execution, i.e.
@@ -297,6 +324,9 @@ class Thunk {
 
     // Collective cliques acquired based on resource requests.
     CollectiveCliques* collective_cliques = nullptr;
+
+    // XLA FFI execution context.
+    const ffi::ExecutionContext* ffi_execution_context = nullptr;
   };
 
   //===--------------------------------------------------------------------===//
@@ -313,7 +343,6 @@ class Thunk {
         const ServiceExecutableRunOptions& run_options,
         const BufferAllocations& buffer_allocations, se::Stream* stream,
         se::Stream* command_buffer_trace_stream,
-        absl::Span<se::Stream* const> async_streams,
         CollectiveExecuteParams* collective_params,
         CollectiveCliques* collective_cliques,
         ExecutionStreamIdMap additional_compute_streams = {});
@@ -333,10 +362,6 @@ class Thunk {
     // avoid accidental tracing of unrelated activities on a main stream.
     se::Stream* command_buffer_trace_stream;
 
-    // Streams for asynchronous collective communications.
-    // TODO(ezhulenev): Move this into `CollectiveExecuteParams`.
-    absl::InlinedVector<se::Stream*, 4> async_comms_streams;
-
     // Parameters for executing collective operations.
     CollectiveExecuteParams* collective_params;
 
@@ -351,22 +376,28 @@ class Thunk {
     SendDeviceMemoryFunction* send_device_memory_function;
     RecvDeviceMemoryFunction* recv_device_memory_function;
 
+    // XLA FFI execution context.
+    const ffi::ExecutionContext* ffi_execution_context;
+
     // Additional compute streams on which thunks launch operations.
     ExecutionStreamIdMap additional_compute_streams;
+
+    bool mock_collectives = false;
 
    private:
     friend class CommandBufferThunk;
 
     ExecuteParams(const BufferAllocations* buffer_allocations,
                   se::Stream* stream, se::Stream* command_buffer_trace_stream,
-                  absl::InlinedVector<se::Stream*, 4> async_comms_streams,
                   CollectiveExecuteParams* collective_params,
                   CollectiveCliques* collective_cliques,
                   se::Stream* device_to_host_stream,
                   se::Stream* host_to_device_stream,
                   SendDeviceMemoryFunction* send_device_memory_function,
                   RecvDeviceMemoryFunction* recv_device_memory_function,
-                  ExecutionStreamIdMap additional_compute_streams = {});
+                  const ffi::ExecutionContext* ffi_execution_context,
+                  ExecutionStreamIdMap additional_compute_streams = {},
+                  bool mock_collectives = false);
   };
 
   //===--------------------------------------------------------------------===//
@@ -377,20 +408,14 @@ class Thunk {
   Thunk(Kind kind, ThunkInfo thunk_info)
       : kind_(kind),
         profile_annotation_(thunk_info.profile_annotation),
-        op_(thunk_info.op),
         execution_stream_id_(thunk_info.execution_stream_id) {}
   virtual ~Thunk() = default;
   Thunk(const Thunk&) = delete;
   Thunk& operator=(const Thunk&) = delete;
 
-  virtual std::string ToStringExtra(int indent) const { return ""; }
+  virtual std::string ToString(int indent) const { return ""; }
   Kind kind() const { return kind_; }
   std::string_view profile_annotation() const { return profile_annotation_; }
-
-  // Only valid during compilation, i.e., lowering thunks to kernel-launch
-  // related XLA runtime custom calls). nullptr at runtime. MLIR codegen will
-  // cease the practice of lowering thunks to XLA runtime custom calls.
-  mlir::Operation* op() { return op_; }
 
   // Prepares thunk for execution.
   //
@@ -419,30 +444,27 @@ class Thunk {
   // Precondition: Initialize(initialize_params) has been called.
   virtual absl::Status ExecuteOnStream(const ExecuteParams& params) = 0;
 
-  // Clears metadata that is only valid during compile time.
-  virtual void ClearCompileTimeInfo() { op_ = nullptr; }
-
   static absl::string_view KindToString(Thunk::Kind kind);
 
   ExecutionStreamId execution_stream_id() const { return execution_stream_id_; }
+  void set_execution_stream_id(ExecutionStreamId execution_stream_id) {
+    execution_stream_id_ = execution_stream_id;
+  }
 
   static absl::StatusOr<se::Stream*> GetStreamForExecution(
       ExecutionStreamId stream_id, const ExecuteParams& params);
 
+  // Returns `true` if this thunk requires inter-GPU communication.
+  bool IsCollective() const;
+
  private:
   Kind kind_;
   std::string profile_annotation_;
-  mlir::Operation* op_;
   ExecutionStreamId execution_stream_id_;
 };
 
 // A sequence of thunks.
-class ThunkSequence : public std::vector<std::unique_ptr<Thunk>> {
- public:
-  std::string ToString(int indent = 0,
-                       std::function<std::string(const Thunk*)>
-                           get_thunk_annotation = nullptr) const;
-};
+using ThunkSequence = std::vector<std::unique_ptr<Thunk>>;
 
 std::ostream& operator<<(std::ostream& os, Thunk::Kind kind);
 
