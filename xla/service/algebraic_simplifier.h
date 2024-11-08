@@ -116,6 +116,13 @@ class AlgebraicSimplifierOptions {
   bool use_convert_constant_folding() const {
     return use_convert_constant_folding_;
   }
+  void set_use_convert_lossy_optimization(bool use_convert_lossy_optimization) {
+    use_convert_lossy_optimization_ = use_convert_lossy_optimization;
+  }
+
+  bool use_convert_lossy_optimization() const {
+    return use_convert_lossy_optimization_;
+  }
 
   void set_raise_slice_and_reduce_through_dot(
       bool raise_slice_and_reduce_through_dot) {
@@ -325,6 +332,7 @@ class AlgebraicSimplifierOptions {
   bool raise_slice_and_reduce_through_dot_{false};
   double raise_slice_and_reduce_through_dot_threshold_{2.0};
   bool use_convert_constant_folding_{false};
+  bool use_convert_lossy_optimization_{true};
   Metadata metadata_;
 };
 
@@ -516,7 +524,7 @@ class AlgebraicSimplifierVisitor : public DfsHloRewriteVisitor {
   // bitcast transpose.
   absl::Status SimplifyTransposeOfBroadcast(
       HloInstruction* transpose, absl::Span<const int64_t> dimensions);
-
+  absl::Status TryUseLossyConvertOp(HloInstruction* convert_instruction);
   // Converts to primitive type if the input hlo is not that type, otherwise
   // returns the original hlo.
   HloInstruction* AsType(HloInstruction* hlo,

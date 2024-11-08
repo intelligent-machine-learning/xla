@@ -69,13 +69,13 @@ struct HloLatencyInfo {
   std::vector<double> durations;
 };
 
-Status ConvertXplaneToOfflineSQLitePgle(
+absl::Status ConvertXplaneToOfflineSQLitePgle(
     std::vector<tensorflow::profiler::XSpace> xspaces,
     xla::auto_reorder::OfflineSQLitePgle* dbbase_pgle);
-Status ConvertXplaneUnderLogdirToOfflineSQLitePgle(
+absl::Status ConvertXplaneUnderLogdirToOfflineSQLitePgle(
     const std::string& logdir,
     xla::auto_reorder::OfflineSQLitePgle* database_pgle);
-Status ConvertXplaneToFile(const std::string& xplane_dir,
+absl::Status ConvertXplaneToFile(const std::string& xplane_dir,
                            const std::string& output_filename);
 
 }  // namespace xla

@@ -217,13 +217,5 @@ xla_cc_binary(
     ":convert_xplane",
         "//xla/service",
         "//xla/service:interpreter_plugin",
-        "//xla/service/gpu:executable_proto_cc",
-        "//xla/service/gpu:gpu_compiler",
-        "//xla/service/gpu:nvptx_compiler",
-        "//xla/service/gpu:nvptx_compiler_impl",
-        "//xla/stream_executor",
-        "//xla/stream_executor/gpu:gpu_init",
-    ] + if_cuda([
-        "//xla/stream_executor/cuda:cublas_plugin",
-    ])
+        "//xla/service/gpu:executable_proto_cc",]
 )

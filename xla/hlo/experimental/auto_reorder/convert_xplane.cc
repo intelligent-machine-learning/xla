@@ -81,7 +81,7 @@ std::unique_ptr<xla::HloModule> CreateModuleFromProto(
   return nullptr;
 }
 
-Status GetHloInstrProfileInfo(
+absl::Status GetHloInstrProfileInfo(
     const xla::HloModuleProto& hlo_module_proto,
     absl::flat_hash_map<std::string, xla::auto_reorder::InstrProfileInfo>*
         hlo_module_info) {
@@ -114,7 +114,7 @@ void GetXPlaneHloModuleProfileInfo(
                                    stat.BytesValue().size())) {
         const xla::HloModuleProto& hlo_module_proto = hlo_proto.hlo_module();
 
-        Status st = GetHloInstrProfileInfo(hlo_module_proto, hlo_module_info);
+        absl::Status st = GetHloInstrProfileInfo(hlo_module_proto, hlo_module_info);
         if (!st.ok()) {
           VLOG(4) << "Failed to get HloInstrProfileInfo from HloModuleProto";
         }
@@ -123,7 +123,7 @@ void GetXPlaneHloModuleProfileInfo(
   });
 }
 
-Status ConvertXplaneToOfflineSQLitePgle(
+absl::Status ConvertXplaneToOfflineSQLitePgle(
     std::vector<tensorflow::profiler::XSpace> xspaces,
     xla::auto_reorder::OfflineSQLitePgle* dbbase_pgle) {
   // name to HloLatencyInfo
@@ -216,9 +216,9 @@ Status ConvertXplaneToOfflineSQLitePgle(
   }
   VLOG(4) << "Lookup inst profiler, Hits: " << stats.node_hits
           << " Misses: " << stats.node_misses;
-  return OkStatus();
+  return absl::OkStatus();
 }
-Status ConvertXplaneUnderLogdirToOfflineSQLitePgle(
+absl::Status ConvertXplaneUnderLogdirToOfflineSQLitePgle(
     const std::string& logdir,
     xla::auto_reorder::OfflineSQLitePgle* database_pgle) {
   // Find the xplane files for each host under logdir.
@@ -246,7 +246,7 @@ Status ConvertXplaneUnderLogdirToOfflineSQLitePgle(
   return ConvertXplaneToOfflineSQLitePgle(xspaces, database_pgle);
 }
 
-Status ConvertXplaneToFile(const std::string& xplane_dir,
+absl::Status ConvertXplaneToFile(const std::string& xplane_dir,
                            const std::string& output_filename) {
   // tensorflow::profiler::ProfiledInstructionsProto profile_proto;
   std::vector<std::string> jsonline_vector;
@@ -272,7 +272,7 @@ Status ConvertXplaneToFile(const std::string& xplane_dir,
     return status;
   }
 
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 }  // namespace xla

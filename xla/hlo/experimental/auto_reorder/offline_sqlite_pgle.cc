@@ -360,8 +360,7 @@ absl::Status OfflineSQLitePgle::OpenDB(const std::string& db_path) {
 
   int rc = sqlite3_open(db_path.c_str(), &client_raw);
   if (rc) {
-    VLOG(2) << "Can't open database: " << sqlite3_errmsg(client_raw)
-            << std::endl;
+    VLOG(2) << "Can't open database: " << sqlite3_errmsg(client_raw)<<" db_path:"<<db_path;
     return absl::InternalError("Can't open database");
   } else {
     VLOG(3) << "Opened database successfully" << std::endl;

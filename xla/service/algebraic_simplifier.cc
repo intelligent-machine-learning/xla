@@ -1994,6 +1994,99 @@ AlgebraicSimplifierVisitor::TryRemoveUpcastAndDowncastSurroundingBinaryOp(
   TF_RETURN_IF_ERROR(ReplaceInstruction(final_convert_instr, new_bin_op));
   return absl::OkStatus();
 }
+absl::Status
+AlgebraicSimplifierVisitor::TryUseLossyConvertOp(
+    HloInstruction* convert_instruction) {
+  VLOG(2)<<"TryUseLossyConvertOp start";
+  HloInstruction* arg_1 = nullptr;
+  HloInstruction* arg_2 = nullptr;
+  HloInstruction* bin_op_instr = nullptr;
+  HloInstruction* final_convert_instr = nullptr;
+
+  // TODO(b/277095115): Instead, consider a more broad matching here which will
+  // also catch constants. For an example, look at
+  // cudnn_fused_conv_rewriter.cc's IsLosslesslyConvertibleTo().
+  auto arg_1_pattern = m::Convert(m::Op(&arg_1)).WithOneUser();
+  auto arg_2_pattern = m::Convert(m::Op(&arg_2)).WithOneUser();
+
+  auto is_unsigned_int_pred = [](const HloInstruction* instr) {
+    // Only unsigned integer division/remainder is safe. Signed integer division
+    // can result in undefined behavior. For example, in S8 consider -128/-1.
+    return primitive_util::IsUnsignedIntegralType(
+        instr->shape().element_type());
+  };
+  // bf16 is safe for multiply/divide;
+  // we can replace 
+  // 1. `bf16->convert(fp32)->op->convert(bf16)->output` to `bf16->op->output`
+  // 2. `fp32->convert(bf16)->op->convert(fp32)->output` to `fp32->op->output`
+  //match convert->op->convert 
+  auto bin_op_pattern =
+      m::Convert(&final_convert_instr,
+                 m::AnyOf<HloInstruction>(
+                     m::Add(&bin_op_instr, arg_1_pattern, arg_2_pattern),
+                     m::Subtract(&bin_op_instr, arg_1_pattern, arg_2_pattern),
+                     m::Multiply(&bin_op_instr, arg_1_pattern, arg_2_pattern),
+                     m::Divide(&bin_op_instr, arg_1_pattern, arg_2_pattern)
+                         .WithPredicate(is_unsigned_int_pred),
+                     m::Remainder(&bin_op_instr, arg_1_pattern, arg_2_pattern)
+                         .WithPredicate(is_unsigned_int_pred))
+                     .WithOneUser());
+  //match convert->convert 
+  HloInstruction* first_convert_instr = nullptr;
+  HloInstruction* input_operator = nullptr;
+  auto convert_convert_pattern = m::Convert(&final_convert_instr, m::Convert(&first_convert_instr,
+  m::Op(&input_operator)).WithOneUser()
+  ).WithOneUser();
+
+  if(Match(convert_instruction,convert_convert_pattern)){
+    const PrimitiveType final_type = final_convert_instr->shape().element_type();
+    const PrimitiveType first_convert_type = first_convert_instr->shape().element_type();
+
+    VLOG(2)<<"TryUseLossyConvertOp match convert->convert final_convert_instr="<<final_convert_instr->ToString()<<"\n,first_convert_instr="<<first_convert_instr->ToString();
+    
+    TF_RETURN_IF_ERROR(ReplaceInstruction(final_convert_instr, input_operator));
+    
+
+    return absl::OkStatus();
+
+  }
+  else if (!Match(convert_instruction, bin_op_pattern)) {
+  VLOG(2)<<"TryUseLossyConvertOp finish no match type";
+    return absl::OkStatus();
+  }
+  VLOG(2)<<"TryUseLossyConvertOp match convert-op-convert";
+
+  const PrimitiveType arg_1_type = arg_1->shape().element_type();
+  const PrimitiveType arg_2_type = arg_2->shape().element_type();
+  const PrimitiveType final_type = final_convert_instr->shape().element_type();
+  
+
+  if (arg_1_type != final_type || arg_2_type != final_type) {
+    // Only match when the series of instructions ends with the same types that
+    // it started with.
+    VLOG(2)<<"TryUseLossyConvertOp finish diff type";
+    return absl::OkStatus();
+  }
+
+  const PrimitiveType bin_op_type = bin_op_instr->shape().element_type();
+
+  if(
+    (final_type==PrimitiveType::F32&&bin_op_type==PrimitiveType::BF16)
+    ||
+    (final_type==PrimitiveType::BF16&&bin_op_type==PrimitiveType::F32)
+  ){
+    HloComputation* computation = convert_instruction->parent();
+    HloInstruction* new_bin_op =
+        computation->AddInstruction(bin_op_instr->CloneWithNewOperands(
+            ShapeUtil::ChangeElementType(bin_op_instr->shape(), final_type),
+            {arg_1, arg_2}));
+    TF_RETURN_IF_ERROR(ReplaceInstruction(final_convert_instr, new_bin_op));
+  }
+  
+  VLOG(2)<<"TryUseLossyConvertOp finish no match type";
+  return absl::OkStatus();
+
+}
 
 static HloInstruction* BuildTupleConstant(HloComputation* computation,
                                           const LiteralSlice& literal,
@@ -5213,6 +5306,15 @@ absl::Status AlgebraicSimplifierVisitor::HandleConvert(
     VLOG(10) << "Replacing convert(constant) with constant";
     return ReplaceWithNewInstruction(
         convert, HloInstruction::CreateConstant(std::move(dest_literal)));
+  }
+  if(options_.use_convert_lossy_optimization()){
+    // fp32->bf16->fp32, can lead to fp32
+    
+    auto status = TryUseLossyConvertOp(convert);
+    if(!status.ok()){
+      VLOG(2)<<"fail TryUseLossyConvertOp:"<<status.message();
+      return status;
+    }
   }
 
   return TryRemoveUpcastAndDowncastSurroundingBinaryOp(convert);

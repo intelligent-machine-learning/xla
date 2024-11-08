@@ -466,7 +466,7 @@ absl::StatusOr<ScheduleMetadata> ScheduleGpuModule(
                 return GetSizeOfShape(shape, input_pointer_size);
               },
               module->entry_computation());
-      LOG(INFO) << "Using analytical latency estimator as offline PGLE backup";
+      LOG(INFO) << "Using analytical latency estimator as offline PGLE backup:"<<offline_sqlite_pgle_path;
       latency_estimator =
           std::make_unique<xla::auto_reorder::OfflineSQLitePgle>(
               config, std::move(backup_latency_estimator),

@@ -11739,6 +11739,102 @@ TEST_F(AlgebraicSimplifierTest, RemoveConvertConstant) {
   EXPECT_THAT(root, GmockMatch(m::Reduce(m::Parameter(0),
                                          m::Constant().WithShape(F32, {}))));
 }
+TEST_F(AlgebraicSimplifierTest, RemoveConvert2) {
+  // 
+  // (p0+p1)*p1
+  const std::string hlo_string = R"(
+    HloModule module
+
+    add {
+      p0 = f32[] parameter(0)
+      p1 = f32[] parameter(1)
+      p0_convert = bf16[] convert(p0)
+      p1_convert = bf16[] convert(p1)
+      add_convert = bf16[] add(p0_convert, p1_convert)
+      
+      ROOT r = f32[] convert(add_convert, f32)
+    }
+
+    ENTRY test {
+        a = f32[32,64] parameter(0)
+        b = s32[] constant(0)
+        c = f32[] convert(b)
+        ROOT reduce = f32[32] reduce(a, c),
+                      dimensions={1}, to_apply=add
+      }
+    )";
+  TF_ASSERT_OK_AND_ASSIGN(auto m, ParseAndReturnVerifiedModule(hlo_string));
+  default_options_.set_use_convert_constant_folding(true);
+  default_options_.set_use_convert_lossy_optimization(true);
+  EXPECT_TRUE(AlgebraicSimplifier(default_options_).Run(m.get()).value());
+  HloInstruction* root = m->entry_computation()->root_instruction();
+  auto add_computation = m->GetComputationWithName("add");
+  EXPECT_THAT(root, GmockMatch(m::Reduce(m::Parameter(0),
+                                         m::Constant().WithShape(F32, {}))));
+  HloInstruction* add_root = add_computation->root_instruction();
+  EXPECT_EQ(add_root->opcode(), HloOpcode::kAdd);
+  EXPECT_THAT(add_root, GmockMatch(match::Add(
+                  match::Parameter(0).WithShape(F32, {}),
+                  match::Parameter(1).WithShape(F32, {})
+                                         )
+                                         )
+                  );
+  
+  const std::string hlo_string2 = R"(
+    HloModule module
+
+    add {
+      p0 = bf16[] parameter(0)
+      p1 = bf16[] parameter(1)
+      p0_convert = f32[] convert(p0)
+      p1_convert = f32[] convert(p1)
+      add_convert = f32[] add(p0_convert, p1_convert)
+      
+      ROOT r = bf16[] convert(add_convert, bf16)
+    }
+
+    ENTRY test {
+        a = bf16[32,64] parameter(0)
+        c = bf16[] parameter(1)
+        ROOT reduce = bf16[32] reduce(a, c),
+                      dimensions={1}, to_apply=add
+      }
+    )";
+  TF_ASSERT_OK_AND_ASSIGN(auto m2, ParseAndReturnVerifiedModule(hlo_string2));
+  EXPECT_TRUE(AlgebraicSimplifier(default_options_).Run(m2.get()).value());
+  auto add_computation2 = m2->GetComputationWithName("add");
+  HloInstruction* add_root2 = add_computation2->root_instruction();
+  EXPECT_EQ(add_root2->opcode(), HloOpcode::kAdd);
+
+
+  EXPECT_THAT(add_root2, GmockMatch(match::Add(
+                  match::Parameter(0).WithShape(BF16, {}),
+                  match::Parameter(1).WithShape(BF16, {})
+                                         )
+                                         )
+                  );
+  const std::string hlo_string3 = R"(
+    HloModule module
+
+    ENTRY add {
+      p0 = f32[] parameter(0)
+      p1 = bf16[] parameter(1)
+      p0_convert16 = bf16[] convert(p0)
+      p0_convert = f32[] convert(p0_convert16)
+      p1_convert = f32[] convert(p1)
+      ROOT add_convert = f32[] add(p0_convert, p1_convert)
+    }
+
+    
+    )";
+    TF_ASSERT_OK_AND_ASSIGN(auto m3, ParseAndReturnVerifiedModule(hlo_string3));
+    //expect changed =true
+    EXPECT_TRUE(AlgebraicSimplifier(default_options_).Run(m3.get()).value());
+    HloInstruction* add_root3 = m3->entry_computation()->root_instruction();
+    EXPECT_EQ(add_root3->operand(0)->opcode(), HloOpcode::kParameter);
+    EXPECT_EQ(add_root3->operand(1)->opcode(), HloOpcode::kConvert);
+
+}
 
 TEST_F(AlgebraicSimplifierTest, KeepInt4ConvertConstant) {
   const std::string hlo_string = R"(
