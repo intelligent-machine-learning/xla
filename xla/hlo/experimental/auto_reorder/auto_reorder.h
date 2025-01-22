@@ -26,6 +26,41 @@ inline NodeType GetEdgeTypeOfInst(const HloInstruction& hlo) {
       case HloOpcode::kAllGather:
       case HloOpcode::kAllReduce:
       case HloOpcode::kCollectivePermute:
+      {
+        //check replica_groups,{{0,8},{1,9}} means inter-replica communication
+        // {0,1,2,3,4,5,6,7} means intra-replica communication
+        // TODO: 8 is hard code?
+        //this hlo is done,we need to check it's operand is done
+        bool in_same_replica = true;
+        for (auto i = 0; i < hlo.operand_count(); i++) {
+          auto src_inst = hlo.operand(i);
+          auto replica_groups = src_inst->replica_groups();
+          if(replica_groups.empty()){
+            return NodeType::kCommunication;
+          }
+          for (auto replica_group : replica_groups)
+          {
+            // if device_id//8 all equal, it is intra-replica communication
+            const auto& ids = replica_group.replica_ids();
+            if (ids.empty()) {
+              continue;
+            }
+            int init_device_divide = ids.Get(0) / 8;
+            for (int i = 0; i < ids.size(); i++) {
+              if (ids.Get(i) / 8 != init_device_divide) {
+                in_same_replica = false;
+                break;
+              }
+            }
+          }
+        }
+        if(in_same_replica){
+          return NodeType::kInnerCommunication;
+        }
+        else{
+          return NodeType::kCommunication;
+        }
+      }
       case HloOpcode::kCopy:
         return NodeType::kCommunication;
       default:
@@ -79,6 +114,7 @@ class AutoReorderPass : public HloModulePass {
                               computation, latency_estimator_.get(),
                               async_tracker_.get(), shape_size_bytes_)));
   }
+  static int64_t GetSpaceCost(const HloInstruction* instr);
 
  private:
   std::unique_ptr<AsyncTracker> async_tracker_;

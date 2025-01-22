@@ -62,7 +62,7 @@ class MarkEventReadyOnExit {
 
   MarkEventReadyOnExit(const MarkEventReadyOnExit&) = delete;
   MarkEventReadyOnExit& operator=(const MarkEventReadyOnExit&) = delete;
-  MarkEventReadyOnExit(MarkEventReadyOnExit&&) noexcept = default;
+  MarkEventReadyOnExit(MarkEventReadyOnExit&&) = default;
   MarkEventReadyOnExit& operator=(MarkEventReadyOnExit&&) noexcept = default;
 
   ~MarkEventReadyOnExit() {

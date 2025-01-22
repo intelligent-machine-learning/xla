@@ -37,6 +37,31 @@ tsl::Status AutoReorderPass::RebuildHloOrdering(
   }
   return absl::OkStatus();
 }
+
+int64_t AutoReorderPass::GetSpaceCost(const HloInstruction* instr) {
+  // if instr is param, the space will keep on memory,so it's cost is shape
+  // dont't consider buffer size
+  HloCostAnalysis::ShapeSizeFunction shape_size_bytes =
+      [&shape_size_bytes](const Shape& shape) -> int64_t {
+    int64_t shape_size = 0;
+    if (shape.IsTuple()) {
+      for (auto& sub_shape : shape.tuple_shapes()) {
+        shape_size += shape_size_bytes(sub_shape);
+      }
+      return shape_size;
+    }
+    return ShapeUtil::ByteSizeOfElements(shape);
+  };
+  int64_t space_cost = 0;
+  //add output_size
+  ShapeUtil::ForEachSubshape(instr->shape(), [&](const Shape& subshape,
+                                                 const ShapeIndex& index) {
+    // SpaceCost = output_size - input_size
+    space_cost += shape_size_bytes(subshape);
+  });
+  return space_cost;
+}
+
 tsl::StatusOr<std::vector<HloInstruction*>>
 AutoReorderPass::ScheduleComputation(HloComputation* computation) {
   int64_t current_pos = 0;
@@ -68,6 +93,8 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
         VLOG(2) << "operand_lp_node not found:" << from_inst->ToShortString();
         return false;
       }
+      //lp_node space_cost;
+      
       auto operand_node = schedule_graph.GetNode(from_inst);
       CostType edge_cost =
           latency_estimator_->GetLatencyBetween(operand_node, instr_node);
@@ -95,6 +122,7 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
       auto current_inst_lp_node =
           solver_->FindLPNodeOrCreate(instr, cost, node_type);
       // add current node as constraint
+      current_inst_lp_node->SetSpaceCost(GetSpaceCost(instr));
 
       if (async_tracker_->IsSupportedAsyncDone(*instr)) {
         // create a edge, which is communication
@@ -149,6 +177,7 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
       // }
       auto current_inst_lp_node =
           solver_->FindLPNodeOrCreate(instr, cost, NodeType::kCompute);
+      current_inst_lp_node->SetSpaceCost(GetSpaceCost(instr));
       // when adding edge node, current node have no add to Constraint?
       for (auto i = 0; i < instr->operand_count(); i++) {
         auto operand_inst = instr->operand(i);

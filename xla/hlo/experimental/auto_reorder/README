@@ -30,7 +30,7 @@ build auto reorder tools, convert xplane to sqlite file
 #download tools:
 wget http://alipay-cognition.cn-hangzhou.alipay.aliyun-inc.com/datacube2/packages/library/lynx_cu124_1030/convert_xplane_tools -O convert_xplane_tools
 chmod +x ./convert_xplane_tools
-LD_LIBRARY_PATH=/opt/conda/lib/python3.8/site-packages/torch ./convert_xplane_tools <xplane_dir> <output_filename>
+LD_LIBRARY_PATH=/opt/conda/lib/python3.8/site-packages/torch/lib ./convert_xplane_tools <xplane_dir> <output_filename>
 #example:
 ./convert_xplane_tools /root/profiler/llama_xla_trace_1n8g_b10/plugins/profile/2024_07_23_15_00_11/ llama_xla_trace_1n8g_b10.db
 ```

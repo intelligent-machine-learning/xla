@@ -387,6 +387,7 @@ LPSchedulerFunc(tsl::Status)::SolveUsingORTools() {
   // constraint:"<<cp_model_.NumConstraints();
   VLOG(1) << "Solving:" << node_to_task_.size() << " nodes";
   operations_research::sat::SatParameters parameters;
+  
   parameters.set_max_time_in_seconds(reorder::get_autoreorder_timeout());
   parameters.set_random_seed(19260817);
   // Currently, at level 1 we detect them in presolve and try
@@ -398,15 +399,23 @@ LPSchedulerFunc(tsl::Status)::SolveUsingORTools() {
     parameters.set_log_search_progress(true);
   }
   parameters.set_num_search_workers(xla::reorder::get_autoreorder_worker());
-  auto model = cp_model_.Build();
+  operations_research::sat::Model sat_model;
+  // auto model = cp_model_.Build();
   // model is operations_research::sat::CpModelProto type
   // need operations_research::MPModelProto& type, so we need to convert it
   // model
-  const operations_research::sat::CpSolverResponse response =
-      operations_research::sat::SolveWithParameters(model, parameters);
+  
+  sat_model.Add(operations_research::sat::NewFeasibleSolutionObserver([&](const operations_research::sat::CpSolverResponse& r) {
+    // 获得当前解和理论最优解之间的距离
+    CostType current_makespan = r.objective_value();
+    std::cout<<"current_makespan:"<<current_makespan<<" best_bound:"<<r.best_objective_bound()<<std::endl;
+  }));
+  sat_model.Add(operations_research::sat::NewSatParameters(parameters));
+  const operations_research::sat::CpSolverResponse response = SolveCpModel(cp_model_.Build(), &sat_model);
+
   uint64_t solve_time = response.wall_time();
   VLOG(1) << "Solve finish:" << response.status()
-          << " solve time:" << solve_time;
+          << " solve time:" << solve_time<<" best_objective_bound:"<<response.best_objective_bound();
 
   if (response.status() == operations_research::sat::CpSolverStatus::OPTIMAL ||
       response.status() == operations_research::sat::CpSolverStatus::FEASIBLE) {
@@ -487,12 +496,14 @@ LPSchedulerFunc(std::string)::SaveJSON(std::string filename) const {
       json_out << ",\n{ \"uuid\": \"" << node->UUID() << "\",\"typename\": \""
                << name << "\", \"name\": " << GetNodeName(node)
                << ", \"cost\": " << node->GetCost() << ", \"opcode\": \""
-               << node->GetOpcode() << "\"}";
+               << node->GetOpcode() << "\", \"space_cost\": "
+               << node->GetSpaceCost() << "}";
     } else {
       json_out << "{ \"uuid\": \"" << node->UUID() << "\",\"typename\": \""
                << name << "\", \"name\": " << GetNodeName(node)
                << ", \"cost\": " << node->GetCost() << ", \"opcode\": \""
-               << node->GetOpcode() << "\" }";
+               << node->GetOpcode() << "\", \"space_cost\": "
+               << node->GetSpaceCost() << " }";
     }
     node_count++;
   }

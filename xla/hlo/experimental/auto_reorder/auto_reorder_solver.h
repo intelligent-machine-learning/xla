@@ -54,8 +54,9 @@ xla::SolveMethod get_solve_method();
 enum class NodeType {
   kCompute = 0,
   kCommunication = 1,
-  kAsynchronous = 2,
-  kCopy = 3,
+  kInnerCommunication = 2,
+  kAsynchronous = 3,
+  kCopy = 4,
   kUnknown = 99,
 };
 
@@ -65,6 +66,8 @@ inline std::string NodeTypeToString(NodeType nodetype) {
       return "compute";
     case NodeType::kCommunication:
       return "communication";
+    case NodeType::kInnerCommunication:
+      return "inner_communication";
     case NodeType::kAsynchronous:
       return "asynchronous";
     //memory copy, there is no d2h and h2d
@@ -135,12 +138,15 @@ class LPNode {
   void SetHintStart(CostType start) { hint_start_ = start; }
   HloOpcode GetOpcode() {return opcode_;};
   void SetOpcode(HloOpcode opcode) { opcode_ = opcode; }
-
+  // consider space cost
+  int64_t GetSpaceCost() {return space_cost_;};
+  void SetSpaceCost(int64_t space_cost) {space_cost_ = space_cost;};
   NodeType GetType() const{ return type_; }
  protected:
   std::vector<std::tuple<LPNode*, CostType, NodeType>> deps_;
   bool frozen_ = false;
   CostType cost_;
+  int64_t space_cost_ = 0;
   NodeType type_;
   CostType startat_;
   HloOpcode opcode_;
