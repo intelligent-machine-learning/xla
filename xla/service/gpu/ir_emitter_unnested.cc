@@ -3581,18 +3581,27 @@ absl::Status IrEmitterUnnested::EmitHloInstruction(
 
   return Internal("Unhandled HLO instruction");
 }
-
+// only log once
+static bool logged = false;
 absl::Status IrEmitterUnnested::EmitHloComputation(
     const HloComputation* computation) {
   const HloSchedule& schedule = computation->parent()->schedule();
   if (!schedule.is_computation_scheduled(computation))
     return Internal("Sequence not found for computation: %s",
                     computation->name());
-
+  
+  if (!logged) {
+    VLOG(2) << "EmitHloComputation: " << computation->name();
+  }
   const HloInstructionSequence& sequence = schedule.sequence(computation);
   for (HloInstruction* instr : sequence.instructions()) {
+    if (!logged) {
+      VLOG(2) << "EmitHloInstruction: " << instr->ToShortString();
+    }
     TF_RETURN_IF_ERROR(EmitHloInstruction(instr));
   }
+  logged = true;
+
   return absl::OkStatus();
 }
 
