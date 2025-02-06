@@ -332,7 +332,7 @@ class AlgebraicSimplifierOptions {
   bool raise_slice_and_reduce_through_dot_{false};
   double raise_slice_and_reduce_through_dot_threshold_{2.0};
   bool use_convert_constant_folding_{false};
-  bool use_convert_lossy_optimization_{true};
+  bool use_convert_lossy_optimization_{false};
   Metadata metadata_;
 };
 
