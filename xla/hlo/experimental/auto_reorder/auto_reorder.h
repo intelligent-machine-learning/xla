@@ -54,8 +54,10 @@ inline NodeType GetEdgeTypeOfInst(const HloInstruction& hlo) {
             }
           }
         }
+        //TODO: need change xla execution thread before enable this feature
         if(in_same_replica){
-          return NodeType::kInnerCommunication;
+          return NodeType::kCommunication;
+          // return NodeType::kInnerCommunication;
         }
         else{
           return NodeType::kCommunication;
