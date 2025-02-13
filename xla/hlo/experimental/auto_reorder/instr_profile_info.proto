@@ -56,18 +56,15 @@ message InstEdgeJSON {
   double cost=4;
 }
 message AntOPTSolverNodeStartEnd{
-  string node_uuid=1;
-  uint32 start_time=2;
-  uint32 end_time=3;
+  string uuid=1;
+  string typename=2;
+  string name=3;
+  uint32 startTime=4;
+  uint32 endTime=5;
 }
 
 message AntOPTSolverResponse{
-  string result_flag=1;
-  uint32 pre_process_ms=2;
-  uint32 build_model_ms=3;
-  uint32 solve_ms=4;
-  uint32 total_solve_time=6;
   //finalized_node_start_end_time is list
-  repeated AntOPTSolverNodeStartEnd finalized_node_start_end_time=5;
+  repeated AntOPTSolverNodeStartEnd nodes=5;
   
 }

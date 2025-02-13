@@ -251,8 +251,8 @@ LPSchedulerFunc(tsl::Status)::SolveUsingAntOPT(SolveMethod solve_method) {
   }
   uint32_t solved_node_count = 0;
   uint32_t solved_edge_count = 0;
-  for (auto node_item : solve_response.finalized_node_start_end_time()) {
-    std::string node_uuid = node_item.node_uuid();
+  for (auto node_item : solve_response.nodes()) {
+    std::string node_uuid = node_item.uuid();
     int32_t find_idx = node_uuid.find("__");
     if (find_idx > 0) {  // it's edge
       solved_edge_count += 1;
@@ -261,7 +261,7 @@ LPSchedulerFunc(tsl::Status)::SolveUsingAntOPT(SolveMethod solve_method) {
     // convert uuid to int
     solved_node_count += 1;
     int uuid_int = std::stoi(node_uuid);
-    int start_time = node_item.start_time();
+    int start_time = node_item.startTime();
     uuid2node[uuid_int]->SetStart(start_time);
     node_starttime_.emplace(uuid_int, start_time);
   }
