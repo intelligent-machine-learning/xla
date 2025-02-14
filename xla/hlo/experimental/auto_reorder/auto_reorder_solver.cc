@@ -261,7 +261,7 @@ LPSchedulerFunc(tsl::Status)::SolveUsingAntOPT(SolveMethod solve_method) {
     // convert uuid to int
     solved_node_count += 1;
     int uuid_int = std::stoi(node_uuid);
-    int start_time = node_item.startTime();
+    int start_time = node_item.starttime();
     uuid2node[uuid_int]->SetStart(start_time);
     node_starttime_.emplace(uuid_int, start_time);
   }

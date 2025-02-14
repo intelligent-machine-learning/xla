@@ -1332,7 +1332,7 @@ TEST_F(AutoReorderingTest, ReorderPassAntOPT) {
   EXPECT_TRUE(st.ok());
   int pointer_size_ = 4;
   Backend& test_backend = backend();
-  auto gpu_device_info = TestGpuDeviceInfo::RTXA6000DeviceInfo();
+  auto gpu_device_info = TestGpuDeviceInfo::RTXA6000DeviceInfo(se::CudaComputeCapability::Ampere());
   const int64_t scheduler_mem_limit = xla::gpu::GetSchedulerMemoryLimit(
       hlo_module.get(), gpu_device_info, pointer_size_);
   SchedulerConfig config = GetSchedulerConfig(scheduler_mem_limit);
@@ -1564,15 +1564,16 @@ TEST_F(AutoReorderingTest, FinetuneOrder) {
   gpu_latency_estimator->SetInstructionBetween(ar_done_p4, 3);
 
   // let module have one schedule
-  TF_ASSIGN_OR_RETURN(
-      HloSchedule schedule,
-      ScheduleModule(hlo_module.get(), [](const BufferValue& buffer) {
+  StatusOr<HloSchedule> schedule_or_status = ScheduleModule(hlo_module.get(), [](const BufferValue& buffer) {
         return ShapeUtil::ByteSizeOf(buffer.shape(),
                                      /*pointer_size=*/sizeof(void*));
-      }));
-
-  TF_RETURN_IF_ERROR(hlo_module->set_schedule(std::move(schedule)));
-  auto status = schedule.Verify();
+      });
+  EXPECT_TRUE(schedule_or_status.ok());
+  HloSchedule schedule = schedule_or_status.value();
+  absl::Status status = hlo_module->set_schedule(std::move(schedule));
+  // TF_RETURN_IF_ERROR(hlo_module->set_schedule(std::move(schedule)));
+  EXPECT_TRUE(status.ok());
+  status = schedule.Verify();
   EXPECT_TRUE(status.ok());
 
   auto status2 = RunScheduler(hlo_module.get(), sched_config,
@@ -1836,7 +1837,7 @@ TEST_F(AutoReorderingTest, ReorderPassDataAnalyse) {
   std::ofstream csv_out("/tmp/test_ret.csv");
   csv_out
       << "exp_id,nnodes,communication_rate,auto_reorder_cost,post_order_cost,"
-         "xla_hiding_order_cost,xla_hiding_solve_time,auto_reorder_solve_time"
+         "xla_hiding_order_cost,auto_reorder_memory_pressure_peak,post_order_memory_pressure_peak,xla_hiding_memory_pressure_peak"
       << std::endl;
   for (auto communication_rate : communication_rates) {
     for (size_t i = 0; i < repeat_time; i++) {
@@ -1872,6 +1873,7 @@ TEST_F(AutoReorderingTest, ReorderPassDataAnalyse) {
                                    gpu_latency_estimator2.get());
       EXPECT_TRUE(statics.ok());
       auto auto_reorder_cost = statics.value().total_cycles;
+      auto auto_reorder_memory_pressure_peak = statics.value().memory_pressure_peak;
       // compare post order vs reorder
       auto post_insts_order =
           hlo_module->entry_computation()->MakeInstructionPostOrder();
@@ -1882,7 +1884,7 @@ TEST_F(AutoReorderingTest, ReorderPassDataAnalyse) {
                               gpu_latency_estimator2.get());
       EXPECT_TRUE(statics.ok());
       auto post_order_cost = statics.value().total_cycles;
-
+      auto post_order_memory_pressure_peak = statics.value().memory_pressure_peak;
       // run LatencyHidingScheduler for compare
       // NOTICE:  DO NOT using gpu_latency_estimator after
       // std::move(gpu_latency_estimator)
@@ -1898,10 +1900,11 @@ TEST_F(AutoReorderingTest, ReorderPassDataAnalyse) {
                               gpu_latency_estimator2.get());
       EXPECT_TRUE(statics.ok());
       auto xla_hiding_order_cost = statics.value().total_cycles;
+      auto xla_hiding_memory_pressure_peak = statics.value().memory_pressure_peak;
       csv_out << i << "," << nnodes << "," << communication_rate << ","
               << auto_reorder_cost << "," << post_order_cost << ","
-              << xla_hiding_order_cost << "," << xla_hiding_solve_time << ","
-              << auto_reorder_solve_time << std::endl;
+              << xla_hiding_order_cost << "," << auto_reorder_memory_pressure_peak << ","
+              << post_order_memory_pressure_peak << "," << xla_hiding_memory_pressure_peak << std::endl;
     }
   }
 }
@@ -1910,7 +1913,7 @@ TEST_F(AutoReorderingTest, ReorderPassAntOPTDataAnalyse) {
     GTEST_SKIP() << "Skipping single test because longtime";
   }
 
-  setenv("XLA_AUTOREORDER_METHOD", "antopt", 1);
+  setenv("XLA_AUTOREORDER_METHOD", "antoptremote", 1);
   absl::Cleanup env_cleanup = [&]() { unsetenv("XLA_AUTOREORDER_METHOD"); };
   // GTEST_SKIP() << "Skipping single test because longtime";
   std::srand(kRandomSeed);
@@ -1926,7 +1929,7 @@ TEST_F(AutoReorderingTest, ReorderPassAntOPTDataAnalyse) {
   std::ofstream csv_out("/tmp/test_ret_antopt.csv");
   csv_out
       << "exp_id,nnodes,communication_rate,auto_reorder_cost,post_order_cost,"
-         "xla_hiding_order_cost,xla_hiding_solve_time,auto_reorder_solve_time"
+         "xla_hiding_order_cost,auto_reorder_memory_pressure_peak,post_order_memory_pressure_peak,xla_hiding_memory_pressure_peak"
       << std::endl;
   for (auto communication_rate : communication_rates) {
     for (size_t i = 0; i < repeat_time; i++) {
@@ -1962,6 +1965,7 @@ TEST_F(AutoReorderingTest, ReorderPassAntOPTDataAnalyse) {
                                    gpu_latency_estimator2.get());
       EXPECT_TRUE(statics.ok());
       auto auto_reorder_cost = statics.value().total_cycles;
+      auto auto_reorder_memory_pressure_peak = statics.value().memory_pressure_peak;
       // compare post order vs reorder
       auto post_insts_order =
           hlo_module->entry_computation()->MakeInstructionPostOrder();
@@ -1972,7 +1976,7 @@ TEST_F(AutoReorderingTest, ReorderPassAntOPTDataAnalyse) {
                               gpu_latency_estimator2.get());
       EXPECT_TRUE(statics.ok());
       auto post_order_cost = statics.value().total_cycles;
-
+      auto post_order_memory_pressure_peak = statics.value().memory_pressure_peak;
       // run LatencyHidingScheduler for compare
       // NOTICE:  DO NOT using gpu_latency_estimator after
       // std::move(gpu_latency_estimator)
@@ -1990,8 +1994,8 @@ TEST_F(AutoReorderingTest, ReorderPassAntOPTDataAnalyse) {
       auto xla_hiding_order_cost = statics.value().total_cycles;
       csv_out << i << "," << nnodes << "," << communication_rate << ","
               << auto_reorder_cost << "," << post_order_cost << ","
-              << xla_hiding_order_cost << "," << xla_hiding_solve_time << ","
-              << auto_reorder_solve_time << std::endl;
+              << xla_hiding_order_cost << "," << auto_reorder_memory_pressure_peak << ","
+              << post_order_memory_pressure_peak << "," << xla_hiding_memory_pressure_peak << std::endl;
     }
   }
 }
