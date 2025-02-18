@@ -230,8 +230,8 @@ AutoReorderPass::ScheduleComputation(HloComputation* computation) {
   auto status = solver_->Solve(solve_method);
   if (reorder::solve_debug) {
     // save to pid related file
-    solver_->SaveGantt(absl::StrCat("gantt_", computation->name()));
-    solver_->SaveGraphviz(absl::StrCat("gantt_", computation->name()));
+    solver_->SaveGantt(absl::StrCat("gantt_",solve_method, computation->name()));
+    solver_->SaveGraphviz(absl::StrCat("gantt_",solve_method, computation->name()));
   }
 
   if (status.ok()) {
